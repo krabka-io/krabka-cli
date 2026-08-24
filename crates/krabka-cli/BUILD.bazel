@@ -1,3 +1,4 @@
+load("@rules_rust//rust:defs.bzl", "rust_doc")
 load("//bazel:defs.bzl", "crate_binary", "crate_tests")
 load("//tools/lint:linters.bzl", "clippy_test")
 
@@ -25,9 +26,16 @@ crate_tests(
     lib = "krabka",
 )
 
-# `crate_library` emits this for every other crate in the organisation; without
-# a library here it has to be asked for, or the binary ships unlinted.
+# `crate_library` emits these for every other crate in the organisation. With no
+# library here they have to be asked for: without the first the binary ships
+# unlinted, and without the second `//crates/...` renders no rustdoc at all and
+# the docs job fails on an empty upload rather than on anything being wrong.
 clippy_test(
     name = "krabka_clippy",
     srcs = [":krabka"],
+)
+
+rust_doc(
+    name = "krabka_doc",
+    crate = ":krabka",
 )
