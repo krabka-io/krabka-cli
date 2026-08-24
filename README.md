@@ -4,8 +4,12 @@ The [krabka](https://github.com/krabka-io) operator CLI, `krabka`.
 
 ## Subcommands
 
+### Built in
+
 `krabka format` prepares a fresh log directory, optionally seeding SCRAM
 credentials and KIP-1022 feature levels.
+
+### Plugins
 
 Everything else is a plugin. An unrecognised subcommand is delegated to
 `krabka-<name>` on `PATH`, the way `git` finds `git-foo` and `cargo` finds
@@ -15,6 +19,11 @@ Everything else is a plugin. An unrecognised subcommand is delegated to
 krabka gres list-tenants --bootstrap localhost:9092
 # runs: krabka-gres list-tenants --bootstrap localhost:9092
 ```
+
+Each plugin is a separate install, and `krabka --help` lists the known ones:
+
+- `krabka restore` runs `krabka-restore`, a point-in-time restore of a cluster data directory from a tiered-storage archive. It ships from [`krabka-broker`](https://github.com/krabka-io/krabka-broker), so install it separately.
+- `krabka gres` runs `krabka-gres`, which ships from the gres repository.
 
 That is what lets a subcommand live in the repository that owns the thing it
 operates on. Compiling them in instead would make this binary's dependency
