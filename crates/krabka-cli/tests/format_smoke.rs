@@ -1,4 +1,4 @@
-//! Smoke tests for the `crabka format` binary.
+//! Smoke tests for the `krabka format` binary.
 //!
 //! Each test runs the binary as a subprocess. It then asserts on the exit
 //! code and on the on-disk output. These tests show that the clap surface and
@@ -9,13 +9,13 @@ use std::process::Command;
 use crabka_metadata::MetadataRecord;
 
 fn run_format(dir: &tempfile::TempDir, args: &[&str]) -> std::process::Output {
-    let bin = env!("CARGO_BIN_EXE_crabka");
+    let bin = env!("CARGO_BIN_EXE_krabka");
     let mut command = Command::new(bin);
     command
         .args(["format", "--log-dir", dir.path().to_str().unwrap()])
         .args(args)
         .output()
-        .expect("run crabka format")
+        .expect("run krabka format")
 }
 
 fn bootstrap_records(dir: &tempfile::TempDir) -> Vec<MetadataRecord> {

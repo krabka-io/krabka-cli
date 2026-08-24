@@ -1,4 +1,4 @@
-//! `crabka format` subcommand.
+//! `krabka format` subcommand.
 //!
 //! Writes bootstrap metadata for a fresh broker:
 //! - a randomly-generated (or operator-supplied) cluster id
@@ -164,7 +164,7 @@ fn parse_feature_spec(s: &str) -> Result<(String, i16), String> {
     Ok((name.to_string(), level))
 }
 
-/// Resolve `crabka format`'s KIP-1022 feature flags into the bootstrap
+/// Resolve `krabka format`'s KIP-1022 feature flags into the bootstrap
 /// `metadata.version` level and the per-feature override map, applying the
 /// validation `kafka-storage format` performs:
 ///
@@ -548,7 +548,7 @@ pub async fn run(args: FormatArgs) -> i32 {
     let dynamic_format = match is_dynamic_format(&args) {
         Ok(dynamic) => dynamic,
         Err(e) => {
-            eprintln!("crabka format: {e}");
+            eprintln!("krabka format: {e}");
             return EXIT_INVALID_FEATURE;
         }
     };
@@ -560,7 +560,7 @@ pub async fn run(args: FormatArgs) -> i32 {
             Ok(mut it) => {
                 if it.next().is_some() {
                     eprintln!(
-                        "crabka format: refusing to overwrite non-empty log_dir {}",
+                        "krabka format: refusing to overwrite non-empty log_dir {}",
                         args.log_dir.display(),
                     );
                     return EXIT_DIRTY_LOG_DIR;
@@ -568,7 +568,7 @@ pub async fn run(args: FormatArgs) -> i32 {
             }
             Err(e) => {
                 eprintln!(
-                    "crabka format: cannot read log_dir {}: {e}",
+                    "krabka format: cannot read log_dir {}: {e}",
                     args.log_dir.display(),
                 );
                 return EXIT_BOOTSTRAP_FAIL;
@@ -578,7 +578,7 @@ pub async fn run(args: FormatArgs) -> i32 {
 
     if let Err(e) = std::fs::create_dir_all(&args.log_dir) {
         eprintln!(
-            "crabka format: cannot create log_dir {}: {e}",
+            "krabka format: cannot create log_dir {}: {e}",
             args.log_dir.display(),
         );
         return EXIT_BOOTSTRAP_FAIL;
@@ -595,7 +595,7 @@ pub async fn run(args: FormatArgs) -> i32 {
     let initial_voters = match build_initial_voters(&args, generated_directory_id) {
         Ok(voters) => voters,
         Err(e) => {
-            eprintln!("crabka format: {e}");
+            eprintln!("krabka format: {e}");
             return EXIT_BOOTSTRAP_FAIL;
         }
     };
@@ -610,11 +610,11 @@ pub async fn run(args: FormatArgs) -> i32 {
         )
     };
     if args.directory_id.is_some() && directory_id != generated_directory_id {
-        eprintln!("crabka format: --directory-id must match the local --initial-controllers entry");
+        eprintln!("krabka format: --directory-id must match the local --initial-controllers entry");
         return EXIT_BOOTSTRAP_FAIL;
     }
     if let Err(e) = write_meta_properties(&args.log_dir, cluster_id, directory_id) {
-        eprintln!("crabka format: {e}");
+        eprintln!("krabka format: {e}");
         return EXIT_BOOTSTRAP_FAIL;
     }
 
@@ -645,7 +645,7 @@ pub async fn run(args: FormatArgs) -> i32 {
         match resolve_format_features(args.release_version.as_deref(), &args.feature) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("crabka format: {e}");
+                eprintln!("krabka format: {e}");
                 return EXIT_INVALID_FEATURE;
             }
         };
@@ -662,14 +662,14 @@ pub async fn run(args: FormatArgs) -> i32 {
         if spec.iterations < u32::try_from(MIN_SCRAM_ITERATIONS).expect("SCRAM minimum is positive")
         {
             eprintln!(
-                "crabka format: iterations must be >= {MIN_SCRAM_ITERATIONS}, got {} for user {}",
+                "krabka format: iterations must be >= {MIN_SCRAM_ITERATIONS}, got {} for user {}",
                 spec.iterations, spec.name,
             );
             return EXIT_LOW_ITERATIONS;
         }
         let mut salt = vec![0u8; 16];
         if let Err(e) = SystemRandom::new().fill(&mut salt) {
-            eprintln!("crabka format: rng failure: {e}");
+            eprintln!("krabka format: rng failure: {e}");
             return EXIT_BOOTSTRAP_FAIL;
         }
         let cred = hash_scram_password_with_salt(
@@ -696,12 +696,12 @@ pub async fn run(args: FormatArgs) -> i32 {
         && let Err(e) =
             write_dynamic_checkpoint(&args.log_dir, cluster_id, &raft_control_records, &records)
     {
-        eprintln!("crabka format: checkpoint failed: {e}");
+        eprintln!("krabka format: checkpoint failed: {e}");
         return EXIT_BOOTSTRAP_FAIL;
     }
 
     if let Err(e) = write_bootstrap_files(&args.log_dir, cluster_id, &records) {
-        eprintln!("crabka format: bootstrap failed: {e}");
+        eprintln!("krabka format: bootstrap failed: {e}");
         return EXIT_BOOTSTRAP_FAIL;
     }
 

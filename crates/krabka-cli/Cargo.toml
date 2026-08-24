@@ -1,21 +1,21 @@
 [package]
-name = "crabka-cli"
+name = "krabka-cli"
 publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Operator CLI for Crabka (binary: `crabka`)"
-repository = "https://github.com/robot-head/crabka"
-homepage = "https://github.com/robot-head/crabka"
-documentation = "https://docs.rs/crabka-cli"
+description = "Operator CLI for Krabka (binary: `krabka`)"
+repository = "https://github.com/krabka-io/krabka-cli"
+homepage = "https://github.com/krabka-io/krabka-cli"
+documentation = "https://docs.rs/krabka-cli"
 readme = "README.md"
-keywords = ["kafka", "cli", "operator", "crabka"]
+keywords = ["kafka", "cli", "operator", "krabka"]
 categories = ["command-line-utilities"]
 
 [[bin]]
-name = "crabka"
+name = "krabka"
 path = "src/main.rs"
 
 [lints]
@@ -25,13 +25,11 @@ workspace = true
 assert2 = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 crabka-security = { workspace = true }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
-crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
-crabka-gres-balancer = { version = "0.4.0", path = "../gres-balancer" }
-crabka-gres-control = { version = "0.4.0", path = "../gres-control" }
+crabka-client-core = { version = "0.4.0" }
+crabka-client-admin = { version = "0.4.0" }
 crabka-units = { workspace = true }
-crabka-metadata = { version = "0.4.0", path = "../metadata" }
-crabka-raft = { version = "0.4.0", path = "../raft" }
+crabka-metadata = { version = "0.4.0" }
+crabka-raft = { version = "0.4.0" }
 derive_more = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
@@ -45,5 +43,5 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-crabka-broker = { version = "0.4.0", path = "../broker" }
+crabka-broker = { version = "0.4.0" }
 tempfile = { workspace = true }

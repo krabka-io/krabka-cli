@@ -1,0 +1,94 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# The cargo-mutants pin that Bazel builds //tools/mutants from is not a member.
+exclude = ["tools/mutants"]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["The Crabka Authors"]
+rust-version = "1.97.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# These three opt-outs are intentional while the public API is still pre-1.0;
+# re-evaluate once API surfaces stabilise.
+clone_on_copy = "warn"
+
+[profile.mutants]
+inherits = "test"
+debug = "none"
+
+[profile.dev]
+# Split debug info into a separate file (reduces linker work)
+split-debuginfo = "packed"
+
+[workspace.dependencies]
+# Expressive test assertions: `assert!(a == b)` / `check!(..)` with
+# captured-expression diagnostics. Used for all test assertions workspace-wide.
+assert2 = "0.4"
+clap = { version = "4", features = ["derive"] }
+# Derive boilerplate for domain newtypes (Display/From/Into/Deref/AsRef/
+# Constructor/FromStr and numeric ops) so wrappers over wire/domain primitives
+# stay one-liners. See docs/style_guides/code_style_guide.md#newtypes-for-domain-values.
+derive_more = { version = "2", features = ["display", "from", "into", "deref", "as_ref", "constructor", "from_str", "add", "add_assign", "mul", "sum"] }
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde-wincode = "=0.1.2"
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+# wincode + serde-wincode replace bincode for serde-derived wire shapes.
+# Keep these paired so `SerdeCompat` implements this wincode's traits.
+wincode = "=0.6"
+
+# First-party crates inherited by more than one member.
+crabka-security = "0.4.0"
+crabka-units = "0.4.0"
+
+# Sibling repositories, pinned by revision. These crates are declared
+# against crates.io above and in the member manifests; the patch below is
+# the single place a sibling revision is bumped.
+#
+# Every crate each sibling publishes is listed, not only the ones this
+# repo names directly: cargo ignores a dependency's own patch table, so a
+# crate reached transitively would otherwise come from the registry while
+# its git twin is also in the graph.
+[patch.crates-io]
+crabka-audit = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-authz = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-broker = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-format = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-kraft-core = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-log = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-logfmt = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-object-store = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-raft = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-records-legacy = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-remote-storage = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-remote-storage-topic = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-telemetry = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-throttle = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-verified = { git = "https://github.com/krabka-io/krabka-broker", rev = "a53aa0a4630ba58927e50a4721a6c894d3786478" }
+crabka-client-admin = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "dbea46923441c19b7858d7e3278ca5b77af2e00b" }
+crabka-client-consumer = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "dbea46923441c19b7858d7e3278ca5b77af2e00b" }
+crabka-client-core = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "dbea46923441c19b7858d7e3278ca5b77af2e00b" }
+crabka-client-producer = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "dbea46923441c19b7858d7e3278ca5b77af2e00b" }
+crabka-compression = { git = "https://github.com/krabka-io/krabka-protocol", rev = "1e164af6f10275f14696418e61d60d5930788c1a" }
+crabka-ids = { git = "https://github.com/krabka-io/krabka-protocol", rev = "1e164af6f10275f14696418e61d60d5930788c1a" }
+crabka-kafka-tap = { git = "https://github.com/krabka-io/krabka-protocol", rev = "1e164af6f10275f14696418e61d60d5930788c1a" }
+crabka-metadata = { git = "https://github.com/krabka-io/krabka-protocol", rev = "1e164af6f10275f14696418e61d60d5930788c1a" }
+crabka-protocol = { git = "https://github.com/krabka-io/krabka-protocol", rev = "1e164af6f10275f14696418e61d60d5930788c1a" }
+crabka-security = { git = "https://github.com/krabka-io/krabka-protocol", rev = "1e164af6f10275f14696418e61d60d5930788c1a" }
+crabka-trace-context = { git = "https://github.com/krabka-io/krabka-protocol", rev = "1e164af6f10275f14696418e61d60d5930788c1a" }
+crabka-units = { git = "https://github.com/krabka-io/krabka-protocol", rev = "1e164af6f10275f14696418e61d60d5930788c1a" }
+crabka-voters = { git = "https://github.com/krabka-io/krabka-protocol", rev = "1e164af6f10275f14696418e61d60d5930788c1a" }

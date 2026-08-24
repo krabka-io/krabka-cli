@@ -1,0 +1,23 @@
+# cargo-mutants configuration — https://mutants.rs
+#
+# Read by a local `cargo mutants` run, and by the `cargo_mutants_test` targets
+# via `--@rules_rs_mutants//mutants:config` in //.bazelrc. Both paths see the
+# same file, and the paths written here are the workspace paths the results
+# print.
+
+test_tool = "nextest"
+profile = "mutants"
+
+# Most of this crate's coverage comes from the suites under tests/, which spawn
+# the built binary rather than calling into it. Give every mutant a generous
+# timeout relative to the unmutated baseline so a legitimately-slower run is not
+# misreported as a timeout survivor.
+timeout_multiplier = 5.0
+minimum_test_timeout = 120
+
+exclude_globs = [
+    # The entrypoint: parse CLI args, build a config, connect, run a role until
+    # a signal. No unit-testable decision in it, and the fifteen CLI suites
+    # under tests/ drive it end to end.
+    "crates/observability-demo-app/src/main.rs",
+]

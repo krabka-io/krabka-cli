@@ -1,0 +1,10 @@
+# Blank lines carry structure in the demo compose file and the alerting rules --
+# they separate service blocks in documents people are meant to read. yamlfmt
+# drops them by default, which reflows those files into one wall.
+#
+# `drop_merge_tag` undoes the other thing it does unasked: the underlying YAML
+# library rewrites every `<<: *anchor` as `!!merge <<: *anchor`, an explicit
+# YAML 1.1 tag that Compose does not accept.
+formatter:
+  retain_line_breaks: true
+  drop_merge_tag: true
