@@ -19,6 +19,29 @@ mod ids;
 /// `krabka gres`.
 const EXTERNAL_PREFIX: &str = "krabka-";
 
+/// Tail of `krabka -h`.
+///
+/// Short help stays one screen, so this gives only the rule and the two names
+/// an operator can then look for.
+const SHORT_EXTERNAL_HELP: &str = "\
+Any subcommand that is not built in runs as `krabka-<name>` from PATH, such as
+`restore` and `gres`. Run `krabka --help` for where each one ships from.";
+
+/// Tail of `krabka --help`.
+///
+/// Without this list, an external subcommand is invisible: an operator who
+/// installed one cannot see it here, and an operator who did not install one
+/// learns the name only after a guess fails.
+const LONG_EXTERNAL_HELP: &str = "\
+External subcommands:
+  A subcommand that is not built in runs as `krabka-<name>` from PATH, the way
+  git runs `git-foo`. Krabka looks the binary up at run time, so a subcommand
+  that you did not install does not run.
+
+  restore  Point-in-time restore of a cluster data directory. The
+           krabka-broker repository ships it as `krabka-restore`.
+  gres     The gres repository ships it as `krabka-gres`.";
+
 #[derive(Parser)]
 #[command(
     name = "krabka",
@@ -26,7 +49,9 @@ const EXTERNAL_PREFIX: &str = "krabka-";
     about = "Krabka operator CLI",
     // An unrecognised subcommand is not an error here: it may be an external
     // one. clap hands it over rather than rejecting it.
-    allow_external_subcommands = true
+    allow_external_subcommands = true,
+    after_help = SHORT_EXTERNAL_HELP,
+    after_long_help = LONG_EXTERNAL_HELP
 )]
 struct Cli {
     #[command(subcommand)]
@@ -118,7 +143,7 @@ mod tests {
     use std::ffi::OsString;
 
     use assert2::check;
-    use clap::Parser;
+    use clap::{CommandFactory as _, Parser};
 
     use super::{Cli, Command, spawn_failure};
 
@@ -138,6 +163,53 @@ mod tests {
                 OsString::from("list-tenants"),
                 OsString::from("--bootstrap"),
                 OsString::from("h:9092"),
+            ]
+        );
+    }
+
+    /// Long help states the `krabka-<name>` rule and names each known external
+    /// subcommand with the binary that provides it, because nothing else in the
+    /// CLI tells an operator that an external subcommand exists.
+    #[test]
+    fn long_help_documents_the_external_subcommand_convention() {
+        let help = Cli::command().render_long_help().to_string();
+
+        check!(help.contains("krabka-<name>"));
+        check!(help.contains("PATH"));
+        check!(help.contains("run time"));
+        check!(help.contains("restore"));
+        check!(help.contains("krabka-restore"));
+        check!(help.contains("krabka-broker"));
+        check!(help.contains("gres"));
+        check!(help.contains("krabka-gres"));
+    }
+
+    /// Short help carries the rule and the names too: an operator who types
+    /// `-h` gets the same discovery path, only shorter.
+    #[test]
+    fn short_help_points_at_the_external_subcommand_convention() {
+        let help = Cli::command().render_help().to_string();
+
+        check!(help.contains("krabka-<name>"));
+        check!(help.contains("PATH"));
+        check!(help.contains("restore"));
+        check!(help.contains("gres"));
+    }
+
+    /// Naming `restore` in the help text must not turn it into a built-in: it
+    /// still takes the external arm, with its arguments intact.
+    #[test]
+    fn the_documented_restore_subcommand_is_still_delegated() {
+        let cli = Cli::try_parse_from(["krabka", "restore", "--to-offset", "42"])
+            .expect("restore is external, not built in");
+        let Command::External(argv) = cli.command else {
+            panic!("expected the external arm");
+        };
+        check!(
+            argv == vec![
+                OsString::from("restore"),
+                OsString::from("--to-offset"),
+                OsString::from("42"),
             ]
         );
     }
