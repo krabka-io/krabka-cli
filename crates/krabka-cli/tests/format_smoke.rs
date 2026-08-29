@@ -6,7 +6,7 @@
 
 use std::process::Command;
 
-use crabka_metadata::MetadataRecord;
+use krabka_metadata::MetadataRecord;
 
 fn run_format(dir: &tempfile::TempDir, args: &[&str]) -> std::process::Output {
     let bin = env!("CARGO_BIN_EXE_krabka");
@@ -19,7 +19,7 @@ fn run_format(dir: &tempfile::TempDir, args: &[&str]) -> std::process::Output {
 }
 
 fn bootstrap_records(dir: &tempfile::TempDir) -> Vec<MetadataRecord> {
-    crabka_broker::bootstrap::load_bootstrap_records(dir.path()).expect("bootstrap records")
+    krabka_broker::bootstrap::load_bootstrap_records(dir.path()).expect("bootstrap records")
 }
 
 fn offset_zero_checkpoint(dir: &tempfile::TempDir) -> std::path::PathBuf {
@@ -111,7 +111,7 @@ fn standalone_writes_offset_zero_checkpoint_for_local_voter() {
     assert2::assert!(out.status.success());
 
     let directory_id =
-        crabka_broker::bootstrap::read_directory_id(dir.path()).expect("formatted directory id");
+        krabka_broker::bootstrap::read_directory_id(dir.path()).expect("formatted directory id");
     let records = bootstrap_records(&dir);
     assert2::assert!(!directory_id.is_nil());
     assert2::assert!(records.iter().all(|record| !matches!(
@@ -139,7 +139,7 @@ fn initial_controllers_persists_the_local_listed_directory_id() {
     assert2::assert!(out.status.success());
 
     let directory_id =
-        crabka_broker::bootstrap::read_directory_id(dir.path()).expect("formatted directory id");
+        krabka_broker::bootstrap::read_directory_id(dir.path()).expect("formatted directory id");
     assert2::assert!(directory_id.to_string() == local_directory_id);
     let records = bootstrap_records(&dir);
     assert2::assert!(records.iter().all(|record| !matches!(
