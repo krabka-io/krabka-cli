@@ -24,12 +24,12 @@ workspace = true
 [dependencies]
 assert2 = { workspace = true }
 clap = { workspace = true, features = ["env"] }
-crabka-security = { workspace = true }
-crabka-client-core = { version = "0.4.0" }
-crabka-client-admin = { version = "0.4.0" }
-crabka-units = { workspace = true }
-crabka-metadata = { version = "0.4.0" }
-crabka-raft = { version = "0.4.0" }
+krabka-security = { workspace = true }
+krabka-client-core = { version = "0.4.0" }
+krabka-client-admin = { version = "0.4.0" }
+krabka-units = { workspace = true }
+krabka-metadata = { version = "0.4.0" }
+krabka-raft = { version = "0.4.0" }
 derive_more = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
@@ -43,5 +43,5 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-crabka-broker = { version = "0.4.0" }
+krabka-broker = { version = "0.4.0" }
 tempfile = { workspace = true }
