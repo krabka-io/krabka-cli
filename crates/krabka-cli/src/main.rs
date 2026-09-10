@@ -450,6 +450,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn negative_offset_values_reach_command_validation() {
+        Cli::try_parse_from([
+            "krabka",
+            "consumer-groups",
+            "--reset-offsets",
+            "--group",
+            "workers",
+            "--topic",
+            "orders",
+            "--partition",
+            "-1",
+            "--to-offset",
+            "-1",
+            "--yes",
+            "--bootstrap-server",
+            "host:9092",
+        ])
+        .expect("negative numbers parse for deterministic command validation");
+    }
+
     #[tokio::test]
     async fn destructive_and_read_only_admin_misuse_fails_before_connecting() {
         let cli =

@@ -267,39 +267,67 @@ fn qualify_acl_denial(matrix: &mut Matrix<'_>) {
         ],
         0,
     );
-    let acl_state = matrix.record(
-        "acl-deny-state",
-        matrix.admin_config,
-        "admin",
-        &[
-            "acls",
-            "--list",
-            "--topic",
-            matrix.topic,
-            "--deny-principal",
-            matrix.denied_principal,
-            "--operation",
-            "describe",
-        ],
-        0,
-    );
-    assert!(
-        data(&acl_state)
-            .as_array()
-            .is_some_and(|entries| entries.iter().any(|entry| {
+    let started = Instant::now();
+    loop {
+        let acl_state = matrix.record(
+            "acl-deny-state",
+            matrix.admin_config,
+            "admin",
+            &[
+                "acls",
+                "--list",
+                "--topic",
+                matrix.topic,
+                "--deny-principal",
+                matrix.denied_principal,
+                "--operation",
+                "describe",
+            ],
+            0,
+        );
+        if data(&acl_state).as_array().is_some_and(|entries| {
+            entries.iter().any(|entry| {
                 entry["principal"] == matrix.denied_principal
                     && entry["permission"] == "Deny"
                     && entry["operation"] == "Describe"
-            }))
-    );
-    let denied = matrix.record(
-        "acl-denied-request",
-        matrix.denied_config,
-        "denied-principal",
-        &["topics", "--describe", "--topic", matrix.topic],
-        1,
-    );
-    assert!(data(&denied)[0]["error"]["code"] == 29);
+            })
+        }) {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(30));
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    let started = Instant::now();
+    loop {
+        let output = run(
+            matrix.bootstrap,
+            matrix.denied_config,
+            &["topics", "--describe", "--topic", matrix.topic],
+        );
+        let stream = if output.stdout.is_empty() {
+            &output.stderr
+        } else {
+            &output.stdout
+        };
+        let payload: Value = serde_json::from_slice(stream).expect("structured ACL denial");
+        emit(
+            &mut matrix.evidence,
+            json!({
+                "name": "acl-denied-request",
+                "connection": {"bootstrap": matrix.bootstrap, "config": "denied-principal"},
+                "exit": output.status.code(),
+                "payload": payload,
+            }),
+        );
+        if output.status.code() == Some(1) {
+            assert!(data(&payload)[0]["error"]["code"] == 29);
+            break;
+        }
+        assert!(output.status.code() == Some(0));
+        assert!(started.elapsed() < Duration::from_secs(30));
+        thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn qualify_offsets_and_features(matrix: &mut Matrix<'_>) {
