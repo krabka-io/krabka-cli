@@ -39,6 +39,7 @@ fn run(bootstrap: &str, config: &str, args: &[&str]) -> std::process::Output {
 #[ignore = "requires a candidate broker and qualification credentials"]
 fn authenticated_admin_matrix_matches_real_broker_state() {
     let bootstrap = env::var("KRABKA_CANDIDATE_BOOTSTRAP").expect("candidate bootstrap");
+    let cli_revision = env::var("KRABKA_CLI_REVISION").expect("immutable CLI revision");
     let config = env::var("KRABKA_COMMAND_CONFIG").expect("authenticated command config");
     let unauthorized =
         env::var("KRABKA_UNAUTHORIZED_COMMAND_CONFIG").expect("unauthorized command config");
@@ -149,7 +150,7 @@ fn authenticated_admin_matrix_matches_real_broker_state() {
     println!(
         "{}",
         serde_json::to_string(&json!({
-            "cli_revision": option_env!("GIT_COMMIT").unwrap_or("unknown"),
+            "cli_revision": cli_revision,
             "broker_revision": env::var("KRABKA_CANDIDATE_REVISION").unwrap_or_default(),
             "commands": evidence,
         }))
