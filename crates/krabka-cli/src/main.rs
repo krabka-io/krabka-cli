@@ -8,12 +8,17 @@
 //! them in would mean this binary's dependency graph growing to the union of
 //! every product in the organisation.
 
-use std::{ffi::OsString, process::Command as Process};
+use std::{ffi::OsString, future::Future, process::Command as Process};
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
+mod admin;
+mod connection;
 mod format;
 mod ids;
+mod output;
+
+use output::{OutputArgs, OutputFormat, emit_error, emit_success};
 
 /// Prefix an external subcommand's binary carries: `krabka-gres` provides
 /// `krabka gres`.
@@ -54,14 +59,51 @@ External subcommands:
     after_long_help = LONG_EXTERNAL_HELP
 )]
 struct Cli {
+    #[command(flatten)]
+    output: OutputArgs,
+
+    #[arg(short = 'v', long, action = ArgAction::Count, conflicts_with = "quiet", global = true)]
+    verbose: u8,
+
+    #[arg(short = 'q', long, action = ArgAction::Count, conflicts_with = "verbose", global = true)]
+    quiet: u8,
+
+    #[arg(long, value_enum, default_value_t, global = true)]
+    log_format: LogFormat,
+
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum LogFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// Format a fresh log directory, with optional seed SCRAM credentials.
     Format(format::FormatArgs),
+
+    /// Create, delete, list and describe topics.
+    Topics(admin::TopicsArgs),
+
+    /// Describe and alter topic configuration.
+    Configs(admin::ConfigsArgs),
+
+    /// List, add and remove access-control entries.
+    Acls(admin::AclsArgs),
+
+    /// Inspect consumer-group offsets.
+    ConsumerGroups(admin::ConsumerGroupsArgs),
+
+    /// Inspect supported features or update metadata.version.
+    Features(admin::FeaturesArgs),
+
+    /// Execute or verify replication-factor reassignment.
+    ReassignPartitions(admin::ReassignPartitionsArgs),
 
     /// Anything not built in, delegated to `krabka-<name>` on `PATH`.
     #[command(external_subcommand)]
@@ -124,18 +166,66 @@ fn spawn_failure(error: &std::io::Error, binary: &OsString, name: &OsString) -> 
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
     let cli = Cli::parse();
+    let default_filter = match (cli.verbose, cli.quiet) {
+        (_, 1..) => "warn",
+        (1, 0) => "debug",
+        (2.., 0) => "trace",
+        _ => "info",
+    };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
+    match cli.log_format {
+        LogFormat::Text => tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(filter)
+            .init(),
+        LogFormat::Json => tracing_subscriber::fmt()
+            .json()
+            .with_writer(std::io::stderr)
+            .with_env_filter(filter)
+            .init(),
+    }
+    let output = cli.output.output;
     let rc = match cli.command {
-        Command::Format(args) => format::run(args).await,
+        Command::Format(args) => format::run(args, output).await,
+        Command::Topics(args) => run_admin(args.run(), output).await,
+        Command::Configs(args) => run_admin(args.run(), output).await,
+        Command::Acls(args) => run_admin(args.run(), output).await,
+        Command::ConsumerGroups(args) => run_admin(args.run(), output).await,
+        Command::Features(args) => run_admin(args.run(), output).await,
+        Command::ReassignPartitions(args) => run_admin(args.run(), output).await,
         Command::External(argv) => run_external(&argv),
     };
     std::process::exit(rc);
+}
+
+async fn run_admin(
+    future: impl Future<Output = Result<output::CommandResult, String>>,
+    format: OutputFormat,
+) -> i32 {
+    tokio::select! {
+        result = future => match result {
+            Ok(result) => {
+                let failed = result.failed;
+                if let Err(error) = emit_success(&result, format) {
+                    let _ = emit_error(&error.to_string(), 1, format);
+                    1
+                } else {
+                    i32::from(failed)
+                }
+            }
+            Err(error) => {
+                let _ = emit_error(&error, 1, format);
+                1
+            }
+        },
+        signal = tokio::signal::ctrl_c() => {
+            let message = signal.map_or_else(|error| format!("Ctrl-C handler failed: {error}"), |()| "interrupted".into());
+            let _ = emit_error(&message, 130, format);
+            130
+        }
+    }
 }
 
 #[cfg(test)]
@@ -222,6 +312,130 @@ mod tests {
             Cli::try_parse_from(["krabka", "format", "--log-dir", "/tmp/x", "--node-id", "1"])
                 .expect("format is built in");
         check!(matches!(cli.command, Command::Format(_)));
+    }
+
+    #[test]
+    fn admin_commands_accept_kafka_style_flags_and_global_output() {
+        let commands = [
+            vec![
+                "krabka",
+                "topics",
+                "--list",
+                "--bootstrap-server",
+                "host:9092",
+                "--output",
+                "json",
+            ],
+            vec![
+                "krabka",
+                "configs",
+                "--describe",
+                "--entity-name",
+                "orders",
+                "--bootstrap-server",
+                "host:9092",
+            ],
+            vec![
+                "krabka",
+                "acls",
+                "--list",
+                "--bootstrap-server",
+                "host:9092",
+            ],
+            vec![
+                "krabka",
+                "consumer-groups",
+                "--describe",
+                "--group",
+                "orders",
+                "--bootstrap-server",
+                "host:9092",
+            ],
+            vec![
+                "krabka",
+                "consumer-groups",
+                "--reset-offsets",
+                "--group",
+                "workers",
+                "--topic",
+                "orders",
+                "--partition",
+                "0",
+                "--to-offset",
+                "42",
+                "--yes",
+                "--bootstrap-server",
+                "host:9092",
+            ],
+            vec![
+                "krabka",
+                "features",
+                "--describe",
+                "--bootstrap-server",
+                "host:9092",
+            ],
+            vec![
+                "krabka",
+                "features",
+                "--upgrade",
+                "--feature",
+                "metadata.version=20",
+                "--feature",
+                "kraft.version=1",
+                "--bootstrap-controller",
+                "controller:9093",
+            ],
+            vec![
+                "krabka",
+                "reassign-partitions",
+                "--verify",
+                "--topic",
+                "orders",
+                "--replication-factor",
+                "1",
+                "--bootstrap-server",
+                "host:9092",
+            ],
+        ];
+
+        for argv in commands {
+            Cli::try_parse_from(argv).expect("admin command parses");
+        }
+    }
+
+    #[test]
+    fn conflicting_acl_principals_are_rejected() {
+        assert!(
+            Cli::try_parse_from([
+                "krabka",
+                "acls",
+                "--list",
+                "--allow-principal",
+                "User:alice",
+                "--deny-principal",
+                "User:bob",
+                "--bootstrap-server",
+                "host:9092",
+            ])
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn destructive_and_read_only_admin_misuse_fails_before_connecting() {
+        let cli =
+            Cli::try_parse_from(["krabka", "acls", "--remove", "--yes"]).expect("valid syntax");
+        let Command::Acls(args) = cli.command else {
+            panic!("expected ACL command")
+        };
+        check!(args.run().await.unwrap_err().contains("scope filter"));
+
+        let cli =
+            Cli::try_parse_from(["krabka", "topics", "--list", "--dry-run"]).expect("valid syntax");
+        let Command::Topics(args) = cli.command else {
+            panic!("expected topics command")
+        };
+        check!(args.run().await.unwrap_err().contains("only valid"));
     }
 
     /// A missing external binary is 127 and an unrunnable one is 126, matching

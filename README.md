@@ -62,3 +62,25 @@ of truth; Bazel reads the same `Cargo.toml` and `Cargo.lock`.
 ```bash
 bazel run //:krabka -- format --help
 ```
+
+## Candidate-broker qualification
+
+The ignored `candidate_broker` test runs the authenticated admin command matrix
+against a deployed candidate and emits one JSON evidence document. Run it from
+an immutable CLI revision and archive both the output and its digest:
+
+```bash
+export KRABKA_CLI_REVISION="$(git rev-parse HEAD)"
+export KRABKA_CANDIDATE_REVISION='<broker commit or image digest>'
+export KRABKA_CANDIDATE_BOOTSTRAP='<host:port>'
+export KRABKA_COMMAND_CONFIG='<authenticated Kafka properties file>'
+export KRABKA_UNAUTHORIZED_COMMAND_CONFIG='<unauthorized Kafka properties file>'
+set -o pipefail
+cargo test -p krabka-cli --test candidate_broker -- --ignored --nocapture \
+  | tee candidate-broker.jsonl
+sha256sum candidate-broker.jsonl
+```
+
+The properties files support `security.protocol`, PEM TLS, SASL PLAIN, SCRAM,
+GSSAPI, and a file-backed OAuth bearer token. They must not be archived with
+the evidence.
