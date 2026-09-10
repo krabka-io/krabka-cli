@@ -42,6 +42,8 @@ fn run(bootstrap: &str, config: &str, args: &[&str]) -> std::process::Output {
 fn authenticated_admin_matrix_matches_real_broker_state() {
     let bootstrap = env::var("KRABKA_CANDIDATE_BOOTSTRAP").expect("candidate bootstrap");
     let cli_revision = env::var("KRABKA_CLI_REVISION").expect("immutable CLI revision");
+    let broker_revision =
+        env::var("KRABKA_CANDIDATE_REVISION").expect("immutable candidate broker revision");
     let config = env::var("KRABKA_COMMAND_CONFIG").expect("authenticated command config");
     let unauthorized =
         env::var("KRABKA_UNAUTHORIZED_COMMAND_CONFIG").expect("unauthorized command config");
@@ -170,6 +172,10 @@ fn authenticated_admin_matrix_matches_real_broker_state() {
             &output.stderr
         };
         let payload: Value = serde_json::from_slice(stream).expect("structured output");
+        if name == "unauthorized-request" {
+            let failure = payload.to_string().to_ascii_lowercase();
+            assert!(failure.contains("authorization") || failure.contains("unauthorized"));
+        }
         if name == "configs-describe" {
             assert!(payload.to_string().contains("cleanup.policy"));
             assert!(payload.to_string().contains("compact"));
@@ -185,7 +191,7 @@ fn authenticated_admin_matrix_matches_real_broker_state() {
         "{}",
         serde_json::to_string(&json!({
             "cli_revision": cli_revision,
-            "broker_revision": env::var("KRABKA_CANDIDATE_REVISION").unwrap_or_default(),
+            "broker_revision": broker_revision,
             "commands": evidence,
         }))
         .unwrap()

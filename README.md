@@ -75,6 +75,7 @@ export KRABKA_CANDIDATE_REVISION='<broker commit or image digest>'
 export KRABKA_CANDIDATE_BOOTSTRAP='<host:port>'
 export KRABKA_COMMAND_CONFIG='<authenticated Kafka properties file>'
 export KRABKA_UNAUTHORIZED_COMMAND_CONFIG='<unauthorized Kafka properties file>'
+set -o pipefail
 cargo test -p krabka-cli --test candidate_broker -- --ignored --nocapture \
   | tee candidate-broker.jsonl
 sha256sum candidate-broker.jsonl

@@ -36,8 +36,8 @@ pub struct ConnectionArgs {
     pub command_config: Option<PathBuf>,
     #[arg(long)]
     pub client_id: Option<String>,
-    #[arg(long, default_value_t = 30_000)]
-    pub request_timeout_ms: i64,
+    #[arg(long)]
+    pub request_timeout_ms: Option<i64>,
     #[arg(long, default_value = "30s", value_parser = parse_time)]
     pub timeout: Time,
 }
@@ -120,14 +120,17 @@ impl ConnectionArgs {
                 .unwrap_or_else(|| format!("krabka-cli/{} {command}", env!("CARGO_PKG_VERSION"))),
             ..ConnectionOptions::default()
         };
-        let request_timeout =
+        let request_timeout = if let Some(value) = self.request_timeout_ms {
+            value
+        } else {
             properties
                 .get("request.timeout.ms")
-                .map_or(Ok(self.request_timeout_ms), |value| {
+                .map_or(Ok(30_000), |value| {
                     value.parse::<i64>().map_err(|_| {
                         ConnectionError::Config("request.timeout.ms must be an integer".into())
                     })
-                })?;
+                })?
+        };
         if request_timeout <= 0 {
             return Err(ConnectionError::Config(
                 "request.timeout.ms must be positive".into(),
@@ -142,12 +145,11 @@ impl ConnectionArgs {
         self.bootstrap_server
             .first()
             .or_else(|| self.bootstrap_controller.first())
-            .map_or("localhost", |address| {
-                address
-                    .trim_start_matches('[')
-                    .split([']', ':'])
-                    .next()
-                    .unwrap_or("localhost")
+            .map_or("localhost", |address| match address.strip_prefix('[') {
+                Some(bracketed) => bracketed
+                    .split_once(']')
+                    .map_or(bracketed, |(host, _)| host),
+                None => address.rsplit_once(':').map_or(address, |(host, _)| host),
             })
     }
 }
@@ -345,12 +347,53 @@ fn sasl_credentials(
 }
 
 fn jaas_options(value: &str) -> BTreeMap<String, String> {
-    value
-        .trim_end_matches(';')
-        .split_whitespace()
-        .filter_map(|word| word.split_once('='))
-        .map(|(key, value)| (key.to_string(), value.trim_matches(['"', '\'']).to_string()))
-        .collect()
+    let mut options = BTreeMap::new();
+    let mut chars = value.trim_end_matches(';').chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        let mut key = String::from(ch);
+        while let Some(&ch) = chars.peek() {
+            if ch == '=' || ch.is_whitespace() {
+                break;
+            }
+            key.push(ch);
+            chars.next();
+        }
+        while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+            chars.next();
+        }
+        if chars.next() != Some('=') {
+            while chars.peek().is_some_and(|ch| !ch.is_whitespace()) {
+                chars.next();
+            }
+            continue;
+        }
+        while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+            chars.next();
+        }
+        let quote = chars.peek().copied().filter(|ch| *ch == '"' || *ch == '\'');
+        if quote.is_some() {
+            chars.next();
+        }
+        let mut parsed = String::new();
+        let mut escaped = false;
+        for ch in chars.by_ref() {
+            if escaped {
+                parsed.push(ch);
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if quote == Some(ch) || (quote.is_none() && ch.is_whitespace()) {
+                break;
+            } else {
+                parsed.push(ch);
+            }
+        }
+        options.insert(key, parsed);
+    }
+    options
 }
 
 fn required(properties: &BTreeMap<String, String>, key: &str) -> Result<String, ConnectionError> {
@@ -390,7 +433,7 @@ mod tests {
             bootstrap_controller: Vec::new(),
             command_config: None,
             client_id: None,
-            request_timeout_ms: 1000,
+            request_timeout_ms: Some(1000),
             timeout: Time::from_millis(2000),
         };
         let mut props = BTreeMap::from([
@@ -406,5 +449,47 @@ mod tests {
         assert!(matches!(policy.sasl, Some(SaslCredentials::Plain { .. })));
         props.insert("security.protocol".into(), "PLAINTEXT".into());
         assert!(security(&BTreeMap::new(), "localhost").unwrap().is_none());
+    }
+
+    #[test]
+    fn jaas_options_preserve_quoted_spaces_and_escapes() {
+        assert!(
+            jaas_options(r#"x required username="alice smith" password="two\" words";"#)
+                == BTreeMap::from([
+                    ("password".into(), "two\" words".into()),
+                    ("username".into(), "alice smith".into()),
+                ])
+        );
+    }
+
+    #[test]
+    fn bootstrap_host_preserves_ipv6() {
+        let mut args = ConnectionArgs {
+            bootstrap_server: vec!["[2001:db8::1]:9092".into()],
+            bootstrap_controller: Vec::new(),
+            command_config: None,
+            client_id: None,
+            request_timeout_ms: None,
+            timeout: Time::from_millis(2000),
+        };
+        assert!(args.bootstrap_host() == "2001:db8::1");
+        args.bootstrap_server = vec!["broker.example:9092".into()];
+        assert!(args.bootstrap_host() == "broker.example");
+    }
+
+    #[tokio::test]
+    async fn explicit_request_timeout_overrides_command_config() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "request.timeout.ms=9000\n").unwrap();
+        let args = ConnectionArgs {
+            bootstrap_server: vec!["broker.example:9092".into()],
+            bootstrap_controller: Vec::new(),
+            command_config: Some(file.path().into()),
+            client_id: None,
+            request_timeout_ms: Some(1234),
+            timeout: Time::from_millis(2000),
+        };
+        let options = args.options("test").await.unwrap();
+        assert!(options.request_timeout == Time::from_millis(1234));
     }
 }

@@ -46,6 +46,9 @@ impl TopicsArgs {
         if self.delete.is_some() && !self.yes && !self.dry_run {
             return Err("topic deletion requires --yes (or --dry-run)".into());
         }
+        if self.dry_run && (self.list.is_some() || self.describe.is_some()) {
+            return Err("--dry-run is only valid with --create or --delete".into());
+        }
         if self.dry_run {
             return Ok(CommandResult::success(
                 self.topic
@@ -124,7 +127,9 @@ impl TopicsArgs {
             .topics
             .iter()
             .map(|topic| {
-                if self.describe.is_some() {
+                if let Some(err) = &topic.error {
+                    format!("{}\tERROR\t{} ({})", topic.name, err.name, err.code)
+                } else if self.describe.is_some() {
                     format!(
                         "Topic: {}\tPartitionCount: {}\tReplicationFactor: {}",
                         topic.name, topic.partition_count, topic.replication_factor
@@ -253,7 +258,10 @@ impl From<AclOperationArg> for AclOperation {
 }
 
 #[derive(Debug, Args)]
-#[command(group(ArgGroup::new("action").required(true).multiple(false).args(["list", "add", "remove"])))]
+#[command(
+    group(ArgGroup::new("action").required(true).multiple(false).args(["list", "add", "remove"])),
+    group(ArgGroup::new("principal").multiple(false).args(["allow_principal", "deny_principal"]))
+)]
 pub struct AclsArgs {
     #[command(flatten)]
     connection: ConnectionArgs,
@@ -281,6 +289,15 @@ impl AclsArgs {
     pub async fn run(self) -> Result<CommandResult, String> {
         if self.remove.is_some() && !self.yes {
             return Err("ACL removal requires --yes".into());
+        }
+        if self.remove.is_some()
+            && self.topic.is_none()
+            && self.allow_principal.is_none()
+            && self.deny_principal.is_none()
+            && self.operation.is_none()
+            && self.host == "*"
+        {
+            return Err("ACL removal requires at least one scope filter".into());
         }
         let permission = if self.deny_principal.is_some() {
             PermissionType::Deny
@@ -357,10 +374,12 @@ fn acl_entries(entries: &[AclEntry]) -> CommandResult {
         .iter()
         .map(|entry| {
             format!(
-                "{:?}\t{}\t{}\t{:?}\t{:?}",
+                "{:?}\t{}\t{:?}\t{}\t{}\t{:?}\t{:?}",
                 entry.resource_type,
                 entry.resource_name,
+                entry.pattern_type,
                 entry.principal,
+                entry.host,
                 entry.operation,
                 entry.permission_type
             )
@@ -570,16 +589,44 @@ impl ReassignPartitionsArgs {
             .connect("reassign-partitions")
             .await
             .map_err(error)?;
-        let status = client
-            .reconcile_topic_replication_factor(
-                &self.topic,
-                self.replication_factor,
-                self.connection.timeout,
-            )
-            .await
-            .map_err(error)?;
-        let status = format!("{status:?}");
-        let incomplete = self.verify && status != "InSync";
+        let (status, incomplete) = if self.execute {
+            let status = client
+                .reconcile_topic_replication_factor(
+                    &self.topic,
+                    self.replication_factor,
+                    self.connection.timeout,
+                )
+                .await
+                .map_err(error)?;
+            (format!("{status:?}"), false)
+        } else {
+            let assignments = client
+                .describe_partition_assignments(&[&self.topic])
+                .await
+                .map_err(error)?;
+            let partitions = assignments
+                .iter()
+                .map(|assignment| assignment.partition)
+                .collect::<Vec<_>>();
+            let active = client
+                .list_partition_reassignments(
+                    &BTreeMap::from([(self.topic.clone(), partitions)]),
+                    self.connection.timeout,
+                )
+                .await
+                .map_err(error)?;
+            if !active.is_empty() {
+                ("ReassignmentInProgress".into(), true)
+            } else if !assignments.is_empty()
+                && assignments.iter().all(|assignment| {
+                    i32::try_from(assignment.replicas.len()) == Ok(self.replication_factor)
+                })
+            {
+                ("InSync".into(), false)
+            } else {
+                ("ReplicationFactorMismatch".into(), true)
+            }
+        };
         Ok(CommandResult::rows(
             vec![format!("{}: {status}", self.topic)],
             json!({"topic": self.topic, "status": status}),
@@ -624,5 +671,20 @@ mod tests {
     fn key_value_parser_preserves_equals_in_value() {
         assert!(key_value("a=b=c").unwrap() == ("a".into(), "b=c".into()));
         assert!(key_value("missing").is_err());
+    }
+
+    #[test]
+    fn acl_human_output_distinguishes_host_and_pattern() {
+        let result = acl_entries(&[AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "orders".into(),
+            pattern_type: PatternType::Prefixed,
+            principal: "User:alice".into(),
+            host: "10.0.0.1".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        }]);
+        assert!(result.human[0].contains("Prefixed"));
+        assert!(result.human[0].contains("10.0.0.1"));
     }
 }

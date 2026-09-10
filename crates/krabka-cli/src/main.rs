@@ -188,7 +188,7 @@ async fn main() {
     }
     let output = cli.output.output;
     let rc = match cli.command {
-        Command::Format(args) => format::run(args).await,
+        Command::Format(args) => format::run(args, output).await,
         Command::Topics(args) => run_admin(args.run(), output).await,
         Command::Configs(args) => run_admin(args.run(), output).await,
         Command::Acls(args) => run_admin(args.run(), output).await,
@@ -401,6 +401,41 @@ mod tests {
         for argv in commands {
             Cli::try_parse_from(argv).expect("admin command parses");
         }
+    }
+
+    #[test]
+    fn conflicting_acl_principals_are_rejected() {
+        assert!(
+            Cli::try_parse_from([
+                "krabka",
+                "acls",
+                "--list",
+                "--allow-principal",
+                "User:alice",
+                "--deny-principal",
+                "User:bob",
+                "--bootstrap-server",
+                "host:9092",
+            ])
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn destructive_and_read_only_admin_misuse_fails_before_connecting() {
+        let cli =
+            Cli::try_parse_from(["krabka", "acls", "--remove", "--yes"]).expect("valid syntax");
+        let Command::Acls(args) = cli.command else {
+            panic!("expected ACL command")
+        };
+        check!(args.run().await.unwrap_err().contains("scope filter"));
+
+        let cli =
+            Cli::try_parse_from(["krabka", "topics", "--list", "--dry-run"]).expect("valid syntax");
+        let Command::Topics(args) = cli.command else {
+            panic!("expected topics command")
+        };
+        check!(args.run().await.unwrap_err().contains("only valid"));
     }
 
     /// A missing external binary is 127 and an unrunnable one is 126, matching

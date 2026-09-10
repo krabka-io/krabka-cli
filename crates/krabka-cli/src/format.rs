@@ -38,7 +38,10 @@ use serde_wincode::SerdeCompat;
 use uuid::Uuid;
 use wincode::Serialize as _;
 
-use crate::ids::{ClusterId, DirectoryId};
+use crate::{
+    ids::{ClusterId, DirectoryId},
+    output::{CommandResult, OutputFormat, emit_error, emit_success},
+};
 
 /// Exit codes:
 /// - 0: success
@@ -544,12 +547,11 @@ struct BootstrapManifest {
     skip_all,
     fields(log_dir = %args.log_dir.display(), standalone = args.standalone)
 )]
-pub async fn run(args: FormatArgs) -> i32 {
+pub async fn run(args: FormatArgs, output: OutputFormat) -> i32 {
     let dynamic_format = match is_dynamic_format(&args) {
         Ok(dynamic) => dynamic,
         Err(e) => {
-            eprintln!("krabka format: {e}");
-            return EXIT_INVALID_FEATURE;
+            return format_error(&e, EXIT_INVALID_FEATURE, output);
         }
     };
 
@@ -559,29 +561,32 @@ pub async fn run(args: FormatArgs) -> i32 {
         match std::fs::read_dir(&args.log_dir) {
             Ok(mut it) => {
                 if it.next().is_some() {
-                    eprintln!(
-                        "krabka format: refusing to overwrite non-empty log_dir {}",
-                        args.log_dir.display(),
+                    return format_error(
+                        &format!(
+                            "refusing to overwrite non-empty log_dir {}",
+                            args.log_dir.display()
+                        ),
+                        EXIT_DIRTY_LOG_DIR,
+                        output,
                     );
-                    return EXIT_DIRTY_LOG_DIR;
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "krabka format: cannot read log_dir {}: {e}",
-                    args.log_dir.display(),
+                return format_error(
+                    &format!("cannot read log_dir {}: {e}", args.log_dir.display()),
+                    EXIT_BOOTSTRAP_FAIL,
+                    output,
                 );
-                return EXIT_BOOTSTRAP_FAIL;
             }
         }
     }
 
     if let Err(e) = std::fs::create_dir_all(&args.log_dir) {
-        eprintln!(
-            "krabka format: cannot create log_dir {}: {e}",
-            args.log_dir.display(),
+        return format_error(
+            &format!("cannot create log_dir {}: {e}", args.log_dir.display()),
+            EXIT_BOOTSTRAP_FAIL,
+            output,
         );
-        return EXIT_BOOTSTRAP_FAIL;
     }
 
     let cluster_id = ClusterId(args.cluster_id.unwrap_or_else(Uuid::new_v4));
@@ -595,8 +600,7 @@ pub async fn run(args: FormatArgs) -> i32 {
     let initial_voters = match build_initial_voters(&args, generated_directory_id) {
         Ok(voters) => voters,
         Err(e) => {
-            eprintln!("krabka format: {e}");
-            return EXIT_BOOTSTRAP_FAIL;
+            return format_error(&e, EXIT_BOOTSTRAP_FAIL, output);
         }
     };
     let directory_id = if args.initial_controllers.is_empty() {
@@ -610,12 +614,14 @@ pub async fn run(args: FormatArgs) -> i32 {
         )
     };
     if args.directory_id.is_some() && directory_id != generated_directory_id {
-        eprintln!("krabka format: --directory-id must match the local --initial-controllers entry");
-        return EXIT_BOOTSTRAP_FAIL;
+        return format_error(
+            "--directory-id must match the local --initial-controllers entry",
+            EXIT_BOOTSTRAP_FAIL,
+            output,
+        );
     }
     if let Err(e) = write_meta_properties(&args.log_dir, cluster_id, directory_id) {
-        eprintln!("krabka format: {e}");
-        return EXIT_BOOTSTRAP_FAIL;
+        return format_error(&e, EXIT_BOOTSTRAP_FAIL, output);
     }
 
     // KIP-853 control records live in the offset-zero metadata checkpoint,
@@ -645,8 +651,7 @@ pub async fn run(args: FormatArgs) -> i32 {
         match resolve_format_features(args.release_version.as_deref(), &args.feature) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("krabka format: {e}");
-                return EXIT_INVALID_FEATURE;
+                return format_error(&e, EXIT_INVALID_FEATURE, output);
             }
         };
     records.extend(krabka_metadata::bootstrap_feature_records_with_overrides(
@@ -661,16 +666,18 @@ pub async fn run(args: FormatArgs) -> i32 {
     for spec in &args.add_scram {
         if spec.iterations < u32::try_from(MIN_SCRAM_ITERATIONS).expect("SCRAM minimum is positive")
         {
-            eprintln!(
-                "krabka format: iterations must be >= {MIN_SCRAM_ITERATIONS}, got {} for user {}",
-                spec.iterations, spec.name,
+            return format_error(
+                &format!(
+                    "iterations must be >= {MIN_SCRAM_ITERATIONS}, got {} for user {}",
+                    spec.iterations, spec.name
+                ),
+                EXIT_LOW_ITERATIONS,
+                output,
             );
-            return EXIT_LOW_ITERATIONS;
         }
         let mut salt = vec![0u8; 16];
         if let Err(e) = SystemRandom::new().fill(&mut salt) {
-            eprintln!("krabka format: rng failure: {e}");
-            return EXIT_BOOTSTRAP_FAIL;
+            return format_error(&format!("rng failure: {e}"), EXIT_BOOTSTRAP_FAIL, output);
         }
         let cred = hash_scram_password_with_salt(
             spec.password.as_bytes(),
@@ -696,22 +703,43 @@ pub async fn run(args: FormatArgs) -> i32 {
         && let Err(e) =
             write_dynamic_checkpoint(&args.log_dir, cluster_id, &raft_control_records, &records)
     {
-        eprintln!("krabka format: checkpoint failed: {e}");
-        return EXIT_BOOTSTRAP_FAIL;
+        return format_error(
+            &format!("checkpoint failed: {e}"),
+            EXIT_BOOTSTRAP_FAIL,
+            output,
+        );
     }
 
     if let Err(e) = write_bootstrap_files(&args.log_dir, cluster_id, &records) {
-        eprintln!("krabka format: bootstrap failed: {e}");
-        return EXIT_BOOTSTRAP_FAIL;
+        return format_error(
+            &format!("bootstrap failed: {e}"),
+            EXIT_BOOTSTRAP_FAIL,
+            output,
+        );
     }
 
-    println!(
-        "Formatted {} with cluster-id {} ({} seed record(s))",
-        args.log_dir.display(),
-        cluster_id,
-        records.len(),
+    let result = CommandResult::success(
+        vec![format!(
+            "Formatted {} with cluster-id {} ({} seed record(s))",
+            args.log_dir.display(),
+            cluster_id,
+            records.len()
+        )],
+        serde_json::json!({
+            "log_dir": args.log_dir,
+            "cluster_id": cluster_id,
+            "record_count": records.len(),
+        }),
     );
+    if emit_success(&result, output).is_err() {
+        return EXIT_BOOTSTRAP_FAIL;
+    }
     EXIT_OK
+}
+
+fn format_error(message: &str, code: i32, output: OutputFormat) -> i32 {
+    let _ = emit_error(&format!("format: {message}"), code, output);
+    code
 }
 
 /// Write the authoritative KIP-630/KIP-853 offset-zero checkpoint for a

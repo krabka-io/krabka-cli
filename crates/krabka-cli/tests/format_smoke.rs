@@ -81,6 +81,16 @@ fn format_low_iterations_fails() {
 }
 
 #[test]
+fn format_honors_global_json_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_format(&dir, &["--output", "json"]);
+    assert2::assert!(out.status.success());
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert2::assert!(payload["data"]["log_dir"] == dir.path().to_str().unwrap());
+    assert2::assert!(payload["data"]["record_count"].as_u64().is_some());
+}
+
+#[test]
 fn no_initial_controllers_writes_offset_zero_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
     let out = run_format(&dir, &["--no-initial-controllers"]);
