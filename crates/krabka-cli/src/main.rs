@@ -421,6 +421,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn conflicting_feature_actions_are_rejected() {
+        assert!(
+            Cli::try_parse_from([
+                "krabka",
+                "features",
+                "--describe",
+                "--upgrade",
+                "--feature",
+                "metadata.version=20",
+                "--bootstrap-server",
+                "host:9092",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "krabka",
+                "features",
+                "--describe",
+                "--feature",
+                "metadata.version=20",
+                "--bootstrap-server",
+                "host:9092",
+            ])
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn destructive_and_read_only_admin_misuse_fails_before_connecting() {
         let cli =
