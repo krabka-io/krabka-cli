@@ -5,7 +5,12 @@
 //! Every CLI response, exit status, and subsequent state observation is emitted
 //! as one JSON evidence document.
 
-use std::{env, process::Command, thread, time::Duration};
+use std::{
+    env,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 use assert2::assert;
 use serde_json::{Value, json};
@@ -18,6 +23,10 @@ fn run(bootstrap: &str, config: &str, args: &[&str]) -> std::process::Output {
             bootstrap,
             "--command-config",
             config,
+            "--request-timeout-ms",
+            "2000",
+            "--timeout",
+            "2s",
             "--output",
             "json",
         ])
@@ -61,6 +70,32 @@ fn exact_revision(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn exact_image_digest(value: &str) -> bool {
+    value
+        .rsplit_once("@sha256:")
+        .is_some_and(|(image, digest)| {
+            !image.is_empty()
+                && digest.len() == 64
+                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+}
+
+fn scoped_user_principal(value: &str) -> bool {
+    value.starts_with("User:") && value != "User:*"
+}
+
+#[test]
+fn qualification_identifiers_are_strict() {
+    assert!(exact_image_digest(&format!(
+        "registry/broker@sha256:{}",
+        "a".repeat(64)
+    )));
+    assert!(!exact_image_digest("registry/broker@sha256:latest"));
+    assert!(!exact_image_digest("registry/broker@sha256:"));
+    assert!(scoped_user_principal("User:denied"));
+    assert!(!scoped_user_principal("User:*"));
 }
 
 struct Matrix<'a> {
@@ -114,13 +149,37 @@ fn qualify_topic_and_config(matrix: &mut Matrix<'_>) {
     assert!(data(&created)[0]["topic"] == matrix.topic);
     assert!(data(&created)[0]["error"].is_null());
 
-    let created_state = matrix.record(
-        "topics-create-state",
-        matrix.admin_config,
-        "admin",
-        &["topics", "--describe", "--topic", matrix.topic],
-        0,
-    );
+    let started = Instant::now();
+    let mut attempt = 0;
+    let created_state = loop {
+        attempt += 1;
+        let output = run(
+            matrix.bootstrap,
+            matrix.admin_config,
+            &["topics", "--describe", "--topic", matrix.topic],
+        );
+        let stream = if output.stdout.is_empty() {
+            &output.stderr
+        } else {
+            &output.stdout
+        };
+        let payload: Value = serde_json::from_slice(stream).expect("structured topic state");
+        let exit = output.status.code();
+        matrix.evidence.push(json!({
+            "name": "topics-create-state",
+            "attempt": attempt,
+            "argv": ["topics", "--describe", "--topic", matrix.topic],
+            "connection": {"bootstrap": matrix.bootstrap, "config": "admin"},
+            "exit": exit,
+            "payload": payload,
+        }));
+        if exit == Some(0) {
+            break payload;
+        }
+        assert!(data(&payload)[0]["error"]["code"] == 3);
+        assert!(started.elapsed() < Duration::from_secs(30));
+        thread::sleep(Duration::from_millis(250));
+    };
     assert!(data(&created_state)[0]["partitions"] == 3);
     assert!(data(&created_state)[0]["replication_factor"] == 1);
 
@@ -304,8 +363,10 @@ fn qualify_reassignment(matrix: &mut Matrix<'_>) {
     );
     assert!(data(&submitted)["status"] == "ReassignmentSubmitted");
 
-    let mut completed = false;
-    for attempt in 1..=120 {
+    let started = Instant::now();
+    let mut attempt = 0;
+    let completed = loop {
+        attempt += 1;
         let output = run(
             matrix.bootstrap,
             matrix.admin_config,
@@ -330,13 +391,15 @@ fn qualify_reassignment(matrix: &mut Matrix<'_>) {
         }));
         if status == "InSync" {
             assert!(output.status.code() == Some(0));
-            completed = true;
-            break;
+            break true;
         }
         assert!(status == "ReassignmentInProgress");
         assert!(output.status.code() == Some(1));
+        if started.elapsed() >= Duration::from_secs(30) {
+            break false;
+        }
         thread::sleep(Duration::from_millis(250));
-    }
+    };
     assert!(completed, "reassignment did not complete within 30 seconds");
     let state = matrix.record(
         "reassignment-complete-state",
@@ -349,7 +412,7 @@ fn qualify_reassignment(matrix: &mut Matrix<'_>) {
 }
 
 fn cleanup_and_verify_deletion(matrix: &mut Matrix<'_>) {
-    matrix.record(
+    let removed_acl = matrix.record(
         "acl-cleanup",
         matrix.admin_config,
         "admin",
@@ -366,6 +429,16 @@ fn cleanup_and_verify_deletion(matrix: &mut Matrix<'_>) {
         ],
         0,
     );
+    assert!(
+        data(&removed_acl)
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["resource_name"] == matrix.topic
+                    && entry["principal"] == matrix.denied_principal
+                    && entry["permission"] == "Deny"
+                    && entry["operation"] == "Describe"
+            }))
+    );
     matrix.record(
         "topics-delete",
         matrix.admin_config,
@@ -374,7 +447,10 @@ fn cleanup_and_verify_deletion(matrix: &mut Matrix<'_>) {
         0,
     );
 
-    for attempt in 1..=120 {
+    let started = Instant::now();
+    let mut attempt = 0;
+    while started.elapsed() < Duration::from_secs(30) {
+        attempt += 1;
         let output = run(
             matrix.bootstrap,
             matrix.admin_config,
@@ -396,7 +472,7 @@ fn cleanup_and_verify_deletion(matrix: &mut Matrix<'_>) {
             "payload": payload,
         }));
         if exit == Some(1) {
-            assert!(payload.to_string().to_ascii_lowercase().contains("unknown"));
+            assert!(data(&payload)[0]["error"]["code"] == 3);
             return;
         }
         assert!(exit == Some(0));
@@ -421,8 +497,8 @@ fn authenticated_admin_matrix_matches_real_broker_state() {
         env::var("KRABKA_DENIED_PRINCIPAL").expect("Kafka principal named by denied config");
     assert!(exact_revision(&cli_revision));
     assert!(exact_revision(&broker_revision));
-    assert!(broker_image.contains("@sha256:"));
-    assert!(denied_principal.starts_with("User:"));
+    assert!(exact_image_digest(&broker_image));
+    assert!(scoped_user_principal(&denied_principal));
 
     let topic = format!("m20-cli-{}", std::process::id());
     let group = format!("m20-cli-group-{}", std::process::id());
