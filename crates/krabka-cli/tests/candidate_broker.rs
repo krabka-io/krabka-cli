@@ -303,25 +303,49 @@ fn qualify_acl_denial(matrix: &mut Matrix<'_>) {
 }
 
 fn qualify_offsets_and_features(matrix: &mut Matrix<'_>) {
-    matrix.record(
-        "offsets-reset",
-        matrix.admin_config,
-        "admin",
-        &[
-            "consumer-groups",
-            "--reset-offsets",
-            "--group",
-            matrix.group,
-            "--topic",
-            matrix.topic,
-            "--partition",
-            "0",
-            "--to-offset",
-            "7",
-            "--yes",
-        ],
-        0,
-    );
+    let reset_args = [
+        "consumer-groups",
+        "--reset-offsets",
+        "--group",
+        matrix.group,
+        "--topic",
+        matrix.topic,
+        "--partition",
+        "0",
+        "--to-offset",
+        "7",
+        "--yes",
+    ];
+    let started = Instant::now();
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let output = run(matrix.bootstrap, matrix.admin_config, &reset_args);
+        let stream = if output.stdout.is_empty() {
+            &output.stderr
+        } else {
+            &output.stdout
+        };
+        let payload: Value = serde_json::from_slice(stream).expect("structured offset reset");
+        let exit = output.status.code();
+        emit(
+            &mut matrix.evidence,
+            json!({
+                "name": "offsets-reset",
+                "attempt": attempt,
+                "argv": reset_args,
+                "connection": {"bootstrap": matrix.bootstrap, "config": "admin"},
+                "exit": exit,
+                "payload": payload,
+            }),
+        );
+        if exit == Some(0) {
+            break;
+        }
+        assert!(data(&payload)[0]["error"]["code"] == 16);
+        assert!(started.elapsed() < Duration::from_secs(30));
+        thread::sleep(Duration::from_millis(250));
+    }
     let offset_state = matrix.record(
         "offsets-reset-state",
         matrix.admin_config,
