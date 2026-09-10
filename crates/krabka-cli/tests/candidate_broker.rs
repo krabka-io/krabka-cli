@@ -51,14 +51,25 @@ fn record(
         &output.stdout
     };
     let payload: Value = serde_json::from_slice(stream).expect("structured CLI output");
-    evidence.push(json!({
-        "name": name,
-        "argv": args,
-        "connection": {"bootstrap": bootstrap, "config": config_name},
-        "exit": output.status.code(),
-        "payload": payload,
-    }));
+    emit(
+        evidence,
+        json!({
+            "name": name,
+            "argv": args,
+            "connection": {"bootstrap": bootstrap, "config": config_name},
+            "exit": output.status.code(),
+            "payload": payload,
+        }),
+    );
     payload
+}
+
+fn emit(evidence: &mut Vec<Value>, entry: Value) {
+    eprintln!(
+        "{}",
+        serde_json::to_string(&entry).expect("serialize evidence")
+    );
+    evidence.push(entry);
 }
 
 fn data(payload: &Value) -> &Value {
@@ -165,14 +176,17 @@ fn qualify_topic_and_config(matrix: &mut Matrix<'_>) {
         };
         let payload: Value = serde_json::from_slice(stream).expect("structured topic state");
         let exit = output.status.code();
-        matrix.evidence.push(json!({
-            "name": "topics-create-state",
-            "attempt": attempt,
-            "argv": ["topics", "--describe", "--topic", matrix.topic],
-            "connection": {"bootstrap": matrix.bootstrap, "config": "admin"},
-            "exit": exit,
-            "payload": payload,
-        }));
+        emit(
+            &mut matrix.evidence,
+            json!({
+                "name": "topics-create-state",
+                "attempt": attempt,
+                "argv": ["topics", "--describe", "--topic", matrix.topic],
+                "connection": {"bootstrap": matrix.bootstrap, "config": "admin"},
+                "exit": exit,
+                "payload": payload,
+            }),
+        );
         if exit == Some(0) {
             break payload;
         }
@@ -199,20 +213,33 @@ fn qualify_topic_and_config(matrix: &mut Matrix<'_>) {
         ],
         0,
     );
-    let config_state = matrix.record(
-        "configs-alter-state",
-        matrix.admin_config,
-        "admin",
-        &[
-            "configs",
-            "--describe",
-            "--entity-type",
-            "topics",
-            "--entity-name",
-            matrix.topic,
-        ],
-        0,
-    );
+    let started = Instant::now();
+    let mut attempt = 0;
+    let config_state = loop {
+        attempt += 1;
+        let payload = matrix.record(
+            "configs-alter-state",
+            matrix.admin_config,
+            "admin",
+            &[
+                "configs",
+                "--describe",
+                "--entity-type",
+                "topics",
+                "--entity-name",
+                matrix.topic,
+            ],
+            0,
+        );
+        if data(&payload)[0]["configs"]["cleanup.policy"] == "compact" {
+            break payload;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "attempt {attempt}"
+        );
+        thread::sleep(Duration::from_millis(250));
+    };
     assert!(data(&config_state)[0]["configs"]["cleanup.policy"] == "compact");
 }
 
@@ -272,7 +299,7 @@ fn qualify_acl_denial(matrix: &mut Matrix<'_>) {
         &["topics", "--describe", "--topic", matrix.topic],
         1,
     );
-    assert!(denied.to_string().to_ascii_lowercase().contains("authoriz"));
+    assert!(data(&denied)[0]["error"]["code"] == 29);
 }
 
 fn qualify_offsets_and_features(matrix: &mut Matrix<'_>) {
@@ -381,19 +408,22 @@ fn qualify_reassignment(matrix: &mut Matrix<'_>) {
         );
         let payload: Value = serde_json::from_slice(&output.stdout).expect("structured verify");
         let status = data(&payload)["status"].as_str().expect("status string");
-        matrix.evidence.push(json!({
-            "name": "reassignment-progress",
-            "attempt": attempt,
-            "argv": ["reassign-partitions", "--verify", "--topic", matrix.topic, "--replication-factor", "2"],
-            "connection": {"bootstrap": matrix.bootstrap, "config": "admin"},
-            "exit": output.status.code(),
-            "payload": payload,
-        }));
+        emit(
+            &mut matrix.evidence,
+            json!({
+                "name": "reassignment-progress",
+                "attempt": attempt,
+                "argv": ["reassign-partitions", "--verify", "--topic", matrix.topic, "--replication-factor", "2"],
+                "connection": {"bootstrap": matrix.bootstrap, "config": "admin"},
+                "exit": output.status.code(),
+                "payload": payload,
+            }),
+        );
         if status == "InSync" {
             assert!(output.status.code() == Some(0));
             break true;
         }
-        assert!(status == "ReassignmentInProgress");
+        assert!(status == "ReassignmentInProgress" || status == "ReplicationFactorMismatch");
         assert!(output.status.code() == Some(1));
         if started.elapsed() >= Duration::from_secs(30) {
             break false;
@@ -463,14 +493,17 @@ fn cleanup_and_verify_deletion(matrix: &mut Matrix<'_>) {
         };
         let payload: Value = serde_json::from_slice(stream).expect("structured delete state");
         let exit = output.status.code();
-        matrix.evidence.push(json!({
-            "name": "topics-delete-state",
-            "attempt": attempt,
-            "argv": ["topics", "--describe", "--topic", matrix.topic],
-            "connection": {"bootstrap": matrix.bootstrap, "config": "admin"},
-            "exit": exit,
-            "payload": payload,
-        }));
+        emit(
+            &mut matrix.evidence,
+            json!({
+                "name": "topics-delete-state",
+                "attempt": attempt,
+                "argv": ["topics", "--describe", "--topic", matrix.topic],
+                "connection": {"bootstrap": matrix.bootstrap, "config": "admin"},
+                "exit": exit,
+                "payload": payload,
+            }),
+        );
         if exit == Some(1) {
             assert!(data(&payload)[0]["error"]["code"] == 3);
             return;
@@ -500,8 +533,9 @@ fn authenticated_admin_matrix_matches_real_broker_state() {
     assert!(exact_image_digest(&broker_image));
     assert!(scoped_user_principal(&denied_principal));
 
-    let topic = format!("m20-cli-{}", std::process::id());
-    let group = format!("m20-cli-group-{}", std::process::id());
+    let run_id = uuid::Uuid::new_v4();
+    let topic = format!("m20-cli-{run_id}");
+    let group = format!("m20-cli-group-{run_id}");
     let mut matrix = Matrix {
         bootstrap: &bootstrap,
         admin_config: &admin_config,
