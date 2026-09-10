@@ -13,10 +13,12 @@ const COMMANDS: &[&str] = &[
     "topics-create",
     "configs-describe",
     "acls-deny",
+    "offsets-reset",
     "offsets-inspect",
     "features-inspect",
     "reassignment-verify",
     "unauthorized-request",
+    "acls-cleanup",
     "topics-delete",
 ];
 
@@ -46,7 +48,7 @@ fn authenticated_admin_matrix_matches_real_broker_state() {
     let topic = format!("m20-cli-{}", std::process::id());
     let topic_ref = topic.as_str();
 
-    let cases: [(&str, Vec<&str>, bool); 8] = [
+    let cases: [(&str, Vec<&str>, bool); 10] = [
         (
             "topics-create",
             vec![
@@ -90,6 +92,23 @@ fn authenticated_admin_matrix_matches_real_broker_state() {
             true,
         ),
         (
+            "offsets-reset",
+            vec![
+                "consumer-groups",
+                "--reset-offsets",
+                "--group",
+                "m20-qualification",
+                "--topic",
+                topic_ref,
+                "--partition",
+                "0",
+                "--to-offset",
+                "0",
+                "--yes",
+            ],
+            true,
+        ),
+        (
             "offsets-inspect",
             vec![
                 "consumer-groups",
@@ -99,7 +118,7 @@ fn authenticated_admin_matrix_matches_real_broker_state() {
             ],
             true,
         ),
-        ("features-inspect", vec!["features", "--describe"], false),
+        ("features-inspect", vec!["features", "--describe"], true),
         (
             "reassignment-verify",
             vec![
@@ -113,6 +132,21 @@ fn authenticated_admin_matrix_matches_real_broker_state() {
             true,
         ),
         ("unauthorized-request", vec!["topics", "--list"], false),
+        (
+            "acls-cleanup",
+            vec![
+                "acls",
+                "--remove",
+                "--topic",
+                topic_ref,
+                "--deny-principal",
+                "User:m20-denied",
+                "--operation",
+                "read",
+                "--yes",
+            ],
+            true,
+        ),
         (
             "topics-delete",
             vec!["topics", "--delete", "--topic", topic_ref, "--yes"],

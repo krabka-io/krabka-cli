@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use clap::{ArgGroup, Args, ValueEnum};
 use krabka_client_admin::{
-    AclEntry, AclEntryFilter, AclOperation, CreateTopicSpec, IncrementalAlterOp, PatternType,
-    PermissionType, ResourceType,
+    AclEntry, AclEntryFilter, AclOperation, CreateTopicSpec, FeatureUpdate, IncrementalAlterOp,
+    PatternType, PermissionType, ResourceType,
 };
 use serde_json::{Value, json};
 
@@ -370,6 +370,7 @@ fn acl_entries(entries: &[AclEntry]) -> CommandResult {
 }
 
 #[derive(Debug, Args)]
+#[command(group(ArgGroup::new("action").required(true).multiple(false).args(["describe", "reset_offsets"])))]
 pub struct ConsumerGroupsArgs {
     #[command(flatten)]
     connection: ConnectionArgs,
@@ -379,24 +380,68 @@ pub struct ConsumerGroupsArgs {
     reset_offsets: bool,
     #[arg(long)]
     group: String,
+    #[arg(long, requires = "reset_offsets")]
+    topic: Option<String>,
+    #[arg(long, requires = "reset_offsets")]
+    partition: Option<i32>,
+    #[arg(long, requires = "reset_offsets")]
+    to_offset: Option<i64>,
+    #[arg(long, requires = "reset_offsets")]
+    yes: bool,
 }
 
 impl ConsumerGroupsArgs {
     pub async fn run(self) -> Result<CommandResult, String> {
-        if self.reset_offsets {
-            return Err(
-                "offset reset needs the pending krabka-client-rs AlterConsumerGroupOffsets wrapper"
-                    .into(),
-            );
+        if self.reset_offsets && !self.yes {
+            return Err("offset reset requires --yes".into());
         }
-        if !self.describe {
-            return Err("--describe or --reset-offsets is required".into());
+        if self.partition.is_some_and(|value| value < 0)
+            || self.to_offset.is_some_and(|value| value < 0)
+        {
+            return Err("--partition and --to-offset must be non-negative".into());
         }
         let mut client = self
             .connection
             .connect("consumer-groups")
             .await
             .map_err(error)?;
+        if self.reset_offsets {
+            let topic = self
+                .topic
+                .ok_or("--topic is required with --reset-offsets")?;
+            let partition = self
+                .partition
+                .ok_or("--partition is required with --reset-offsets")?;
+            let offset = self
+                .to_offset
+                .ok_or("--to-offset is required with --reset-offsets")?;
+            let outcomes = client
+                .alter_consumer_group_offsets(
+                    &self.group,
+                    &BTreeMap::from([((topic, partition), offset)]),
+                )
+                .await
+                .map_err(error)?;
+            let failed = outcomes.iter().any(|outcome| outcome.error.is_some());
+            let human = outcomes
+                .iter()
+                .map(|outcome| match &outcome.error {
+                    Some(error) => format!(
+                        "{}\t{}\t{}\tERROR\t{} ({})",
+                        self.group, outcome.topic, outcome.partition, error.name, error.code
+                    ),
+                    None => format!(
+                        "Reset group {} topic {} partition {}.",
+                        self.group, outcome.topic, outcome.partition
+                    ),
+                })
+                .collect();
+            let values = outcomes
+                .iter()
+                .map(|outcome| json!({"group": self.group, "topic": outcome.topic, "partition": outcome.partition, "error": kafka_error(outcome.error.as_ref())}))
+                .collect::<Vec<_>>();
+            return Ok(CommandResult::rows(human, values, failed));
+        }
         let offsets = client
             .list_consumer_group_offsets(&self.group)
             .await
@@ -437,27 +482,62 @@ pub struct FeaturesArgs {
 impl FeaturesArgs {
     pub async fn run(self) -> Result<CommandResult, String> {
         if self.describe {
+            let mut client = self.connection.connect("features").await.map_err(error)?;
+            let metadata = client.describe_features().await.map_err(error)?;
+            let human = metadata
+                .supported
+                .iter()
+                .map(|range| {
+                    let finalized = metadata
+                        .finalized
+                        .iter()
+                        .find(|value| value.name == range.name)
+                        .map_or("-".into(), |value| {
+                            format!("{}-{}", value.min_version, value.max_version)
+                        });
+                    format!(
+                        "{}\t{}-{}\t{}",
+                        range.name, range.min_version, range.max_version, finalized
+                    )
+                })
+                .collect();
+            return Ok(CommandResult::success(
+                human,
+                json!({"supported": metadata.supported.iter().map(|range| json!({"feature": range.name, "min": range.min_version, "max": range.max_version})).collect::<Vec<_>>(), "finalized": metadata.finalized.iter().map(|range| json!({"feature": range.name, "min": range.min_version, "max": range.max_version})).collect::<Vec<_>>(), "finalized_features_epoch": metadata.finalized_features_epoch}),
+            ));
+        }
+        if self.upgrade == self.downgrade || self.feature.is_empty() {
             return Err(
-                "feature inspection needs the pending krabka-client-rs DescribeFeatures wrapper"
-                    .into(),
+                "choose --upgrade or --downgrade with one or more --feature name=level".into(),
             );
         }
-        if self.upgrade == self.downgrade || self.feature.len() != 1 {
-            return Err("choose --upgrade or --downgrade with one --feature name=level".into());
-        }
-        let (name, level) = &self.feature[0];
-        if name != "metadata.version" {
-            return Err("the pinned admin client currently updates only metadata.version".into());
-        }
+        let updates = self
+            .feature
+            .iter()
+            .map(|(name, level)| FeatureUpdate {
+                name: name.clone(),
+                max_version_level: *level,
+                safe_downgrade: self.downgrade,
+            })
+            .collect::<Vec<_>>();
         let mut client = self.connection.connect("features").await.map_err(error)?;
-        let update = client
-            .update_metadata_version(*level, self.downgrade, self.connection.timeout)
+        let outcomes = client
+            .update_features(&updates, self.connection.timeout)
             .await
             .map_err(error)?;
-        Ok(CommandResult::success(
-            vec![format!("metadata.version was updated to {}.", update.level)],
-            json!({"feature": "metadata.version", "level": update.level}),
-        ))
+        let failed = outcomes.iter().any(|outcome| outcome.error.is_some());
+        let human = outcomes
+            .iter()
+            .map(|outcome| match &outcome.error {
+                Some(error) => format!("{}\tERROR\t{} ({})", outcome.name, error.name, error.code),
+                None => format!("Updated feature {}.", outcome.name),
+            })
+            .collect();
+        let values = outcomes
+            .iter()
+            .map(|outcome| json!({"feature": outcome.name, "error": kafka_error(outcome.error.as_ref())}))
+            .collect::<Vec<_>>();
+        Ok(CommandResult::rows(human, values, failed))
     }
 }
 
