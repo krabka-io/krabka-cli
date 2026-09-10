@@ -71,16 +71,28 @@ an immutable CLI revision and archive both the output and its digest:
 
 ```bash
 export KRABKA_CLI_REVISION="$(git rev-parse HEAD)"
-export KRABKA_CANDIDATE_REVISION='<broker commit or image digest>'
+export KRABKA_CANDIDATE_REVISION='<40-character broker commit>'
+export KRABKA_CANDIDATE_IMAGE='<registry/repository@sha256:digest>'
 export KRABKA_CANDIDATE_BOOTSTRAP='<host:port>'
 export KRABKA_COMMAND_CONFIG='<authenticated Kafka properties file>'
-export KRABKA_UNAUTHORIZED_COMMAND_CONFIG='<unauthorized Kafka properties file>'
+export KRABKA_DENIED_COMMAND_CONFIG='<properties file for the denied principal>'
+export KRABKA_DENIED_PRINCIPAL='User:<principal named by the denied config>'
 set -o pipefail
-cargo test -p krabka-cli --test candidate_broker -- --ignored --nocapture \
+cargo test -p krabka-cli --test candidate_broker \
+  authenticated_admin_matrix_matches_real_broker_state \
+  -- --ignored --exact --nocapture \
   | tee candidate-broker.jsonl
 sha256sum candidate-broker.jsonl
 ```
 
 The properties files support `security.protocol`, PEM TLS, SASL PLAIN, SCRAM,
 GSSAPI, and a file-backed OAuth bearer token. They must not be archived with
-the evidence.
+the evidence. The candidate must have at least two brokers. The denied principal
+must initially be able to describe the test topic so the lane proves that the
+ACL created by the matrix causes the recorded authorization failure.
+
+The matrix records arguments, credential label, structured response, and exit
+status for every operation. It also observes broker state after topic creation,
+configuration, offset reset, reassignment, and deletion. Reassignment evidence
+contains every progress check through completion; invalid and unauthorized
+requests must return structured errors with a nonzero exit status.
