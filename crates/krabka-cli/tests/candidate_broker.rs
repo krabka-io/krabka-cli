@@ -44,7 +44,6 @@ fn record(
     expected_exit: i32,
 ) -> Value {
     let output = run(bootstrap, config, args);
-    assert!(output.status.code() == Some(expected_exit), "{name}");
     let stream = if output.stdout.is_empty() {
         &output.stderr
     } else {
@@ -61,11 +60,12 @@ fn record(
             "payload": payload,
         }),
     );
+    assert!(output.status.code() == Some(expected_exit), "{name}");
     payload
 }
 
 fn emit(evidence: &mut Vec<Value>, entry: Value) {
-    eprintln!(
+    println!(
         "{}",
         serde_json::to_string(&entry).expect("serialize evidence")
     );
