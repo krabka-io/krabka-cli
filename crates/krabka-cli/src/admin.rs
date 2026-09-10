@@ -431,9 +431,9 @@ pub struct ConsumerGroupsArgs {
     group: String,
     #[arg(long, requires = "reset_offsets")]
     topic: Option<String>,
-    #[arg(long, requires = "reset_offsets")]
+    #[arg(long, requires = "reset_offsets", allow_hyphen_values = true)]
     partition: Option<i32>,
-    #[arg(long, requires = "reset_offsets")]
+    #[arg(long, requires = "reset_offsets", allow_hyphen_values = true)]
     to_offset: Option<i64>,
     #[arg(long, requires = "reset_offsets")]
     yes: bool,
