@@ -17,3 +17,10 @@ alias(
     name = "krabka",
     actual = "//crates/krabka-cli:krabka",
 )
+
+# `bazel run //:krabka-admin-ui -- --help`. Installed on PATH under this name,
+# it is what `krabka admin-ui` runs.
+alias(
+    name = "krabka-admin-ui",
+    actual = "//crates/admin-ui:krabka-admin-ui",
+)

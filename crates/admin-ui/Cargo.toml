@@ -1,0 +1,53 @@
+[package]
+name = "krabka-admin-ui"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Operator web UI for Krabka (binary: `krabka-admin-ui`, reached as `krabka admin-ui`)"
+repository = "https://github.com/krabka-io/krabka-cli"
+homepage = "https://github.com/krabka-io/krabka-cli"
+documentation = "https://docs.rs/krabka-admin-ui"
+readme = "README.md"
+keywords = ["kafka", "admin", "ui", "dioxus", "krabka"]
+categories = ["web-programming::http-server"]
+
+# `krabka admin-ui` delegates to this binary the way `krabka gres` delegates to
+# `krabka-gres`. See //README.md, "Plugins".
+[[bin]]
+name = "krabka-admin-ui"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+e2e = ["dep:playwright-rs"]
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true, features = ["json", "query"] }
+clap = { workspace = true, features = ["env"] }
+dioxus = { workspace = true }
+dioxus-ssr = { workspace = true }
+krabka-client-admin = { version = "0.4.0" }
+krabka-client-core = { version = "0.4.0" }
+krabka-security = { workspace = true }
+krabka-units = { workspace = true }
+parking_lot = { workspace = true }
+playwright-rs = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { workspace = true, features = ["util"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+mutants = { workspace = true }
