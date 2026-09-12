@@ -1,0 +1,36 @@
+load("//bazel:defs.bzl", "crate_binary", "crate_library", "crate_tests")
+load("//tools/lint:linters.bzl", "clippy_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Consumed by `crate.from_cargo` (see //MODULE.bazel).
+exports_files(["Cargo.toml"])
+
+# The UI itself: routes, server functions, the admin facade and the session
+# store. Everything the binary does beyond parsing arguments and binding a
+# socket lives here, which is what the `tests/*.rs` suites drive.
+crate_library(
+    name = "admin-ui",
+)
+
+# `krabka admin-ui` finds this binary on PATH as `krabka-admin-ui`, so the
+# output name is the one the CLI looks for. See //README.md, "Plugins".
+crate_binary(
+    name = "krabka-admin-ui",
+    crate_root = "src/main.rs",
+    lib = ":admin-ui",
+    # `main.rs` binds a listener and serves; it carries no `#[cfg(test)]`
+    # module, so the target would hold no tests.
+    tests = False,
+)
+
+# `crate_library` lints itself. The binary is a separate compilation, so
+# without this `main.rs` ships unlinted.
+clippy_test(
+    name = "krabka-admin-ui_clippy",
+    srcs = [":krabka-admin-ui"],
+)
+
+crate_tests(
+    lib = "admin-ui",
+)

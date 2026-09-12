@@ -134,12 +134,15 @@ jobs:
       - id: select
         run: |
           set -euo pipefail
-          # One crate, and a small one. The bound below is uniform because
-          # there is nothing here to weigh against anything else.
+          # One bound per crate, weighed against how long one mutant costs
+          # there. Every mutant is a full rebuild of the crate, so the cost is
+          # the crate's own dependency graph: `admin-ui` links a component
+          # framework and an HTTP stack, and rebuilds far slower than the CLI.
           crates="$(
             bazel query 'kind("cargo_mutants_test rule", //crates/...)' |
               jq -R -s -c 'split("\n") | map(select(length > 0)) |
-                map({target: ., name: (. | split("/")[3] | split(":")[0]), minutes: 60})'
+                map({target: ., name: (. | split("/")[3] | split(":")[0])}) |
+                map(. + {minutes: (if .name == "admin-ui" then 150 else 60 end)})'
           )"
           echo "crates=${crates}" >>"${GITHUB_OUTPUT}"
           echo "Selected: ${crates}"

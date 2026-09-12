@@ -22,6 +22,7 @@ krabka gres list-tenants --bootstrap localhost:9092
 
 Each plugin is a separate install, and `krabka --help` lists the known ones:
 
+- `krabka admin-ui` runs `krabka-admin-ui`, the operator web UI. This repository builds it; see [Admin UI](#admin-ui) below.
 - `krabka restore` runs `krabka-restore`, a point-in-time restore of a cluster data directory from a tiered-storage archive. It ships from [`krabka-broker`](https://github.com/krabka-io/krabka-broker), so install it separately.
 - `krabka gres` runs `krabka-gres`, which ships from the gres repository.
 
@@ -35,6 +36,36 @@ compiled-in one. A subcommand that is neither built in nor on `PATH` exits 127,
 and one that is found but cannot be run exits 126 -- the codes a shell uses for
 the same two cases.
 
+## Admin UI
+
+`crates/admin-ui` builds `krabka-admin-ui`, the second operator-facing surface
+in this repository. It is a web UI, not a terminal UI: a [Dioxus](https://dioxuslabs.com)
+component tree that the server renders to HTML with `dioxus-ssr` and serves
+over [axum](https://github.com/tokio-rs/axum). Every page is rendered on the
+server, so there is no WebAssembly bundle, no JavaScript, and no static asset
+directory to build or ship. The binary is the whole deployment.
+
+```bash
+KRABKA_ADMIN_UI_BOOTSTRAP=localhost:9092 krabka admin-ui
+```
+
+It signs an operator in with SASL/SCRAM-SHA-512, holds the session server-side
+behind an `HttpOnly` cookie, and reads the operator's ACLs to decide which
+pages and actions to show. The pages are overview, topics, groups, ACLs, users,
+quotas and log directories.
+
+It stays a separate binary rather than a subcommand module of `krabka`, for the
+reason given under [Plugins](#plugins): the component framework is a large
+dependency graph, and the CLI does not take it on. `krabka admin-ui` finds it on
+PATH like any other plugin.
+
+The UI talks to one service, the broker, through the Kafka admin protocol.
+[`krabka-client-rs`](https://github.com/krabka-io/krabka-client-rs) supplies
+that client: `krabka-client-admin` for metadata, groups, log directories, ACLs,
+SCRAM users, quotas and configuration, and `krabka-client-core` for the
+security handshake. It reaches no HTTP endpoint of its own and no other
+krabka-io service.
+
 ## Layering
 
 Depends on three sibling repositories, pinned by revision in
@@ -45,6 +76,9 @@ Depends on three sibling repositories, pinned by revision in
 | [`krabka-protocol`](https://github.com/krabka-io/krabka-protocol) | Wire types, security, metadata, units |
 | [`krabka-client-rs`](https://github.com/krabka-io/krabka-client-rs) | The admin and core clients |
 | [`krabka-broker`](https://github.com/krabka-io/krabka-broker) | Raft, and the bootstrap records `format` writes |
+
+`crates/admin-ui` uses two of the three: the admin and core clients, and the
+wire-layer security and unit types. It does not use `krabka-broker`.
 
 ## Build
 

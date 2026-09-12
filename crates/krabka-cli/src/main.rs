@@ -30,7 +30,8 @@ const EXTERNAL_PREFIX: &str = "krabka-";
 /// an operator can then look for.
 const SHORT_EXTERNAL_HELP: &str = "\
 Any subcommand that is not built in runs as `krabka-<name>` from PATH, such as
-`restore` and `gres`. Run `krabka --help` for where each one ships from.";
+`admin-ui`, `restore` and `gres`. Run `krabka --help` for where each one ships
+from.";
 
 /// Tail of `krabka --help`.
 ///
@@ -43,9 +44,12 @@ External subcommands:
   git runs `git-foo`. Krabka looks the binary up at run time, so a subcommand
   that you did not install does not run.
 
-  restore  Point-in-time restore of a cluster data directory. The
-           krabka-broker repository ships it as `krabka-restore`.
-  gres     The gres repository ships it as `krabka-gres`.";
+  admin-ui  The operator web UI. This repository builds it as
+            `krabka-admin-ui`, as a separate binary rather than a module of
+            this one, so `krabka` keeps its own dependency graph.
+  restore   Point-in-time restore of a cluster data directory. The
+            krabka-broker repository ships it as `krabka-restore`.
+  gres      The gres repository ships it as `krabka-gres`.";
 
 #[derive(Parser)]
 #[command(
@@ -267,6 +271,8 @@ mod tests {
         check!(help.contains("krabka-<name>"));
         check!(help.contains("PATH"));
         check!(help.contains("run time"));
+        check!(help.contains("admin-ui"));
+        check!(help.contains("krabka-admin-ui"));
         check!(help.contains("restore"));
         check!(help.contains("krabka-restore"));
         check!(help.contains("krabka-broker"));
@@ -282,6 +288,7 @@ mod tests {
 
         check!(help.contains("krabka-<name>"));
         check!(help.contains("PATH"));
+        check!(help.contains("admin-ui"));
         check!(help.contains("restore"));
         check!(help.contains("gres"));
     }
@@ -300,6 +307,25 @@ mod tests {
                 OsString::from("restore"),
                 OsString::from("--to-offset"),
                 OsString::from("42"),
+            ]
+        );
+    }
+
+    /// The admin UI is built in this repository but is still delegated, not
+    /// compiled in: `krabka admin-ui` runs the `krabka-admin-ui` binary from
+    /// PATH, so the CLI does not take the UI's dependency graph.
+    #[test]
+    fn the_admin_ui_subcommand_is_delegated() {
+        let cli = Cli::try_parse_from(["krabka", "admin-ui", "--session-ttl", "8h"])
+            .expect("admin-ui is external, not built in");
+        let Command::External(argv) = cli.command else {
+            panic!("expected the external arm");
+        };
+        check!(
+            argv == vec![
+                OsString::from("admin-ui"),
+                OsString::from("--session-ttl"),
+                OsString::from("8h"),
             ]
         );
     }
