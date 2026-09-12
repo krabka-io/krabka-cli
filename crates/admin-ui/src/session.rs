@@ -46,6 +46,16 @@ impl TryFrom<&str> for SessionId {
     }
 }
 
+/// The header a JSON mutation carries its CSRF token in.
+///
+/// A browser cannot set this header on a cross-origin request without a
+/// preflight that this server never answers, and a page on another origin
+/// cannot read the token, so only the UI itself can send it.
+pub const CSRF_HEADER_NAME: &str = "x-krabka-csrf";
+
+/// The form field a rendered mutation form carries its CSRF token in.
+pub const CSRF_FIELD_NAME: &str = "csrf_token";
+
 /// The per-session secret that a mutation request must carry.
 ///
 /// The session cookie alone does not prove that the operator asked for the

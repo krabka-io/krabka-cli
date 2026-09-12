@@ -24,23 +24,13 @@ use crate::{
     error::UiError,
     permissions::Capabilities,
     server_fns::{self, AdminSeamFactory, BrokerAdminSeamFactory, ServerFunctionContext},
-    session::{SessionRecord, SessionStore},
+    session::{CSRF_FIELD_NAME, CSRF_HEADER_NAME, SessionRecord, SessionStore},
     views::{
         OperatorView, ReadRouteState, Route, RoutePage, render_page, render_page_for_operator,
     },
 };
 
 pub const SESSION_COOKIE_NAME: &str = "krabka_admin_session";
-
-/// The header a JSON mutation carries its CSRF token in.
-///
-/// A browser cannot set this header on a cross-origin request without a
-/// preflight that this server never answers, and a page on another origin
-/// cannot read the token, so only the UI itself can send it.
-pub const CSRF_HEADER_NAME: &str = "x-krabka-csrf";
-
-/// The form field a rendered mutation form carries its CSRF token in.
-pub const CSRF_FIELD_NAME: &str = "csrf_token";
 
 #[derive(Debug, Clone)]
 pub struct AppState {

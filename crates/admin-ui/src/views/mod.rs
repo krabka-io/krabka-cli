@@ -17,7 +17,7 @@ pub use page::{
     render_page_body_html_for_operator, render_page_for_operator,
 };
 
-use crate::{dto::LogDirRow, permissions::Capabilities};
+use crate::{dto::LogDirRow, permissions::Capabilities, session::CSRF_FIELD_NAME};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Route {
@@ -167,7 +167,7 @@ fn mutation_form(action: &str, submit_label: &str, token: &str, fields: Vec<Form
     rsx! {
         form { class: "mutation-form", method: "post", action: "{action}",
             h3 { "{submit_label}" }
-            input { r#type: "hidden", name: "csrf_token", value: "{token}" }
+            input { r#type: "hidden", name: "{CSRF_FIELD_NAME}", value: "{token}" }
             for field in fields {
                 if field.kind == "hidden" {
                     input { r#type: "hidden", name: "{field.name}", value: "{field.value}" }
@@ -415,7 +415,7 @@ fn render_operations_shell_element(page: RoutePage, operator: &OperatorView) -> 
                     }
                     if let Some(token) = sign_out_token {
                         form { class: "sign-out-form", method: "post", action: "/logout",
-                            input { r#type: "hidden", name: "csrf_token", value: "{token}" }
+                            input { r#type: "hidden", name: "{CSRF_FIELD_NAME}", value: "{token}" }
                             button { r#type: "submit", "Sign out" }
                         }
                     }
