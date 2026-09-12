@@ -1,6 +1,43 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+/// A request shape that an HTML form can carry.
+///
+/// A browser form posts flat `application/x-www-form-urlencoded` pairs, so a
+/// request that holds a list needs a flat twin. Each mutation endpoint names
+/// the form shape it accepts, and the server turns that shape into the request
+/// the mutation takes. A request that is already flat is its own form shape.
+pub trait MutationForm: DeserializeOwned {
+    /// The request the mutation takes.
+    type Request: DeserializeOwned;
+
+    /// # Errors
+    /// Returns the reason the submitted form does not describe a request.
+    fn into_request(self) -> Result<Self::Request, String>;
+}
+
+/// Reads `name=value,name=value` out of one form field.
+///
+/// # Errors
+/// Returns the reason an entry does not read `name=value`.
+fn config_entries_from_form(value: &str) -> Result<Vec<ConfigEntryDto>, String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let Some((name, value)) = entry.split_once('=') else {
+                return Err(format!("config entry \"{entry}\" must read name=value"));
+            };
+
+            Ok(ConfigEntryDto {
+                name: name.trim().to_string(),
+                value: value.trim().to_string(),
+            })
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigEntryDto {
@@ -94,6 +131,9 @@ impl AlterConfigRequestDto {
 pub struct AclRequestDto {
     pub resource_type: String,
     pub resource_name: String,
+    /// `literal` or `prefixed`. A prefixed ACL only matches a filter that
+    /// names the same pattern type, so a delete needs it as much as a create.
+    pub pattern_type: String,
     pub principal: String,
     pub operation: String,
     pub permission: String,
@@ -106,6 +146,7 @@ impl AclRequestDto {
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("ACL resource type", &self.resource_type)?;
         ensure_not_blank("ACL resource name", &self.resource_name)?;
+        ensure_not_blank("ACL pattern type", &self.pattern_type)?;
         ensure_not_blank("ACL principal", &self.principal)?;
         ensure_not_blank("ACL operation", &self.operation)?;
         ensure_not_blank("ACL permission", &self.permission)?;
@@ -203,6 +244,75 @@ impl LogDirMoveRequestDto {
     }
 }
 
+/// The flat form twin of [`CreateTopicRequestDto`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateTopicFormDto {
+    pub name: String,
+    pub partitions: i32,
+    pub replicas: i32,
+    /// `name=value,name=value`, or empty for the broker defaults.
+    pub configs: String,
+}
+
+impl MutationForm for CreateTopicFormDto {
+    type Request = CreateTopicRequestDto;
+
+    fn into_request(self) -> Result<Self::Request, String> {
+        Ok(CreateTopicRequestDto {
+            name: self.name,
+            partitions: self.partitions,
+            replicas: self.replicas,
+            configs: config_entries_from_form(&self.configs)?,
+        })
+    }
+}
+
+/// The flat form twin of [`AlterConfigRequestDto`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlterConfigFormDto {
+    pub resource_type: String,
+    pub resource_name: String,
+    /// `name=value,name=value`.
+    pub configs: String,
+}
+
+impl MutationForm for AlterConfigFormDto {
+    type Request = AlterConfigRequestDto;
+
+    fn into_request(self) -> Result<Self::Request, String> {
+        Ok(AlterConfigRequestDto {
+            resource_type: self.resource_type,
+            resource_name: self.resource_name,
+            configs: config_entries_from_form(&self.configs)?,
+        })
+    }
+}
+
+macro_rules! flat_mutation_form {
+    ($($request:ty),+ $(,)?) => {
+        $(
+            impl MutationForm for $request {
+                type Request = Self;
+
+                fn into_request(self) -> Result<Self::Request, String> {
+                    Ok(self)
+                }
+            }
+        )+
+    };
+}
+
+flat_mutation_form!(
+    DeleteTopicRequestDto,
+    CreatePartitionsRequestDto,
+    AclRequestDto,
+    ScramUserUpsertDto,
+    ScramUserDeleteDto,
+    QuotaUpsertDto,
+    QuotaDeleteDto,
+    LogDirMoveRequestDto,
+);
+
 fn ensure_not_blank(field: &str, value: &str) -> Result<(), String> {
     if value.trim().is_empty() {
         return Err(format!("{field} must not be blank"));
@@ -288,7 +398,11 @@ pub struct GroupRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AclRow {
     pub resource: String,
+    pub pattern_type: String,
     pub principal: String,
+    /// The host the rule applies to. `*` is every host. Two rules that differ
+    /// only here are different rules.
+    pub host: String,
     pub operation: String,
     pub permission: String,
 }

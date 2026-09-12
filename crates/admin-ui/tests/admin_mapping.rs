@@ -4,7 +4,7 @@ use assert2::assert;
 use krabka_admin_ui::{
     admin::{acl_rows, group_rows, log_dir_rows, quota_rows, resource_outcome_rows, topic_rows},
     dto::{
-        ConfigEntryDto, CreateTopicRequestDto, KafkaErrorDto, LogDirMoveRequestDto,
+        AclRow, ConfigEntryDto, CreateTopicRequestDto, KafkaErrorDto, LogDirMoveRequestDto,
         ResourceOutcome, ScramUserUpsertDto,
     },
     error::UiError,
@@ -227,11 +227,61 @@ fn maps_acl_entries_to_visible_rows() {
         permission_type: PermissionType::Allow,
     }]);
 
-    assert!(rows.len() == 1);
-    assert!(rows[0].resource == "Topic:orders (Literal)");
-    assert!(rows[0].principal == "User:alice");
-    assert!(rows[0].operation == "Read");
-    assert!(rows[0].permission == "Allow");
+    assert!(
+        rows == vec![AclRow {
+            resource: "Topic:orders".to_string(),
+            pattern_type: "Literal".to_string(),
+            principal: "User:alice".to_string(),
+            host: "*".to_string(),
+            operation: "Read".to_string(),
+            permission: "Allow".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn acl_rows_keep_two_entries_that_differ_only_by_host_apart() {
+    let wildcard = AclEntry {
+        resource_type: ResourceType::Topic,
+        resource_name: "orders".to_string(),
+        pattern_type: PatternType::Literal,
+        principal: "User:alice".to_string(),
+        host: "*".to_string(),
+        operation: AclOperation::Read,
+        permission_type: PermissionType::Allow,
+    };
+    let single_host = AclEntry {
+        host: "10.0.0.7".to_string(),
+        ..wildcard.clone()
+    };
+
+    let rows = acl_rows(vec![wildcard, single_host]);
+
+    assert!(rows[0] != rows[1]);
+    assert!(rows[0].host == "*");
+    assert!(rows[1].host == "10.0.0.7");
+}
+
+#[test]
+fn acl_rows_keep_a_prefixed_pattern_apart_from_a_literal_one() {
+    let literal = AclEntry {
+        resource_type: ResourceType::Topic,
+        resource_name: "orders".to_string(),
+        pattern_type: PatternType::Literal,
+        principal: "User:alice".to_string(),
+        host: "*".to_string(),
+        operation: AclOperation::Read,
+        permission_type: PermissionType::Allow,
+    };
+    let prefixed = AclEntry {
+        pattern_type: PatternType::Prefixed,
+        ..literal.clone()
+    };
+
+    let rows = acl_rows(vec![literal, prefixed]);
+
+    assert!(rows[0].pattern_type == "Literal");
+    assert!(rows[1].pattern_type == "Prefixed");
 }
 
 #[test]

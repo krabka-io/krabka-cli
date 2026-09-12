@@ -13,18 +13,23 @@ use krabka_admin_ui::{
     auth::{LoginBroker, LoginRequest},
     config::{AdminUiConfig, BrokerSecurityConfig},
     dto::{
-        AclRequestDto, AlterConfigRequestDto, ConfigEntryDto, CreatePartitionsRequestDto,
-        CreateTopicRequestDto, DeleteTopicRequestDto, GroupRow, LogDirMoveRequestDto, LogDirRow,
+        AclRequestDto, AlterConfigFormDto, AlterConfigRequestDto, ConfigEntryDto,
+        CreatePartitionsRequestDto, CreateTopicFormDto, CreateTopicRequestDto,
+        DeleteTopicRequestDto, GroupRow, LogDirMoveRequestDto, LogDirRow, MutationForm,
         QuotaDeleteDto, QuotaUpsertDto, ResourceOutcome, ScramUserDeleteDto, ScramUserUpsertDto,
         TopicRow,
     },
     error::UiError,
+    permissions::Capabilities,
     server::AppState,
     server_fns::{
         AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, QuotaRow,
-        ServerFunctionContext, UserRow,
+        ServerFunctionContext, UserRow, acl_entry_from_request, acl_filter_from_request,
     },
     session::{SessionCredentials, SessionRecord, SessionStore, SessionUser},
+};
+use krabka_client_admin::{
+    AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType,
 };
 use krabka_units::secs;
 
@@ -253,6 +258,7 @@ async fn authenticated_read_seams_validate_session_and_call_admin_reader() {
         &sessions,
         Some(session_id.expose_for_cookie()),
         &reader,
+        None,
     )
     .await
     .expect("quotas read succeeds");
@@ -307,7 +313,7 @@ async fn public_context_reads_validate_session_and_call_admin_reader() {
     let users = krabka_admin_ui::server_fns::list_users(&context)
         .await
         .expect("users public context read succeeds");
-    let quotas = krabka_admin_ui::server_fns::list_quotas(&context)
+    let quotas = krabka_admin_ui::server_fns::list_quotas(&context, None)
         .await
         .expect("quotas public context read succeeds");
     let log_dirs = krabka_admin_ui::server_fns::list_log_dirs_with_context(&context)
@@ -374,7 +380,7 @@ async fn public_context_reads_reject_unauthenticated_sessions() {
         Err(UiError::NotAuthenticated)
     ));
     assert!(matches!(
-        krabka_admin_ui::server_fns::list_quotas(&context).await,
+        krabka_admin_ui::server_fns::list_quotas(&context, None).await,
         Err(UiError::NotAuthenticated)
     ));
     assert!(matches!(
@@ -611,11 +617,11 @@ async fn authenticated_public_context_mutations_still_return_validation_errors()
 
     assert!(matches!(
         krabka_admin_ui::server_fns::create_topic(&context, invalid_create_topic_request()).await,
-        Err(UiError::Admin(_))
+        Err(UiError::InvalidRequest(_))
     ));
     assert!(matches!(
         krabka_admin_ui::server_fns::delete_topic(&context, invalid_delete_topic_request()).await,
-        Err(UiError::Admin(_))
+        Err(UiError::InvalidRequest(_))
     ));
     assert!(matches!(
         krabka_admin_ui::server_fns::create_partitions(
@@ -623,19 +629,19 @@ async fn authenticated_public_context_mutations_still_return_validation_errors()
             invalid_create_partitions_request()
         )
         .await,
-        Err(UiError::Admin(_))
+        Err(UiError::InvalidRequest(_))
     ));
     assert!(matches!(
         krabka_admin_ui::server_fns::alter_configs(&context, invalid_alter_config_request()).await,
-        Err(UiError::Admin(_))
+        Err(UiError::InvalidRequest(_))
     ));
     assert!(matches!(
         krabka_admin_ui::server_fns::create_acl(&context, invalid_create_acl_request()).await,
-        Err(UiError::Admin(_))
+        Err(UiError::InvalidRequest(_))
     ));
     assert!(matches!(
         krabka_admin_ui::server_fns::delete_acl(&context, invalid_delete_acl_request()).await,
-        Err(UiError::Admin(_))
+        Err(UiError::InvalidRequest(_))
     ));
     assert!(matches!(
         krabka_admin_ui::server_fns::upsert_scram_sha512_user(
@@ -643,24 +649,24 @@ async fn authenticated_public_context_mutations_still_return_validation_errors()
             invalid_scram_upsert_request()
         )
         .await,
-        Err(UiError::Admin(_))
+        Err(UiError::InvalidRequest(_))
     ));
     assert!(matches!(
         krabka_admin_ui::server_fns::delete_scram_user(&context, invalid_scram_delete_request())
             .await,
-        Err(UiError::Admin(_))
+        Err(UiError::InvalidRequest(_))
     ));
     assert!(matches!(
         krabka_admin_ui::server_fns::upsert_quota(&context, invalid_quota_upsert_request()).await,
-        Err(UiError::Admin(_))
+        Err(UiError::InvalidRequest(_))
     ));
     assert!(matches!(
         krabka_admin_ui::server_fns::delete_quota(&context, invalid_quota_delete_request()).await,
-        Err(UiError::Admin(_))
+        Err(UiError::InvalidRequest(_))
     ));
     assert!(matches!(
         krabka_admin_ui::server_fns::move_log_dir(&context, invalid_log_dir_move_request()).await,
-        Err(UiError::Admin(_))
+        Err(UiError::InvalidRequest(_))
     ));
 
     assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
@@ -808,17 +814,17 @@ struct RecordingLoginBroker {
 }
 
 impl LoginBroker for RecordingLoginBroker {
-    fn check_login<'a>(
+    fn authenticate<'a>(
         &'a self,
         _cfg: &'a AdminUiConfig,
         username: &'a str,
         password: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Capabilities, UiError>> + Send + 'a>> {
         Box::pin(async move {
             assert!(username == "alice");
             assert!(password == LOGIN_PASSWORD_SENTINEL);
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            Ok(Capabilities::all())
         })
     }
 }
@@ -827,12 +833,12 @@ impl LoginBroker for RecordingLoginBroker {
 struct RejectingLoginBroker;
 
 impl LoginBroker for RejectingLoginBroker {
-    fn check_login<'a>(
+    fn authenticate<'a>(
         &'a self,
         _cfg: &'a AdminUiConfig,
         _username: &'a str,
         _password: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Capabilities, UiError>> + Send + 'a>> {
         Box::pin(async { Err(UiError::Admin("login rejected".to_string())) })
     }
 }
@@ -881,7 +887,9 @@ impl AdminReadSeam for RecordingAdminReadSeam {
             self.acls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![AclRow {
                 resource: "Topic:orders".to_string(),
+                pattern_type: "Literal".to_string(),
                 principal: "User:alice".to_string(),
+                host: "*".to_string(),
                 operation: "Read".to_string(),
                 permission: "Allow".to_string(),
             }])
@@ -902,11 +910,12 @@ impl AdminReadSeam for RecordingAdminReadSeam {
 
     fn quotas<'a>(
         &'a self,
+        entity: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<QuotaRow>, UiError>> + Send + 'a>> {
         Box::pin(async move {
             self.quotas.fetch_add(1, Ordering::SeqCst);
             Ok(vec![QuotaRow {
-                entity: "User:alice".to_string(),
+                entity: entity.unwrap_or_else(|| "User:alice".to_string()),
                 quota_type: "producer_byte_rate".to_string(),
                 value: "1024".to_string(),
             }])
@@ -1022,8 +1031,9 @@ impl AdminReadSeam for &RecordingAdminReadSeam {
 
     fn quotas<'a>(
         &'a self,
+        entity: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<QuotaRow>, UiError>> + Send + 'a>> {
-        (*self).quotas()
+        (*self).quotas(entity)
     }
 
     fn log_dirs<'a>(
@@ -1119,6 +1129,7 @@ fn authenticated_session(sessions: &SessionStore) -> krabka_admin_ui::session::S
             principal: "User:alice".to_string(),
         },
         SessionCredentials::scram_sha512("password".to_string()),
+        Capabilities::all(),
     )
 }
 
@@ -1295,6 +1306,7 @@ fn acl_request() -> AclRequestDto {
     AclRequestDto {
         resource_type: "topic".to_string(),
         resource_name: "orders".to_string(),
+        pattern_type: "literal".to_string(),
         principal: "User:alice".to_string(),
         operation: "Read".to_string(),
         permission: "Allow".to_string(),
@@ -1394,4 +1406,184 @@ fn format_result_debug<T: std::fmt::Debug>(result: &Result<T, UiError>) -> Strin
 
 fn assert_debug_does_not_contain_secret(debug: &str, secret: &str, label: &str) {
     assert!(!debug.contains(secret), "debug output leaked {label}");
+}
+
+#[test]
+fn acl_conversions_carry_the_requested_pattern_type() {
+    let prefixed = AclRequestDto {
+        pattern_type: "prefixed".to_string(),
+        ..acl_request()
+    };
+
+    let entry = acl_entry_from_request(&prefixed).expect("prefixed ACL converts");
+    let filter = acl_filter_from_request(&prefixed).expect("prefixed filter converts");
+
+    assert!(
+        entry
+            == AclEntry {
+                resource_type: ResourceType::Topic,
+                resource_name: "orders".to_string(),
+                pattern_type: PatternType::Prefixed,
+                principal: "User:alice".to_string(),
+                host: "*".to_string(),
+                operation: AclOperation::Read,
+                permission_type: PermissionType::Allow,
+            }
+    );
+    assert!(
+        filter
+            == AclEntryFilter {
+                resource_type: Some(ResourceType::Topic),
+                resource_name: Some("orders".to_string()),
+                pattern_type: Some(PatternType::Prefixed),
+                principal: Some("User:alice".to_string()),
+                host: Some("*".to_string()),
+                operation: Some(AclOperation::Read),
+                permission_type: Some(PermissionType::Allow),
+            }
+    );
+}
+
+#[test]
+fn acl_conversions_keep_a_literal_request_literal() {
+    let literal = acl_request();
+
+    let entry = acl_entry_from_request(&literal).expect("literal ACL converts");
+    let filter = acl_filter_from_request(&literal).expect("literal filter converts");
+
+    assert!(entry.pattern_type == PatternType::Literal);
+    assert!(filter.pattern_type == Some(PatternType::Literal));
+}
+
+#[test]
+fn acl_conversions_reject_an_unknown_pattern_type() {
+    let unknown = AclRequestDto {
+        pattern_type: "match".to_string(),
+        ..acl_request()
+    };
+
+    assert!(matches!(
+        acl_entry_from_request(&unknown),
+        Err(UiError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        acl_filter_from_request(&unknown),
+        Err(UiError::InvalidRequest(_))
+    ));
+}
+
+#[tokio::test]
+async fn quota_reads_name_the_entity_the_operator_asked_for() {
+    let sessions = SessionStore::new(Duration::from_mins(1));
+    let session_id = authenticated_session(&sessions);
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(
+        &cfg,
+        &sessions,
+        Some(session_id.expose_for_cookie()),
+        &factory,
+    );
+
+    let own = krabka_admin_ui::server_fns::list_quotas(&context, None)
+        .await
+        .expect("own quotas read succeeds");
+    let other = krabka_admin_ui::server_fns::list_quotas(&context, Some("bob".to_string()))
+        .await
+        .expect("other quotas read succeeds");
+
+    assert!(
+        own == vec![QuotaRow {
+            entity: "User:alice".to_string(),
+            quota_type: "producer_byte_rate".to_string(),
+            value: "1024".to_string(),
+        }]
+    );
+    assert!(
+        other
+            == vec![QuotaRow {
+                entity: "bob".to_string(),
+                quota_type: "producer_byte_rate".to_string(),
+                value: "1024".to_string(),
+            }]
+    );
+}
+
+#[test]
+fn a_create_topic_form_becomes_the_create_topic_request() {
+    let form = CreateTopicFormDto {
+        name: "orders".to_string(),
+        partitions: 3,
+        replicas: 2,
+        configs: "cleanup.policy=compact, retention.ms=60000".to_string(),
+    };
+
+    let request = form.into_request().expect("form describes a request");
+
+    assert!(
+        request
+            == CreateTopicRequestDto {
+                name: "orders".to_string(),
+                partitions: 3,
+                replicas: 2,
+                configs: vec![
+                    ConfigEntryDto {
+                        name: "cleanup.policy".to_string(),
+                        value: "compact".to_string(),
+                    },
+                    ConfigEntryDto {
+                        name: "retention.ms".to_string(),
+                        value: "60000".to_string(),
+                    },
+                ],
+            }
+    );
+}
+
+#[test]
+fn an_empty_config_field_asks_for_the_broker_defaults() {
+    let form = CreateTopicFormDto {
+        name: "orders".to_string(),
+        partitions: 1,
+        replicas: 1,
+        configs: String::new(),
+    };
+
+    let request = form.into_request().expect("form describes a request");
+
+    assert!(request.configs == Vec::new());
+}
+
+#[test]
+fn a_config_field_without_a_value_is_refused() {
+    let form = AlterConfigFormDto {
+        resource_type: "topic".to_string(),
+        resource_name: "orders".to_string(),
+        configs: "cleanup.policy".to_string(),
+    };
+
+    assert!(form.into_request().is_err());
+}
+
+#[test]
+fn an_alter_config_form_becomes_the_alter_config_request() {
+    let form = AlterConfigFormDto {
+        resource_type: "topic".to_string(),
+        resource_name: "orders".to_string(),
+        configs: "retention.ms=60000".to_string(),
+    };
+
+    let request = form.into_request().expect("form describes a request");
+
+    assert!(
+        request
+            == AlterConfigRequestDto {
+                resource_type: "topic".to_string(),
+                resource_name: "orders".to_string(),
+                configs: vec![ConfigEntryDto {
+                    name: "retention.ms".to_string(),
+                    value: "60000".to_string(),
+                }],
+            }
+    );
 }

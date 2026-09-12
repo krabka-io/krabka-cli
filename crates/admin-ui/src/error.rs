@@ -7,6 +7,14 @@ use crate::dto::KafkaErrorDto;
 pub enum UiError {
     #[error("not authenticated")]
     NotAuthenticated,
+    /// The operator's session is valid, but the operator's ACLs do not permit
+    /// the operation.
+    #[error("not permitted")]
+    NotPermitted,
+    /// The request reached the server intact and says something the server
+    /// cannot act on. Only the client can correct it.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
     #[error("session expired")]
     SessionExpired,
     #[error("broker connection failed: {0}")]

@@ -15,6 +15,26 @@ impl Capabilities {
     const VIEW_QUOTAS: u16 = 1 << 8;
     const ALTER_QUOTAS: u16 = 1 << 9;
     const VIEW_LOG_DIRS: u16 = 1 << 10;
+    const VIEW_USERS: u16 = 1 << 11;
+    const ALTER_LOG_DIRS: u16 = 1 << 12;
+    /// Every capability this UI knows about.
+    const EVERY: u16 = (1 << 13) - 1;
+
+    /// The capabilities of an operator whose ACLs permit everything.
+    ///
+    /// The UI also uses this when it cannot read the operator's ACLs: it then
+    /// shows every page and control and lets the broker refuse what the
+    /// operator may not do.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self(Self::EVERY)
+    }
+
+    /// The capabilities of an operator whose ACLs permit nothing.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self(0)
+    }
 
     const fn contains(self, capability: u16) -> bool {
         self.0 & capability != 0
@@ -63,6 +83,14 @@ impl Capabilities {
     #[must_use]
     pub const fn can_view_log_dirs(self) -> bool {
         self.contains(Self::VIEW_LOG_DIRS)
+    }
+    #[must_use]
+    pub const fn can_view_users(self) -> bool {
+        self.contains(Self::VIEW_USERS)
+    }
+    #[must_use]
+    pub const fn can_alter_log_dirs(self) -> bool {
+        self.contains(Self::ALTER_LOG_DIRS)
     }
 }
 
@@ -139,6 +167,14 @@ fn derive_capabilities_for_optional_host(
     grant(
         Capabilities::VIEW_LOG_DIRS,
         effective(ResourceType::Cluster, AclOperation::Describe),
+    );
+    grant(
+        Capabilities::VIEW_USERS,
+        effective(ResourceType::Cluster, AclOperation::Describe),
+    );
+    grant(
+        Capabilities::ALTER_LOG_DIRS,
+        effective(ResourceType::Cluster, AclOperation::Alter),
     );
     Capabilities(bits)
 }

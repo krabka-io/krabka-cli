@@ -22,11 +22,16 @@ use krabka_admin_ui::{
         QuotaUpsertDto, ResourceOutcome, ScramUserDeleteDto, ScramUserUpsertDto, TopicRow,
     },
     error::UiError,
+    permissions::Capabilities,
     server::{AppState, SESSION_COOKIE_NAME, router, router_with_factory},
     server_fns::{AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, QuotaRow, UserRow},
-    session::{SessionRecord, SessionStore},
-    views::{ReadRouteState, Route, RoutePage, render_page, render_route_html},
+    session::{SessionCredentials, SessionId, SessionRecord, SessionStore, SessionUser},
+    views::{
+        OperatorView, ReadRouteState, Route, RoutePage, render_page, render_page_for_operator,
+        render_route_html,
+    },
 };
+use krabka_client_admin::{AclEntry, AclOperation, PatternType, PermissionType, ResourceType};
 use krabka_units::bytes;
 use tower::ServiceExt as _;
 
@@ -89,17 +94,107 @@ async fn post_json_from(
     json_body: impl Into<Body>,
     cookie: Option<String>,
 ) -> axum::response::Response {
+    post_mutation(app, path, "application/json", json_body, cookie, None).await
+}
+
+async fn post_json_with_csrf(
+    app: axum::Router,
+    path: &str,
+    json_body: impl Into<Body>,
+    cookie: Option<String>,
+    csrf_token: &str,
+) -> axum::response::Response {
+    post_mutation(
+        app,
+        path,
+        "application/json",
+        json_body,
+        cookie,
+        Some(csrf_token.to_string()),
+    )
+    .await
+}
+
+async fn post_form_mutation(
+    app: axum::Router,
+    path: &str,
+    form_body: String,
+    cookie: Option<String>,
+) -> axum::response::Response {
+    post_mutation(
+        app,
+        path,
+        "application/x-www-form-urlencoded",
+        form_body,
+        cookie,
+        None,
+    )
+    .await
+}
+
+async fn post_mutation(
+    app: axum::Router,
+    path: &str,
+    content_type: &str,
+    body: impl Into<Body>,
+    cookie: Option<String>,
+    csrf_token: Option<String>,
+) -> axum::response::Response {
     let mut request = Request::builder()
         .method(Method::POST)
         .uri(path)
-        .header(header::CONTENT_TYPE, "application/json");
+        .header(header::CONTENT_TYPE, content_type);
     if let Some(cookie) = cookie {
         request = request.header(header::COOKIE, cookie);
     }
+    if let Some(csrf_token) = csrf_token {
+        request = request.header("x-krabka-csrf", csrf_token);
+    }
 
-    app.oneshot(request.body(json_body.into()).expect("request builds"))
+    app.oneshot(request.body(body.into()).expect("request builds"))
         .await
         .expect("router responds")
+}
+
+fn csrf_token(sessions: &SessionStore, session_id: &SessionId) -> String {
+    sessions
+        .get(session_id)
+        .expect("session exists")
+        .csrf_token
+        .expose_for_form()
+        .to_string()
+}
+
+fn operator_for(sessions: &SessionStore, session_id: &SessionId) -> OperatorView {
+    let record = sessions.get(session_id).expect("session exists");
+
+    OperatorView::new(
+        record.capabilities,
+        record.csrf_token.expose_for_form().to_string(),
+    )
+}
+
+/// A session whose only ACL is describe on topics.
+fn topic_reader_session(sessions: &SessionStore) -> SessionId {
+    sessions.create_authenticated(
+        SessionUser {
+            username: "alice".to_string(),
+            principal: "User:alice".to_string(),
+        },
+        SessionCredentials::scram_sha512("password".to_string()),
+        krabka_admin_ui::permissions::derive_capabilities(
+            "User:alice",
+            &[AclEntry {
+                resource_type: ResourceType::Topic,
+                resource_name: "*".to_string(),
+                pattern_type: PatternType::Literal,
+                principal: "User:alice".to_string(),
+                host: "*".to_string(),
+                operation: AclOperation::Describe,
+                permission_type: PermissionType::Allow,
+            }],
+        ),
+    )
 }
 
 async fn response_text(response: axum::response::Response) -> String {
@@ -123,7 +218,9 @@ fn sample_topic_row() -> TopicRow {
 fn sample_acl_row() -> AclRow {
     AclRow {
         resource: "Topic:orders".to_string(),
+        pattern_type: "Literal".to_string(),
         principal: "User:alice".to_string(),
+        host: "*".to_string(),
         operation: "Read".to_string(),
         permission: "Allow".to_string(),
     }
@@ -159,6 +256,7 @@ async fn root_without_cookie_renders_login_instead_of_operations_shell() {
 async fn root_with_valid_cookie_renders_overview_shell() {
     let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
     let session_id = sessions.create_user("alice", "User:alice");
+    let operator = operator_for(&sessions, &session_id);
     let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
     let factory = RecordingAdminSeamFactory::default();
     let app = router_with_factory(state, factory.clone());
@@ -171,7 +269,7 @@ async fn root_with_valid_cookie_renders_overview_shell() {
 
     assert!(response.status() == StatusCode::OK);
     let body = response_text(response).await;
-    assert!(body == render_page(&RoutePage::overview()));
+    assert!(body == render_page_for_operator(&RoutePage::overview(), &operator));
     assert!(factory.read_seam_calls.load(Ordering::SeqCst) == 0);
 }
 
@@ -241,6 +339,7 @@ async fn posting_login_sets_session_cookie_and_cookie_authenticates_protected_ro
 async fn authenticated_post_mutation_routes_call_admin_mutation_seam() {
     let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
     let session_id = sessions.create_user("alice", "User:alice");
+    let token = csrf_token(&sessions, &session_id);
     let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
     let factory = RecordingAdminSeamFactory::default();
     let app = router_with_factory(state, factory.clone());
@@ -265,12 +364,12 @@ async fn authenticated_post_mutation_routes_call_admin_mutation_seam() {
         ),
         (
             "/acls/create",
-            r#"{"resource_type":"topic","resource_name":"orders","principal":"User:alice","operation":"Read","permission":"Allow","host":"*"}"#,
+            r#"{"resource_type":"topic","resource_name":"orders","pattern_type":"literal","principal":"User:alice","operation":"Read","permission":"Allow","host":"*"}"#,
             "User:alice",
         ),
         (
             "/acls/delete",
-            r#"{"resource_type":"topic","resource_name":"orders","principal":"User:alice","operation":"Read","permission":"Allow","host":"*"}"#,
+            r#"{"resource_type":"topic","resource_name":"orders","pattern_type":"prefixed","principal":"User:alice","operation":"Read","permission":"Allow","host":"*"}"#,
             "User:alice",
         ),
         (
@@ -295,7 +394,8 @@ async fn authenticated_post_mutation_routes_call_admin_mutation_seam() {
             "orders",
         ),
     ] {
-        let response = post_json_from(app.clone(), path, body, Some(cookie.clone())).await;
+        let response =
+            post_json_with_csrf(app.clone(), path, body, Some(cookie.clone()), &token).await;
 
         assert!(response.status() == StatusCode::OK, "{path} should succeed");
         let text = response_text(response).await;
@@ -352,12 +452,14 @@ async fn post_mutation_routes_reject_stale_cookie_before_decoding_request_body()
 async fn post_mutation_routes_return_bad_request_for_authenticated_malformed_json() {
     let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
     let session_id = sessions.create_user("alice", "User:alice");
+    let token = csrf_token(&sessions, &session_id);
     let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
     let factory = RecordingAdminSeamFactory::default();
     let app = router_with_factory(state, factory.clone());
     let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
 
-    let response = post_json_from(app, "/topics/create", "not-json", Some(cookie)).await;
+    let response =
+        post_json_with_csrf(app, "/topics/create", "not-json", Some(cookie), &token).await;
 
     assert!(response.status() == StatusCode::BAD_REQUEST);
     assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
@@ -478,6 +580,7 @@ async fn authenticated_read_routes_call_injected_seams_and_render_rows() {
 async fn dynamic_read_routes_match_shared_page_renderer() {
     let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
     let session_id = sessions.create_user("alice", "User:alice");
+    let operator = operator_for(&sessions, &session_id);
     let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
     let factory = RecordingAdminSeamFactory::default();
     let app = router_with_factory(state, factory);
@@ -489,41 +592,52 @@ async fn dynamic_read_routes_match_shared_page_renderer() {
     let cases = [
         (
             "/topics",
-            render_page(&RoutePage::topics(ReadRouteState::Rows(vec![
-                sample_topic_row(),
-            ]))),
+            render_page_for_operator(
+                &RoutePage::topics(ReadRouteState::Rows(vec![sample_topic_row()])),
+                &operator,
+            ),
         ),
         (
             "/groups",
-            render_page(&RoutePage::groups(ReadRouteState::Rows(vec![GroupRow {
-                group_id: "consumer-a".to_string(),
-            }]))),
+            render_page_for_operator(
+                &RoutePage::groups(ReadRouteState::Rows(vec![GroupRow {
+                    group_id: "consumer-a".to_string(),
+                }])),
+                &operator,
+            ),
         ),
         (
             "/acls",
-            render_page(&RoutePage::acls(ReadRouteState::Rows(vec![
-                sample_acl_row(),
-            ]))),
+            render_page_for_operator(
+                &RoutePage::acls(ReadRouteState::Rows(vec![sample_acl_row()])),
+                &operator,
+            ),
         ),
         (
             "/users",
-            render_page(&RoutePage::users(ReadRouteState::Rows(vec![UserRow {
-                username: "scram-alice".to_string(),
-                principal: "User:scram-alice".to_string(),
-            }]))),
+            render_page_for_operator(
+                &RoutePage::users(ReadRouteState::Rows(vec![UserRow {
+                    username: "scram-alice".to_string(),
+                    principal: "User:scram-alice".to_string(),
+                }])),
+                &operator,
+            ),
         ),
         (
             "/quotas",
-            render_page(&RoutePage::quotas(ReadRouteState::Rows(vec![QuotaRow {
-                entity: "User:alice".to_string(),
-                quota_type: "producer_byte_rate".to_string(),
-                value: "1024".to_string(),
-            }]))),
+            render_page_for_operator(
+                &RoutePage::quotas(ReadRouteState::Rows(vec![QuotaRow {
+                    entity: "User:alice".to_string(),
+                    quota_type: "producer_byte_rate".to_string(),
+                    value: "1024".to_string(),
+                }])),
+                &operator,
+            ),
         ),
         (
             "/log-dirs",
-            render_page(&RoutePage::log_dirs(ReadRouteState::Rows(vec![
-                LogDirRow {
+            render_page_for_operator(
+                &RoutePage::log_dirs(ReadRouteState::Rows(vec![LogDirRow {
                     log_dir: "/var/lib/krabka".to_string(),
                     topic: "orders".to_string(),
                     partition: 0,
@@ -531,8 +645,9 @@ async fn dynamic_read_routes_match_shared_page_renderer() {
                     offset_lag: 0,
                     is_future_key: false,
                     error: None,
-                },
-            ]))),
+                }])),
+                &operator,
+            ),
         ),
     ];
 
@@ -585,18 +700,37 @@ struct RecordingLoginBroker {
 }
 
 impl LoginBroker for RecordingLoginBroker {
-    fn check_login<'a>(
+    fn authenticate<'a>(
         &'a self,
         _cfg: &'a AdminUiConfig,
         username: &'a str,
         password: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Capabilities, UiError>> + Send + 'a>> {
         Box::pin(async move {
             assert!(username == "alice");
             assert!(password == "login-route-password-sentinel");
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            Ok(Capabilities::all())
         })
+    }
+}
+
+/// A broker that reports the failure it is built with.
+#[derive(Clone)]
+struct FailingLoginBroker {
+    error: UiError,
+}
+
+impl LoginBroker for FailingLoginBroker {
+    fn authenticate<'a>(
+        &'a self,
+        _cfg: &'a AdminUiConfig,
+        _username: &'a str,
+        _password: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Capabilities, UiError>> + Send + 'a>> {
+        let error = self.error.clone();
+
+        Box::pin(async move { Err(error) })
     }
 }
 
@@ -708,11 +842,12 @@ impl AdminReadSeam for RecordingAdminSeamFactory {
 
     fn quotas<'a>(
         &'a self,
+        entity: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<QuotaRow>, UiError>> + Send + 'a>> {
         Box::pin(async move {
             self.quotas.fetch_add(1, Ordering::SeqCst);
             Ok(vec![QuotaRow {
-                entity: "User:alice".to_string(),
+                entity: entity.unwrap_or_else(|| "User:alice".to_string()),
                 quota_type: "producer_byte_rate".to_string(),
                 value: "1024".to_string(),
             }])
@@ -846,5 +981,308 @@ impl AdminMutationSeam for RecordingAdminSeamFactory {
             self.move_log_dir.fetch_add(1, Ordering::SeqCst);
             Ok(vec![ResourceOutcome::ok(request.topic)])
         })
+    }
+}
+
+#[tokio::test]
+async fn a_json_mutation_without_the_csrf_token_is_refused() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
+
+    let response = post_json_from(
+        app,
+        "/topics/create",
+        r#"{"name":"orders","partitions":3,"replicas":1,"configs":[]}"#,
+        Some(cookie),
+    )
+    .await;
+
+    assert!(response.status() == StatusCode::FORBIDDEN);
+    assert!(factory.total_mutation_calls() == 0);
+    assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
+}
+
+#[tokio::test]
+async fn a_json_mutation_with_another_sessions_csrf_token_is_refused() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let other_id = sessions.create_user("alice", "User:alice");
+    let other_token = csrf_token(&sessions, &other_id);
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
+
+    let response = post_json_with_csrf(
+        app,
+        "/topics/create",
+        r#"{"name":"orders","partitions":3,"replicas":1,"configs":[]}"#,
+        Some(cookie),
+        &other_token,
+    )
+    .await;
+
+    assert!(response.status() == StatusCode::FORBIDDEN);
+    assert!(factory.total_mutation_calls() == 0);
+}
+
+#[tokio::test]
+async fn a_cross_site_simple_post_cannot_reach_a_mutation() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
+
+    // A form on another origin can send text/plain with the session cookie
+    // attached, and it can send no CSRF token. Both doors are shut.
+    for content_type in ["text/plain", "multipart/form-data"] {
+        let response = post_mutation(
+            app.clone(),
+            "/topics/delete",
+            content_type,
+            r#"{"name":"orders"}"#,
+            Some(cookie.clone()),
+            None,
+        )
+        .await;
+
+        assert!(
+            response.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "{content_type} was accepted"
+        );
+    }
+
+    let form_without_token = post_form_mutation(
+        app,
+        "/topics/delete",
+        "name=orders".to_string(),
+        Some(cookie),
+    )
+    .await;
+
+    assert!(form_without_token.status() == StatusCode::FORBIDDEN);
+    assert!(factory.total_mutation_calls() == 0);
+    assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
+}
+
+#[tokio::test]
+async fn a_rendered_form_post_reaches_the_mutation_seam() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let token = csrf_token(&sessions, &session_id);
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
+
+    for (path, body, expected_resource) in [
+        (
+            "/topics/create",
+            format!(
+                "csrf_token={token}&name=orders&partitions=3&replicas=1&configs=cleanup.policy%3Dcompact"
+            ),
+            "orders",
+        ),
+        (
+            "/topics/configs",
+            format!(
+                "csrf_token={token}&resource_type=topic&resource_name=orders&configs=retention.ms%3D60000"
+            ),
+            "orders",
+        ),
+        (
+            "/acls/delete",
+            format!(
+                "csrf_token={token}&resource_type=topic&resource_name=orders&pattern_type=prefixed&principal=User%3Aalice&host=*&operation=read&permission=allow"
+            ),
+            "User:alice",
+        ),
+        (
+            "/users/scram/upsert",
+            format!("csrf_token={token}&username=bob&password=secret&iterations=4096"),
+            "bob",
+        ),
+        (
+            "/quotas/upsert",
+            format!("csrf_token={token}&entity=bob&quota_type=producer_byte_rate&value=1024"),
+            "bob",
+        ),
+        (
+            "/log-dirs/move",
+            format!(
+                "csrf_token={token}&topic=orders&partition=0&destination_log_dir=%2Fvar%2Flib%2Fkrabka-1"
+            ),
+            "orders",
+        ),
+    ] {
+        let response = post_form_mutation(app.clone(), path, body, Some(cookie.clone())).await;
+
+        assert!(response.status() == StatusCode::OK, "{path} status");
+        let text = response_text(response).await;
+        assert!(text.contains("status=ok"), "{path} returned {text}");
+        assert!(text.contains(expected_resource), "{path} returned {text}");
+    }
+
+    assert!(factory.create_topic.load(Ordering::SeqCst) == 1);
+    assert!(factory.alter_configs.load(Ordering::SeqCst) == 1);
+    assert!(factory.delete_acl.load(Ordering::SeqCst) == 1);
+    assert!(factory.upsert_scram.load(Ordering::SeqCst) == 1);
+    assert!(factory.upsert_quota.load(Ordering::SeqCst) == 1);
+    assert!(factory.move_log_dir.load(Ordering::SeqCst) == 1);
+}
+
+#[tokio::test]
+async fn a_semantic_validation_failure_is_a_client_error() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let token = csrf_token(&sessions, &session_id);
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
+
+    for body in [
+        r#"{"name":"","partitions":3,"replicas":1,"configs":[]}"#,
+        r#"{"name":"orders","partitions":-1,"replicas":1,"configs":[]}"#,
+    ] {
+        let response = post_json_with_csrf(
+            app.clone(),
+            "/topics/create",
+            body,
+            Some(cookie.clone()),
+            &token,
+        )
+        .await;
+
+        assert!(response.status() == StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    assert!(factory.total_mutation_calls() == 0);
+}
+
+#[tokio::test]
+async fn logout_removes_the_session_and_expires_the_cookie() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let token = csrf_token(&sessions, &session_id);
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions.clone());
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory);
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
+
+    let response = post_form_mutation(
+        app.clone(),
+        "/logout",
+        format!("csrf_token={token}"),
+        Some(cookie.clone()),
+    )
+    .await;
+
+    assert!(response.status() == StatusCode::OK);
+    let set_cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("logout clears the cookie")
+        .to_str()
+        .expect("cookie is ASCII")
+        .to_string();
+    assert!(set_cookie.contains("Max-Age=0"));
+    assert!(sessions.get(&session_id).is_none());
+
+    let after = get_from(app, "/topics", Some(cookie)).await;
+    let body = response_text(after).await;
+    assert!(body == render_page(&RoutePage::login()));
+}
+
+#[tokio::test]
+async fn logout_without_the_csrf_token_keeps_the_session() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions.clone());
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory);
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
+
+    let response =
+        post_form_mutation(app, "/logout", "csrf_token=wrong".to_string(), Some(cookie)).await;
+
+    assert!(response.status() == StatusCode::FORBIDDEN);
+    assert!(sessions.get(&session_id).is_some());
+}
+
+#[tokio::test]
+async fn a_restricted_operator_reaches_neither_the_page_nor_the_mutation() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = topic_reader_session(&sessions);
+    let token = csrf_token(&sessions, &session_id);
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
+
+    let page = get_from(app.clone(), "/acls", Some(cookie.clone())).await;
+    let body = response_text(page).await;
+
+    assert!(body.contains("Your ACLs do not permit ACL access."));
+    assert!(!body.contains("href=\"/acls\""));
+    assert!(factory.acls.load(Ordering::SeqCst) == 0);
+
+    let mutation = post_json_with_csrf(
+        app,
+        "/acls/create",
+        r#"{"resource_type":"topic","resource_name":"orders","pattern_type":"literal","principal":"User:alice","operation":"Read","permission":"Allow","host":"*"}"#,
+        Some(cookie),
+        &token,
+    )
+    .await;
+
+    assert!(mutation.status() == StatusCode::FORBIDDEN);
+    assert!(factory.total_mutation_calls() == 0);
+    assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
+}
+
+#[tokio::test]
+async fn the_quota_page_reads_the_entity_the_operator_asked_for() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = Some(format!(
+        "{SESSION_COOKIE_NAME}={}",
+        session_id.expose_for_cookie()
+    ));
+
+    let body = response_text(get_from(app, "/quotas?entity=bob", cookie).await).await;
+
+    assert!(body.contains("bob producer_byte_rate 1024"));
+    assert!(factory.quotas.load(Ordering::SeqCst) == 1);
+}
+
+#[tokio::test]
+async fn a_broker_outage_at_login_is_not_reported_as_a_bad_password() {
+    for (error, expected_status) in [
+        (
+            UiError::BrokerConnection("no bootstrap address was reachable: tried 1".to_string()),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (UiError::NotAuthenticated, StatusCode::UNAUTHORIZED),
+    ] {
+        let state = AppState::new(AdminUiConfig::default());
+        let app = krabka_admin_ui::server::router_with_factory_and_login_broker(
+            state,
+            RecordingAdminSeamFactory::default(),
+            FailingLoginBroker { error },
+        );
+
+        let response = post_form_from(app, "/login", "username=alice&password=secret").await;
+
+        assert!(response.status() == expected_status);
     }
 }

@@ -1,12 +1,38 @@
 use assert2::assert;
 use krabka_admin_ui::{
-    dto::TopicRow,
+    dto::{KafkaErrorDto, LogDirRow, TopicRow},
+    permissions::{Capabilities, derive_capabilities},
     server_fns::AclRow,
     views::{
-        ReadRouteState, Route, RoutePage, acls, groups, layout::sidebar_links, log_dirs, quotas,
-        render_page, render_page_body_html, render_route, render_route_html, topics, users,
+        OperatorView, ReadRouteState, Route, RoutePage, acls, groups,
+        layout::{sidebar_links, sidebar_links_for},
+        log_dirs, quotas, render_page, render_page_body_html, render_page_for_operator,
+        render_route, render_route_html, topics, users,
     },
 };
+use krabka_client_admin::{AclEntry, AclOperation, PatternType, PermissionType, ResourceType};
+
+const TOKEN: &str = "csrf-token-sentinel";
+
+fn operator(capabilities: Capabilities) -> OperatorView {
+    OperatorView::new(capabilities, TOKEN.to_string())
+}
+
+/// An operator whose only ACL is describe on topics.
+fn topic_reader() -> Capabilities {
+    derive_capabilities(
+        "User:alice",
+        &[AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "*".to_string(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".to_string(),
+            host: "*".to_string(),
+            operation: AclOperation::Describe,
+            permission_type: PermissionType::Allow,
+        }],
+    )
+}
 
 fn ssr_route_body(page: &RoutePage) -> String {
     render_page_body_html(page)
@@ -181,7 +207,9 @@ fn shared_page_renderer_renders_dynamic_topics_and_acls() {
     }])));
     let acls_html = render_page(&RoutePage::acls(ReadRouteState::Rows(vec![AclRow {
         resource: "Topic:orders".to_string(),
+        pattern_type: "Literal".to_string(),
         principal: "User:alice".to_string(),
+        host: "10.0.0.7".to_string(),
         operation: "Read".to_string(),
         permission: "Allow".to_string(),
     }])));
@@ -190,7 +218,7 @@ fn shared_page_renderer_renders_dynamic_topics_and_acls() {
     assert!(topics_html.contains("orders&#60;east&#62;"));
     assert!(!topics_html.contains("orders<east>"));
     assert!(acls_html.contains("admin-section acls-section"));
-    assert!(acls_html.contains("Topic:orders User:alice Read Allow"));
+    assert!(acls_html.contains("Topic:orders Literal User:alice host=10.0.0.7 Read Allow"));
 }
 
 #[test]
@@ -271,4 +299,184 @@ fn shared_page_renderer_escapes_all_html_metacharacters() {
     assert!(rendered.contains("&#34;"));
     assert!(rendered.contains("&#39;"));
     assert!(!rendered.contains("<&>\"'"));
+}
+
+#[test]
+fn operations_navigation_renders_links_to_every_permitted_route() {
+    let rendered = render_page_for_operator(&RoutePage::overview(), &operator(Capabilities::all()));
+
+    for link in sidebar_links() {
+        assert!(
+            rendered.contains(&format!("href=\"{}\"", link.path)),
+            "{} has no link",
+            link.label
+        );
+    }
+}
+
+#[test]
+fn navigation_drops_the_routes_the_operator_may_not_see() {
+    let capabilities = topic_reader();
+
+    let links = sidebar_links_for(capabilities);
+    let rendered = render_page_for_operator(&RoutePage::overview(), &operator(capabilities));
+
+    let paths: Vec<_> = links.iter().map(|link| link.path).collect();
+    assert!(paths == vec!["/", "/topics"]);
+    assert!(rendered.contains("href=\"/topics\""));
+    assert!(!rendered.contains("href=\"/acls\""));
+    assert!(!rendered.contains("href=\"/log-dirs\""));
+}
+
+#[test]
+fn topic_page_renders_a_create_form_that_posts_to_the_create_endpoint() {
+    let rendered = render_page_for_operator(
+        &RoutePage::topics(ReadRouteState::Rows(vec![TopicRow {
+            name: "orders".to_string(),
+            topic_id: None,
+            partition_count: 3,
+            replication_factor: 1,
+            error: None,
+        }])),
+        &operator(Capabilities::all()),
+    );
+
+    assert!(rendered.contains("action=\"/topics/create\""));
+    assert!(rendered.contains("method=\"post\""));
+    assert!(rendered.contains("name=\"partitions\""));
+    assert!(rendered.contains("name=\"csrf_token\""));
+    assert!(rendered.contains(&format!("value=\"{TOKEN}\"")));
+}
+
+#[test]
+fn every_mutation_endpoint_has_a_form_on_its_page() {
+    let pages = [
+        (
+            RoutePage::topics(ReadRouteState::Rows(Vec::new())),
+            vec![
+                "/topics/create",
+                "/topics/partitions",
+                "/topics/configs",
+                "/topics/delete",
+            ],
+        ),
+        (
+            RoutePage::acls(ReadRouteState::Rows(Vec::new())),
+            vec!["/acls/create", "/acls/delete"],
+        ),
+        (
+            RoutePage::users(ReadRouteState::Rows(Vec::new())),
+            vec!["/users/scram/upsert", "/users/scram/delete"],
+        ),
+        (
+            RoutePage::quotas(ReadRouteState::Rows(Vec::new())),
+            vec!["/quotas/upsert", "/quotas/delete"],
+        ),
+        (
+            RoutePage::log_dirs(ReadRouteState::Rows(Vec::new())),
+            vec!["/log-dirs/move"],
+        ),
+    ];
+
+    for (page, actions) in pages {
+        let rendered = render_page_for_operator(&page, &operator(Capabilities::all()));
+
+        for action in actions {
+            assert!(
+                rendered.contains(&format!("action=\"{action}\"")),
+                "{action} has no form"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_page_without_a_session_renders_no_mutation_form() {
+    let rendered = render_page(&RoutePage::topics(ReadRouteState::Rows(Vec::new())));
+
+    assert!(!rendered.contains("action=\"/topics/create\""));
+    assert!(!rendered.contains("csrf_token"));
+}
+
+#[test]
+fn a_topic_reader_sees_no_topic_mutation_form() {
+    let rendered = render_page_for_operator(
+        &RoutePage::topics(ReadRouteState::Rows(Vec::new())),
+        &operator(topic_reader()),
+    );
+
+    assert!(!rendered.contains("action=\"/topics/create\""));
+    assert!(!rendered.contains("action=\"/topics/delete\""));
+}
+
+#[test]
+fn the_shell_renders_a_logout_form_only_for_a_signed_in_operator() {
+    let signed_in =
+        render_page_for_operator(&RoutePage::overview(), &operator(Capabilities::all()));
+    let anonymous = render_page(&RoutePage::overview());
+
+    assert!(signed_in.contains("action=\"/logout\""));
+    assert!(!anonymous.contains("action=\"/logout\""));
+}
+
+#[test]
+fn quota_page_renders_the_lookup_form_with_the_requested_entity() {
+    let rendered = render_page_for_operator(
+        &RoutePage::quotas_for_entity(ReadRouteState::Rows(Vec::new()), Some("bob".to_string())),
+        &operator(Capabilities::all()),
+    );
+
+    assert!(rendered.contains("action=\"/quotas\""));
+    assert!(rendered.contains("method=\"get\""));
+    assert!(rendered.contains("name=\"entity\""));
+    assert!(rendered.contains("value=\"bob\""));
+}
+
+#[test]
+fn log_dir_rows_show_the_broker_error_instead_of_sentinel_values() {
+    let rendered = render_page(&RoutePage::log_dirs(ReadRouteState::Rows(vec![
+        LogDirRow {
+            log_dir: "/var/lib/krabka".to_string(),
+            topic: String::new(),
+            partition: -1,
+            partition_size: 0,
+            offset_lag: 0,
+            is_future_key: false,
+            error: Some(KafkaErrorDto {
+                code: 57,
+                name: "KAFKA_STORAGE_ERROR".to_string(),
+                message: Some("disk offline".to_string()),
+            }),
+        },
+    ])));
+
+    assert!(rendered.contains("/var/lib/krabka error=KAFKA_STORAGE_ERROR (57): disk offline"));
+    assert!(!rendered.contains("/-1-0"));
+}
+
+#[test]
+fn a_readable_log_dir_row_still_shows_its_partition() {
+    let rendered = render_page(&RoutePage::log_dirs(ReadRouteState::Rows(vec![
+        LogDirRow {
+            log_dir: "/var/lib/krabka".to_string(),
+            topic: "orders".to_string(),
+            partition: 0,
+            partition_size: 10,
+            offset_lag: 0,
+            is_future_key: false,
+            error: None,
+        },
+    ])));
+
+    assert!(rendered.contains("/var/lib/krabka orders/0-10"));
+}
+
+#[test]
+fn a_page_the_operator_may_not_read_says_so() {
+    let rendered = render_page_for_operator(
+        &RoutePage::topics(ReadRouteState::NotPermitted),
+        &operator(topic_reader()),
+    );
+
+    assert!(rendered.contains("Your ACLs do not permit topic access."));
 }
