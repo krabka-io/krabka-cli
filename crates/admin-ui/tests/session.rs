@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use assert2::assert;
-use krabka_admin_ui::session::{SessionId, SessionStore, SessionUser};
+use krabka_admin_ui::{
+    permissions::Capabilities,
+    session::{SessionCredentials, SessionId, SessionStore, SessionUser},
+};
 
 #[test]
 fn session_store_creates_and_retrieves_user() {
@@ -85,4 +88,86 @@ fn session_store_debug_does_not_include_session_storage() {
 
     assert!(!debug_output.contains("sessions"));
     assert!(!debug_output.contains("erin"));
+}
+
+fn user(username: &str) -> SessionUser {
+    SessionUser {
+        username: username.to_string(),
+        principal: format!("User:{username}"),
+    }
+}
+
+#[test]
+fn creating_a_session_drops_the_expired_records_of_earlier_logins() {
+    let store = SessionStore::new(Duration::ZERO);
+
+    let first = store.create_authenticated(
+        user("alice"),
+        SessionCredentials::scram_sha512("first-password".to_string()),
+        Capabilities::all(),
+    );
+    let second = store.create_authenticated(
+        user("alice"),
+        SessionCredentials::scram_sha512("second-password".to_string()),
+        Capabilities::all(),
+    );
+
+    // The first record held a password past its TTL until the second login
+    // dropped it.
+    assert!(store.len() == 1);
+    assert!(store.get(&first).is_none());
+    assert!(store.get(&second).is_none());
+}
+
+#[test]
+fn creating_a_session_keeps_the_records_that_are_still_live() {
+    let store = SessionStore::new(Duration::from_mins(1));
+
+    let first = store.create(user("alice"));
+    let second = store.create(user("bob"));
+
+    assert!(store.len() == 2);
+    assert!(store.get(&first).is_some());
+    assert!(store.get(&second).is_some());
+}
+
+#[test]
+fn each_session_carries_its_own_csrf_token() {
+    let store = SessionStore::new(Duration::from_mins(1));
+    let first = store.create(user("alice"));
+    let second = store.create(user("bob"));
+
+    let first_record = store.get(&first).expect("first session exists");
+    let second_record = store.get(&second).expect("second session exists");
+    let first_token = first_record.csrf_token.expose_for_form().to_string();
+
+    assert!(first_record.csrf_token.matches(&first_token));
+    assert!(!second_record.csrf_token.matches(&first_token));
+    assert!(!first_record.csrf_token.matches(""));
+    assert!(!first_record.csrf_token.matches(&format!("{first_token}x")));
+}
+
+#[test]
+fn csrf_token_debug_redacts_its_value() {
+    let store = SessionStore::new(Duration::from_mins(1));
+    let id = store.create(user("alice"));
+    let record = store.get(&id).expect("session exists");
+
+    let debug_output = format!("{:?}", record.csrf_token);
+
+    assert!(!debug_output.contains(record.csrf_token.expose_for_form()));
+}
+
+#[test]
+fn an_authenticated_session_keeps_the_capabilities_it_was_created_with() {
+    let store = SessionStore::new(Duration::from_mins(1));
+
+    let id = store.create_authenticated(
+        user("alice"),
+        SessionCredentials::scram_sha512("password".to_string()),
+        Capabilities::none(),
+    );
+
+    let record = store.get(&id).expect("session exists");
+    assert!(record.capabilities == Capabilities::none());
 }

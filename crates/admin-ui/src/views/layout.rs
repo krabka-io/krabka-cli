@@ -1,4 +1,5 @@
 use super::Route;
+use crate::permissions::Capabilities;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidebarLink {
@@ -30,4 +31,14 @@ const SIDEBAR_LINKS: &[SidebarLink] = &[
 #[must_use]
 pub const fn sidebar_links() -> &'static [SidebarLink] {
     SIDEBAR_LINKS
+}
+
+/// The sidebar links the operator's ACLs permit, in the order above.
+#[must_use]
+pub fn sidebar_links_for(capabilities: Capabilities) -> Vec<SidebarLink> {
+    SIDEBAR_LINKS
+        .iter()
+        .copied()
+        .filter(|link| link.route.is_permitted(capabilities))
+        .collect()
 }

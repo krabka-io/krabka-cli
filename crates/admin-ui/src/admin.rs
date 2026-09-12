@@ -57,12 +57,19 @@ impl AdminFacade {
     /// # Errors
     /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub async fn acls(&mut self) -> Result<Vec<AclRow>, AdminError> {
-        let acls = self
-            .client
-            .describe_acls(&AclEntryFilter::default())
-            .await?;
+        Ok(acl_rows(self.acl_entries().await?))
+    }
 
-        Ok(acl_rows(acls))
+    #[cfg_attr(test, mutants::skip)]
+    /// Every ACL the broker reports, unformatted.
+    ///
+    /// Login derives the operator's capabilities from these entries, so it
+    /// needs the typed entry rather than the display row.
+    ///
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
+    pub async fn acl_entries(&mut self) -> Result<Vec<AclEntry>, AdminError> {
+        self.client.describe_acls(&AclEntryFilter::default()).await
     }
 
     #[cfg_attr(test, mutants::skip)]
@@ -111,11 +118,10 @@ pub fn group_rows(group_ids: Vec<String>) -> Vec<GroupRow> {
 pub fn acl_rows(acls: Vec<AclEntry>) -> Vec<AclRow> {
     acls.into_iter()
         .map(|acl| AclRow {
-            resource: format!(
-                "{:?}:{} ({:?})",
-                acl.resource_type, acl.resource_name, acl.pattern_type
-            ),
+            resource: format!("{:?}:{}", acl.resource_type, acl.resource_name),
+            pattern_type: format!("{:?}", acl.pattern_type),
             principal: acl.principal,
+            host: acl.host,
             operation: format!("{:?}", acl.operation),
             permission: format!("{:?}", acl.permission_type),
         })

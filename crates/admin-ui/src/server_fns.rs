@@ -162,8 +162,11 @@ pub trait AdminReadSeam {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<UserRow>, UiError>> + Send + 'a>>;
 
+    /// The quotas of `entity`, or of the signed-in operator when `entity` is
+    /// `None`.
     fn quotas<'a>(
         &'a self,
+        entity: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<QuotaRow>, UiError>> + Send + 'a>>;
 
     fn log_dirs<'a>(
@@ -347,6 +350,20 @@ pub fn current_session_with_store(
     })
 }
 
+/// The stored session behind a cookie value.
+///
+/// The HTTP layer needs the record itself: the record carries the operator's
+/// capabilities and the CSRF token that a mutation must repeat.
+///
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
+pub fn session_record_with_store(
+    sessions: &SessionStore,
+    raw_session_id: Option<&str>,
+) -> Result<SessionRecord, UiError> {
+    require_session(sessions, raw_session_id)
+}
+
 /// # Errors
 /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub fn current_session_with_context<F>(
@@ -449,20 +466,22 @@ pub async fn list_quotas_with_reader<R: AdminReadSeam>(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
     reader: &R,
+    entity: Option<String>,
 ) -> Result<Vec<QuotaRow>, UiError> {
     require_session(sessions, raw_session_id)?;
 
-    reader.quotas().await
+    reader.quotas(entity).await
 }
 
 /// # Errors
 /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub async fn list_quotas<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
+    entity: Option<String>,
 ) -> Result<Vec<QuotaRow>, UiError> {
     let reader = read_seam_from_context(context)?;
 
-    reader.quotas().await
+    reader.quotas(entity).await
 }
 
 /// # Errors
@@ -691,10 +710,13 @@ impl AdminReadSeam for BrokerAdminReadSeam {
 
     fn quotas<'a>(
         &'a self,
+        entity: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<QuotaRow>, UiError>> + Send + 'a>> {
         Box::pin(async move {
             let mut facade = self.facade().await?;
-            Ok(facade.quotas_for_user(&self.username).await?)
+            let entity = entity.unwrap_or_else(|| self.username.clone());
+
+            Ok(facade.quotas_for_user(&entity).await?)
         })
     }
 
@@ -945,7 +967,7 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
 }
 
 fn ensure_valid_request(validation: Result<(), String>) -> Result<(), UiError> {
-    validation.map_err(UiError::Admin)
+    validation.map_err(UiError::InvalidRequest)
 }
 
 fn ensure_topic_config_resource(resource_type: &str, resource_name: &str) -> Result<(), UiError> {
@@ -953,16 +975,21 @@ fn ensure_topic_config_resource(resource_type: &str, resource_name: &str) -> Res
         return Ok(());
     }
 
-    Err(UiError::Admin(format!(
+    Err(UiError::InvalidRequest(format!(
         "alter configs only supports topic resources through krabka-client-admin; {resource_type}:{resource_name} is unsupported"
     )))
 }
 
-fn acl_entry_from_request(request: &AclRequestDto) -> Result<AclEntry, UiError> {
+/// The ACL the request describes.
+///
+/// # Errors
+/// Returns [`UiError::InvalidRequest`] when a field names something Kafka does
+/// not define.
+pub fn acl_entry_from_request(request: &AclRequestDto) -> Result<AclEntry, UiError> {
     Ok(AclEntry {
         resource_type: parse_resource_type(&request.resource_type)?,
         resource_name: request.resource_name.clone(),
-        pattern_type: PatternType::Literal,
+        pattern_type: parse_pattern_type(&request.pattern_type)?,
         principal: request.principal.clone(),
         host: request.host.clone(),
         operation: parse_acl_operation(&request.operation)?,
@@ -970,16 +997,35 @@ fn acl_entry_from_request(request: &AclRequestDto) -> Result<AclEntry, UiError> 
     })
 }
 
-fn acl_filter_from_request(request: &AclRequestDto) -> Result<AclEntryFilter, UiError> {
+/// The delete filter the request describes.
+///
+/// Every axis is pinned, the pattern type included: `DeleteAcls` removes only
+/// the entries a filter matches exactly, and a prefixed ACL does not match a
+/// literal filter.
+///
+/// # Errors
+/// Returns [`UiError::InvalidRequest`] when a field names something Kafka does
+/// not define.
+pub fn acl_filter_from_request(request: &AclRequestDto) -> Result<AclEntryFilter, UiError> {
     Ok(AclEntryFilter {
         resource_type: Some(parse_resource_type(&request.resource_type)?),
         resource_name: Some(request.resource_name.clone()),
-        pattern_type: Some(PatternType::Literal),
+        pattern_type: Some(parse_pattern_type(&request.pattern_type)?),
         principal: Some(request.principal.clone()),
         host: Some(request.host.clone()),
         operation: Some(parse_acl_operation(&request.operation)?),
         permission_type: Some(parse_permission_type(&request.permission)?),
     })
+}
+
+fn parse_pattern_type(value: &str) -> Result<PatternType, UiError> {
+    match value.to_ascii_lowercase().as_str() {
+        "literal" => Ok(PatternType::Literal),
+        "prefixed" => Ok(PatternType::Prefixed),
+        _ => Err(UiError::InvalidRequest(format!(
+            "unsupported ACL pattern type {value}"
+        ))),
+    }
 }
 
 fn parse_resource_type(value: &str) -> Result<ResourceType, UiError> {
@@ -990,7 +1036,7 @@ fn parse_resource_type(value: &str) -> Result<ResourceType, UiError> {
         "transactionalid" | "transactional_id" | "transactional-id" => {
             Ok(ResourceType::TransactionalId)
         }
-        _ => Err(UiError::Admin(format!(
+        _ => Err(UiError::InvalidRequest(format!(
             "unsupported ACL resource type {value}"
         ))),
     }
@@ -1016,7 +1062,9 @@ fn parse_acl_operation(value: &str) -> Result<AclOperation, UiError> {
         "twophasecommit" | "two_phase_commit" | "two-phase-commit" => {
             Ok(AclOperation::TwoPhaseCommit)
         }
-        _ => Err(UiError::Admin(format!("unsupported ACL operation {value}"))),
+        _ => Err(UiError::InvalidRequest(format!(
+            "unsupported ACL operation {value}"
+        ))),
     }
 }
 
@@ -1024,7 +1072,7 @@ fn parse_permission_type(value: &str) -> Result<PermissionType, UiError> {
     match value.to_ascii_lowercase().as_str() {
         "allow" => Ok(PermissionType::Allow),
         "deny" => Ok(PermissionType::Deny),
-        _ => Err(UiError::Admin(format!(
+        _ => Err(UiError::InvalidRequest(format!(
             "unsupported ACL permission {value}"
         ))),
     }

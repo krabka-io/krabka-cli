@@ -54,6 +54,12 @@ behind an `HttpOnly` cookie, and reads the operator's ACLs to decide which
 pages and actions to show. The pages are overview, topics, groups, ACLs, users,
 quotas and log directories.
 
+Each mutation is a plain HTML form that the browser posts. The server refuses a
+mutation that carries no CSRF token, because the session cookie alone does not
+show that the operator asked for it. A form sends the token in its `csrf_token`
+field. A JSON client sends the same token in the `x-krabka-csrf` header. The
+token belongs to one session, so a page on another origin cannot supply it.
+
 It stays a separate binary rather than a subcommand module of `krabka`, for the
 reason given under [Plugins](#plugins): the component framework is a large
 dependency graph, and the CLI does not take it on. `krabka admin-ui` finds it on
