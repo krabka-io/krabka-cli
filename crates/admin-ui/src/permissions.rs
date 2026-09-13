@@ -37,7 +37,7 @@ impl Capabilities {
     }
 
     const fn contains(self, capability: u16) -> bool {
-        self.0 & capability != 0
+        (self.0 & capability) != 0
     }
 
     #[must_use]
