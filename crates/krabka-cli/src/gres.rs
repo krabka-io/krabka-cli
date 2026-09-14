@@ -385,7 +385,7 @@ struct SplitRangeArgs {
     /// operator services.
     #[arg(long)]
     successor_endpoint: Option<String>,
-    /// Successor WAL generation. Defaults to the source range generation.
+    /// Successor WAL generation. Defaults to the source range generation plus one.
     #[arg(long)]
     successor_wal_generation: Option<u64>,
 }
