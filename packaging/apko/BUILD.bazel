@@ -1,0 +1,151 @@
+"""Published Krabka CLI image built from locked Wolfi bases and a Bazel binary."""
+
+load("@rules_apko//apko:defs.bzl", "apko_image")
+load("@rules_img//img:convert.bzl", "image_manifest_from_oci_layout")
+load("@rules_img//img:image.bzl", "image_index", "image_manifest")
+load("@rules_img//img:layer.bzl", "file_metadata", "image_layer")
+load("@rules_img//img:load.bzl", "image_load")
+load("@rules_img//img:media_types.bzl", "GZIP_LAYER")
+load("@rules_img//img:push.bzl", "image_push")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+config_setting(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:linux",
+    ],
+)
+
+apko_image(
+    name = "base_oci",
+    config = "krabka-cli.yaml",
+    contents = "@krabka_cli_base_lock//:contents",
+    tag = "krabka-cli-base:amd64-locked",
+)
+
+apko_image(
+    name = "base_arm64_oci",
+    config = "krabka-cli.arm64.yaml",
+    contents = "@krabka_cli_base_arm64_lock//:contents",
+    tag = "krabka-cli-base:arm64-locked",
+)
+
+image_manifest_from_oci_layout(
+    name = "base",
+    src = ":base_oci",
+    architecture = "amd64",
+    layers = [GZIP_LAYER],
+    os = "linux",
+)
+
+image_manifest_from_oci_layout(
+    name = "base_arm64",
+    src = ":base_arm64_oci",
+    architecture = "arm64",
+    layers = [GZIP_LAYER],
+    os = "linux",
+)
+
+NONROOT = file_metadata(
+    gid = 65532,
+    mode = "0755",
+    uid = 65532,
+)
+
+image_layer(
+    name = "application_layer",
+    srcs = {
+        "/usr/bin/krabka": "//crates/krabka-cli:krabka",
+    },
+    default_metadata = NONROOT,
+    include_runfiles = False,
+)
+
+image_manifest(
+    name = "image",
+    base = select({
+        ":linux_arm64": ":base_arm64",
+        "//conditions:default": ":base",
+    }),
+    entrypoint = ["/usr/bin/krabka"],
+    labels = {
+        "org.opencontainers.image.description": "Krabka operator CLI with built-in Gres administration",
+        "org.opencontainers.image.licenses": "Apache-2.0",
+        "org.opencontainers.image.source": "https://github.com/krabka-io/krabka-cli",
+        "org.opencontainers.image.title": "krabka-cli",
+        "org.opencontainers.image.url": "https://github.com/krabka-io/krabka-cli",
+    },
+    layers = [":application_layer"],
+    target_compatible_with = ["@platforms//os:linux"],
+    user = "65532:65532",
+    working_dir = "/data",
+)
+
+filegroup(
+    name = "image_manifest_blob",
+    srcs = [":image"],
+    output_group = "root_blob",
+)
+
+image_index(
+    name = "image_multiarch",
+    manifests = [":image"],
+    platforms = [
+        "//:linux_amd64",
+        "//:linux_arm64",
+    ],
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "image_multiarch_index_blob",
+    srcs = [":image_multiarch"],
+    output_group = "root_blob",
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "image_binary_test",
+    size = "small",
+    srcs = ["image_binary_test.sh"],
+    args = select({
+        ":linux_arm64": [
+            "arm64",
+            "$(rootpath :image_manifest_blob)",
+            "$(rootpath :application_layer)",
+        ],
+        "//conditions:default": [
+            "amd64",
+            "$(rootpath :image_manifest_blob)",
+            "$(rootpath :application_layer)",
+        ],
+    }),
+    data = [
+        ":application_layer",
+        ":image_manifest_blob",
+    ],
+)
+
+image_load(
+    name = "load",
+    image = ":image",
+    tag = "krabka-io/krabka-cli:dev",
+)
+
+image_push(
+    name = "push",
+    image = ":image",
+    registry = "ghcr.io",
+    repository = "krabka-io/krabka-cli",
+)
+
+image_push(
+    name = "push_multiarch",
+    image = ":image_multiarch",
+    registry = "ghcr.io",
+    repository = "krabka-io/krabka-cli",
+    tags = ["manual"],
+)

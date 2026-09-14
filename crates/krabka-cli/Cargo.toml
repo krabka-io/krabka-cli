@@ -27,6 +27,12 @@ clap = { workspace = true, features = ["env"] }
 krabka-security = { workspace = true }
 krabka-client-core = { version = "0.4.0" }
 krabka-client-admin = { version = "0.4.0" }
+crabka-client-admin = { git = "https://github.com/krabka-io/gres", rev = "470bf092bc03e2ff767fb97c671827f9ab4f2ecc" }
+crabka-client-core = { git = "https://github.com/krabka-io/gres", rev = "470bf092bc03e2ff767fb97c671827f9ab4f2ecc" }
+crabka-gres-balancer = { git = "https://github.com/krabka-io/gres", rev = "470bf092bc03e2ff767fb97c671827f9ab4f2ecc" }
+crabka-gres-control = { git = "https://github.com/krabka-io/gres", rev = "470bf092bc03e2ff767fb97c671827f9ab4f2ecc" }
+crabka-security = { git = "https://github.com/krabka-io/gres", rev = "470bf092bc03e2ff767fb97c671827f9ab4f2ecc" }
+crabka-units = { git = "https://github.com/krabka-io/gres", rev = "470bf092bc03e2ff767fb97c671827f9ab4f2ecc" }
 krabka-units = { workspace = true }
 krabka-metadata = { version = "0.4.0" }
 krabka-raft = { version = "0.4.0" }

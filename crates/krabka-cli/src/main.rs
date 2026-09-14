@@ -2,11 +2,9 @@
 //!
 //! Built-in subcommands are compiled in; everything else is discovered on
 //! `PATH` as `krabka-<name>`, the way git and cargo find their own. That is
-//! what lets a subcommand live in the repository that owns the thing it
-//! operates on -- `krabka gres` ships from the gres repository as
-//! `krabka-gres` -- without this crate depending on any of them. Compiling
-//! them in would mean this binary's dependency graph growing to the union of
-//! every product in the organisation.
+//! what lets large, independently deployed tools remain separate while the
+//! operator commands needed by the demo, including `krabka gres`, ship in one
+//! reliable CLI image.
 
 use std::{ffi::OsString, future::Future, process::Command as Process};
 
@@ -15,6 +13,7 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 mod admin;
 mod connection;
 mod format;
+mod gres;
 mod ids;
 mod output;
 
@@ -30,7 +29,7 @@ const EXTERNAL_PREFIX: &str = "krabka-";
 /// an operator can then look for.
 const SHORT_EXTERNAL_HELP: &str = "\
 Any subcommand that is not built in runs as `krabka-<name>` from PATH, such as
-`admin-ui`, `restore` and `gres`. Run `krabka --help` for where each one ships
+`admin-ui` and `restore`. Run `krabka --help` for where each one ships
 from.";
 
 /// Tail of `krabka --help`.
@@ -48,8 +47,7 @@ External subcommands:
             `krabka-admin-ui`, as a separate binary rather than a module of
             this one, so `krabka` keeps its own dependency graph.
   restore   Point-in-time restore of a cluster data directory. The
-            krabka-broker repository ships it as `krabka-restore`.
-  gres      The gres repository ships it as `krabka-gres`.";
+            krabka-broker repository ships it as `krabka-restore`.";
 
 #[derive(Parser)]
 #[command(
@@ -108,6 +106,9 @@ enum Command {
 
     /// Execute or verify replication-factor reassignment.
     ReassignPartitions(admin::ReassignPartitionsArgs),
+
+    /// Operate the Gres tenant registry and range layout.
+    Gres(gres::GresArgs),
 
     /// Anything not built in, delegated to `krabka-<name>` on `PATH`.
     #[command(external_subcommand)]
@@ -199,6 +200,7 @@ async fn main() {
         Command::ConsumerGroups(args) => run_admin(args.run(), output).await,
         Command::Features(args) => run_admin(args.run(), output).await,
         Command::ReassignPartitions(args) => run_admin(args.run(), output).await,
+        Command::Gres(args) => gres::run(args).await,
         Command::External(argv) => run_external(&argv),
     };
     std::process::exit(rc);
@@ -246,17 +248,16 @@ mod tests {
     /// the argv split wrong, and every external subcommand breaks.
     #[test]
     fn an_unknown_subcommand_is_delegated_with_its_arguments() {
-        let cli = Cli::try_parse_from(["krabka", "gres", "list-tenants", "--bootstrap", "h:9092"])
+        let cli = Cli::try_parse_from(["krabka", "example", "value", "--flag"])
             .expect("an unknown subcommand is delegated, not refused");
         let Command::External(argv) = cli.command else {
             panic!("expected the external arm");
         };
         check!(
             argv == vec![
-                OsString::from("gres"),
-                OsString::from("list-tenants"),
-                OsString::from("--bootstrap"),
-                OsString::from("h:9092"),
+                OsString::from("example"),
+                OsString::from("value"),
+                OsString::from("--flag"),
             ]
         );
     }
@@ -277,7 +278,6 @@ mod tests {
         check!(help.contains("krabka-restore"));
         check!(help.contains("krabka-broker"));
         check!(help.contains("gres"));
-        check!(help.contains("krabka-gres"));
     }
 
     /// Short help carries the rule and the names too: an operator who types
@@ -338,6 +338,21 @@ mod tests {
             Cli::try_parse_from(["krabka", "format", "--log-dir", "/tmp/x", "--node-id", "1"])
                 .expect("format is built in");
         check!(matches!(cli.command, Command::Format(_)));
+    }
+
+    #[test]
+    fn gres_is_built_in() {
+        let cli = Cli::try_parse_from([
+            "krabka",
+            "gres",
+            "describe",
+            "--bootstrap",
+            "broker:9092",
+            "--name",
+            "demo",
+        ])
+        .expect("built-in gres command parses");
+        check!(matches!(cli.command, Command::Gres(_)));
     }
 
     #[test]

@@ -7,7 +7,7 @@ so there is no second dependency set to keep in sync.
 
 module(
     name = "krabka_cli",
-    version = "0.4.0",
+    version = "0.4.1",
 )
 
 bazel_dep(name = "rules_rs", version = "0.0.110")
@@ -42,6 +42,26 @@ register_toolchains("@llvm//toolchain:all")
 # container-driven suites other repositories in this organisation have. Nothing
 # here uses one, but the load runs regardless of whether the branch is taken.
 bazel_dep(name = "rules_shell", version = "0.8.0")
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "rules_img", version = "0.3.20")
+bazel_dep(name = "rules_apko", version = "1.5.56")
+
+apko_toolchain = use_extension("@rules_apko//apko:extensions.bzl", "apko")
+apko_toolchain.toolchain(apko_version = "v1.2.40")
+use_repo(apko_toolchain, "apko_toolchains")
+
+register_toolchains("@apko_toolchains//:all")
+
+apk = use_extension("@rules_apko//apko:extensions.bzl", "apko")
+apk.translate_lock(
+    name = "krabka_cli_base_lock",
+    lock = "//packaging/apko:krabka-cli.lock.json",
+)
+apk.translate_lock(
+    name = "krabka_cli_base_arm64_lock",
+    lock = "//packaging/apko:krabka-cli.arm64.lock.json",
+)
+use_repo(apk, "krabka_cli_base_arm64_lock", "krabka_cli_base_lock")
 
 # ---------------------------------------------------------------------------
 # Format and lint. See //tools/format and //tools/lint.
@@ -95,7 +115,7 @@ toolchains.toolchain(
     # dependency source of truth" arrangement exists to avoid.
     version = "1.97.1",
 )
-use_repo(toolchains, "krabka_rust_toolchains")
+use_repo(toolchains, "default_rust_toolchains", "krabka_rust_toolchains")
 
 register_toolchains("@krabka_rust_toolchains//...")
 
@@ -153,6 +173,29 @@ crate.from_cargo(
 # crate's directory by matching the crate name against the members list, and it
 # skips glob entries, so each member's path is named here instead.
 SIBLING_MEMBERS = {
+    "crabka-client-admin": "crates/client-admin",
+    "crabka-client-consumer": "crates/client-consumer",
+    "crabka-client-core": "crates/client-core",
+    "crabka-client-producer": "crates/client-producer",
+    "crabka-compression": "crates/compression",
+    "crabka-gres-balancer": "crates/gres-balancer",
+    "crabka-gres-control": "crates/gres-control",
+    "crabka-gres-ranges": "crates/gres-ranges",
+    "crabka-gres-substrate": "crates/gres-substrate",
+    "crabka-ids": "crates/ids",
+    "crabka-metadata": "crates/metadata",
+    "crabka-object-store": "crates/object-store",
+    "crabka-pgcatalog": "crates/pgcatalog",
+    "crabka-pgexec": "crates/pgexec",
+    "crabka-pgkv": "crates/pgkv",
+    "crabka-pgmvcc": "crates/pgmvcc",
+    "crabka-pgparser": "crates/pgparser",
+    "crabka-pgtypes": "crates/pgtypes",
+    "crabka-pgwire": "crates/pgwire",
+    "crabka-security": "crates/security",
+    "crabka-trace-context": "crates/trace-context",
+    "crabka-units": "crates/units",
+    "crabka-voters": "crates/voters",
     "krabka-audit": "crates/audit",
     "krabka-authz": "crates/authz",
     "krabka-broker": "crates/broker",
@@ -201,6 +244,12 @@ SIBLING_MEMBERS = {
 # Cargo build in krabka-protocol still runs it.
 crate.annotation(
     crate = "krabka-protocol",
+    gen_build_script = "off",
+    strip_prefix = "crates/protocol",
+    workspace_cargo_toml = "Cargo.toml",
+)
+crate.annotation(
+    crate = "crabka-protocol",
     gen_build_script = "off",
     strip_prefix = "crates/protocol",
     workspace_cargo_toml = "Cargo.toml",

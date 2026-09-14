@@ -7,7 +7,9 @@ The [krabka](https://github.com/krabka-io) operator CLI, `krabka`.
 ### Built in
 
 `krabka format` prepares a fresh log directory, optionally seeding SCRAM
-credentials and KIP-1022 feature levels.
+credentials and KIP-1022 feature levels. `krabka gres` operates the Gres tenant
+registry and range layout, including tenant creation, inspection, balancing,
+and PgDog configuration rendering.
 
 ### Plugins
 
@@ -16,20 +18,16 @@ Everything else is a plugin. An unrecognised subcommand is delegated to
 `cargo-foo`:
 
 ```bash
-krabka gres list-tenants --bootstrap localhost:9092
-# runs: krabka-gres list-tenants --bootstrap localhost:9092
+krabka gres list --bootstrap localhost:9092
 ```
 
 Each plugin is a separate install, and `krabka --help` lists the known ones:
 
 - `krabka admin-ui` runs `krabka-admin-ui`, the operator web UI. This repository builds it; see [Admin UI](#admin-ui) below.
 - `krabka restore` runs `krabka-restore`, a point-in-time restore of a cluster data directory from a tiered-storage archive. It ships from [`krabka-broker`](https://github.com/krabka-io/krabka-broker), so install it separately.
-- `krabka gres` runs `krabka-gres`, which ships from the gres repository.
 
-That is what lets a subcommand live in the repository that owns the thing it
-operates on. Compiling them in instead would make this binary's dependency
-graph the union of every product in the organisation -- the `gres` subcommand
-alone reaches about 21k lines of storage engine.
+The Gres operator command is built in because the demo uses it to provision its
+tenant before the Gres server starts accepting PostgreSQL connections.
 
 A built-in always wins, so a stray `krabka-format` on `PATH` cannot shadow the
 compiled-in one. A subcommand that is neither built in nor on `PATH` exits 127,
@@ -74,7 +72,7 @@ krabka-io service.
 
 ## Layering
 
-Depends on three sibling repositories, pinned by revision in
+Depends on four sibling repositories, pinned by revision in
 [`Cargo.toml`](Cargo.toml)'s `[patch.crates-io]`:
 
 | Repository | What it supplies |
@@ -82,6 +80,7 @@ Depends on three sibling repositories, pinned by revision in
 | [`krabka-protocol`](https://github.com/krabka-io/krabka-protocol) | Wire types, security, metadata, units |
 | [`krabka-client-rs`](https://github.com/krabka-io/krabka-client-rs) | The admin and core clients |
 | [`krabka-broker`](https://github.com/krabka-io/krabka-broker) | Raft, and the bootstrap records `format` writes |
+| [`gres`](https://github.com/krabka-io/gres) | Gres registry, range planning, and tenant provisioning |
 
 `crates/admin-ui` uses two of the three: the admin and core clients, and the
 wire-layer security and unit types. It does not use `krabka-broker`.
