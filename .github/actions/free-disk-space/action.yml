@@ -1,0 +1,23 @@
+name: Free disk space
+description: Reclaim preinstalled SDKs and images unused by the Rust image build.
+runs:
+  using: composite
+  steps:
+    - name: Reclaim runner disk
+      shell: bash
+      run: |
+        df -h /
+        sudo rm -rf \
+          /usr/share/dotnet \
+          /opt/ghc /usr/local/.ghcup \
+          /usr/local/lib/android \
+          /usr/share/swift \
+          /opt/hostedtoolcache/CodeQL \
+          /usr/local/share/boost \
+          /usr/local/graalvm \
+          /usr/local/share/powershell \
+          /usr/share/miniconda \
+          /opt/az \
+          /usr/lib/google-cloud-sdk || true
+        sudo docker image prune --all --force || true
+        df -h /
