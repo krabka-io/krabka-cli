@@ -200,7 +200,7 @@ async fn main() {
         Command::ConsumerGroups(args) => run_admin(args.run(), output).await,
         Command::Features(args) => run_admin(args.run(), output).await,
         Command::ReassignPartitions(args) => run_admin(args.run(), output).await,
-        Command::Gres(args) => gres::run(args).await,
+        Command::Gres(args) => run_admin(gres::run(args), output).await,
         Command::External(argv) => run_external(&argv),
     };
     std::process::exit(rc);

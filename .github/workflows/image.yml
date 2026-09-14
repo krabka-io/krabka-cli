@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/image.yml
+      - .github/actions/free-disk-space/**
       - BUILD.bazel
       - MODULE.bazel
       - MODULE.bazel.lock

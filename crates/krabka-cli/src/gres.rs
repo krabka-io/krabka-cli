@@ -29,9 +29,10 @@ use crabka_gres_control::{
 use crabka_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
 use crabka_units::{ByteSize, Time};
 use serde::Serialize;
+use serde_json::json;
 
-const EXIT_OK: i32 = 0;
-const EXIT_ERROR: i32 = 1;
+use crate::output::CommandResult;
+
 const DEFAULT_BACKEND_PORT: u16 = 5432;
 
 #[derive(Args, Debug)]
@@ -46,68 +47,68 @@ pub struct GresArgs {
 struct RegistryOptions {
     #[arg(
         long = "client-dispatch-queue-capacity",
-        env = "CRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        env = "KRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY",
         default_value_t = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
         value_parser = parse_client_dispatch_queue_capacity
     )]
     client_dispatch_queue_capacity: usize,
     #[arg(
         long = "client-frame-max",
-        env = "CRABKA_GRES_CLIENT_FRAME_MAX",
+        env = "KRABKA_GRES_CLIENT_FRAME_MAX",
         default_value = "100MiB",
         value_parser = parse_client_frame_max
     )]
     client_frame_max: ByteSize,
     #[arg(
         long = "registry-reader-fetch-min",
-        env = "CRABKA_GRES_REGISTRY_READER_FETCH_MIN",
+        env = "KRABKA_GRES_REGISTRY_READER_FETCH_MIN",
         default_value = "1B",
         value_parser = parse_fetch_min
     )]
     registry_reader_fetch_min: ByteSize,
     #[arg(
         long = "registry-replication-factor",
-        env = "CRABKA_GRES_REGISTRY_REPLICATION_FACTOR",
+        env = "KRABKA_GRES_REGISTRY_REPLICATION_FACTOR",
         default_value = "1"
     )]
     replication_factor: RegistryReplicationFactor,
     #[arg(
         long = "registry-topic-create-timeout",
-        env = "CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT",
+        env = "KRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT",
         default_value = "15s",
         value_parser = crabka_units::parse::positive_time
     )]
     topic_create_timeout: Time,
     #[arg(
         long = "registry-reader-retry-backoff",
-        env = "CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF",
+        env = "KRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF",
         default_value = "250ms",
         value_parser = crabka_units::parse::positive_time
     )]
     reader_retry_backoff: Time,
     #[arg(
         long = "registry-fetch-max-wait",
-        env = "CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT",
+        env = "KRABKA_GRES_REGISTRY_FETCH_MAX_WAIT",
         default_value = "500ms",
         value_parser = crabka_units::parse::positive_time
     )]
     fetch_max_wait: Time,
     #[arg(
         long = "registry-fetch-partition-max",
-        env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX",
+        env = "KRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX",
         default_value = "1MiB",
         value_parser = crabka_units::parse::positive_byte_size
     )]
     fetch_partition_max: ByteSize,
     #[arg(
         long = "registry-producer-dns-timeout",
-        env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT",
+        env = "KRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT",
         value_parser = crabka_units::parse::positive_time
     )]
     producer_dns_timeout: Option<Time>,
     #[arg(
         long = "registry-reader-admin-dns-timeout",
-        env = "CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT",
+        env = "KRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT",
         value_parser = crabka_units::parse::positive_time
     )]
     reader_admin_dns_timeout: Option<Time>,
@@ -227,10 +228,10 @@ struct CreateTenantArgs {
     #[arg(long)]
     password_stdin: bool,
     /// WAL topic replication factor for this tenant.
-    #[arg(long, env = "CRABKA_GRES_WAL_REPLICATION", default_value = "1")]
+    #[arg(long, env = "KRABKA_GRES_WAL_REPLICATION", default_value = "1")]
     wal_replication: RegistryReplicationFactor,
     /// PBKDF2 iteration count for the tenant's Kafka and `PostgreSQL` SCRAM credentials.
-    #[arg(long, env = "CRABKA_GRES_SCRAM_ITERATIONS", default_value = "4096")]
+    #[arg(long, env = "KRABKA_GRES_SCRAM_ITERATIONS", default_value = "4096")]
     scram_iterations: ScramIterations,
     /// Optional object-store prefix for tenant checkpoints.
     #[arg(long)]
@@ -272,57 +273,57 @@ struct BootstrapArgs {
 #[derive(Args, Debug)]
 struct RenderPgdogArgs {
     /// Kafka bootstrap address used for the Gres registry.
-    #[arg(long, env = "CRABKA_GRES_PGDOG_BOOTSTRAP")]
+    #[arg(long, env = "KRABKA_GRES_PGDOG_BOOTSTRAP")]
     bootstrap: String,
     /// Directory that will receive pgdog.toml and users.toml.
-    #[arg(long, env = "CRABKA_GRES_PGDOG_OUT_DIR")]
+    #[arg(long, env = "KRABKA_GRES_PGDOG_OUT_DIR")]
     out_dir: PathBuf,
     /// Suspended-tenant activator route as host:port.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_ACTIVATOR",
+        env = "KRABKA_GRES_PGDOG_ACTIVATOR",
         value_parser = parse_activator
     )]
     activator: Option<(String, u16)>,
     /// Client-facing `PgDog` listen port.
-    #[arg(long, env = "CRABKA_GRES_PGDOG_LISTEN_PORT", default_value = "6432")]
+    #[arg(long, env = "KRABKA_GRES_PGDOG_LISTEN_PORT", default_value = "6432")]
     listen_port: NonZeroU16,
     /// Client-facing TLS certificate path as visible inside the `PgDog` runtime.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_TLS_CERTIFICATE",
+        env = "KRABKA_GRES_PGDOG_TLS_CERTIFICATE",
         requires = "tls_private_key"
     )]
     tls_certificate: Option<PathBuf>,
     /// Client-facing TLS private-key path as visible inside the `PgDog` runtime.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_TLS_PRIVATE_KEY",
+        env = "KRABKA_GRES_PGDOG_TLS_PRIVATE_KEY",
         requires = "tls_certificate"
     )]
     tls_private_key: Option<PathBuf>,
     /// Client CA path as visible inside the `PgDog` runtime.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_TLS_CLIENT_CA_CERTIFICATE",
+        env = "KRABKA_GRES_PGDOG_TLS_CLIENT_CA_CERTIFICATE",
         requires_all = ["tls_certificate", "tls_private_key"]
     )]
     tls_client_ca_certificate: Option<PathBuf>,
     /// Fleet-wide pooling mode for backend connections.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_POOLER_MODE",
+        env = "KRABKA_GRES_PGDOG_POOLER_MODE",
         default_value = "transaction",
         value_parser = parse_pgdog_pooler_mode
     )]
     pooler_mode: PgdogPoolerMode,
     /// Number of backend connection attempts.
-    #[arg(long, env = "CRABKA_GRES_PGDOG_CONNECT_ATTEMPTS", default_value = "3")]
+    #[arg(long, env = "KRABKA_GRES_PGDOG_CONNECT_ATTEMPTS", default_value = "3")]
     connect_attempts: PgdogConnectAttempts,
     /// Maximum acceptable tenant wake latency.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_COLD_START_CEILING",
+        env = "KRABKA_GRES_PGDOG_COLD_START_CEILING",
         default_value = "30s",
         value_parser = crabka_units::parse::positive_time
     )]
@@ -330,7 +331,7 @@ struct RenderPgdogArgs {
     /// Normal pooled-server idle timeout.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_IDLE_TIMEOUT",
+        env = "KRABKA_GRES_PGDOG_IDLE_TIMEOUT",
         default_value = "60s",
         value_parser = crabka_units::parse::positive_time
     )]
@@ -338,7 +339,7 @@ struct RenderPgdogArgs {
     /// Pooled-server idle timeout when at least one tenant may suspend.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT",
+        env = "KRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT",
         default_value = "1s",
         value_parser = crabka_units::parse::positive_time
     )]
@@ -346,7 +347,7 @@ struct RenderPgdogArgs {
     /// Maximum pooled backend connection lifetime.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_SERVER_LIFETIME",
+        env = "KRABKA_GRES_PGDOG_SERVER_LIFETIME",
         default_value = "5m",
         value_parser = crabka_units::parse::positive_time
     )]
@@ -488,20 +489,11 @@ struct RedactedTenantRecord {
     #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
     checkpoint_size: Option<ByteSize>,
     idle_seconds: Option<u64>,
+    hash_placements: Vec<HashPlacement>,
     ranges: Vec<RangeLayoutEntry>,
 }
 
-pub async fn run(args: GresArgs) -> i32 {
-    match run_inner(args).await {
-        Ok(()) => EXIT_OK,
-        Err(error) => {
-            eprintln!("krabka gres: {error}");
-            EXIT_ERROR
-        }
-    }
-}
-
-async fn run_inner(args: GresArgs) -> Result<(), String> {
+pub async fn run(args: GresArgs) -> Result<CommandResult, String> {
     let policy = args.registry.policy();
     match args.command {
         GresCommand::CreateTenant(args) => create_tenant(args, &policy).await,
@@ -521,7 +513,7 @@ async fn run_inner(args: GresArgs) -> Result<(), String> {
     }
 }
 
-async fn probe_topic_read(args: &ProbeTopicReadArgs) -> Result<(), String> {
+async fn probe_topic_read(args: &ProbeTopicReadArgs) -> Result<CommandResult, String> {
     let password = std::fs::read_to_string(&args.password_file)
         .map_err(|error| format!("read Kafka password file: {error}"))?;
     let password = password.trim_end_matches(['\r', '\n']);
@@ -563,17 +555,19 @@ async fn probe_topic_read(args: &ProbeTopicReadArgs) -> Result<(), String> {
             args.topic, error.name, error.code
         ));
     }
-    println!("topic {} is readable", args.topic);
-    Ok(())
+    Ok(CommandResult::success(
+        vec![format!("topic {} is readable", args.topic)],
+        json!({"topic": args.topic, "readable": true}),
+    ))
 }
 
-fn balance_dry_run(args: &BalanceDryRunArgs) -> Result<(), String> {
+fn balance_dry_run(args: &BalanceDryRunArgs) -> Result<CommandResult, String> {
     let input = read_balance_input(&args.metrics_file)?;
     let output = plan_balance_dry_run(&input);
-    print_json(&output)
+    json_command_result(output)
 }
 
-fn balance_apply(args: &BalanceApplyArgs) -> Result<(), String> {
+fn balance_apply(args: &BalanceApplyArgs) -> Result<CommandResult, String> {
     let input = read_balance_input(&args.metrics_file)?;
     let policy = execution_policy(args.continue_on_failure);
     let output = match args.execute_mode {
@@ -581,14 +575,13 @@ fn balance_apply(args: &BalanceApplyArgs) -> Result<(), String> {
             plan_balance_apply(&input, args.execute_mode, policy)
         }
     };
-    print_json(&output)?;
     if output.report.has_terminal_error() {
         return Err(format!(
             "{} mode found unsupported or failed balance operations; policy is {}",
             output.execute_mode, output.execution_policy
         ));
     }
-    Ok(())
+    json_command_result(output)
 }
 
 fn read_balance_input(path: &Path) -> Result<BalanceDryRunInput, String> {
@@ -671,7 +664,10 @@ const fn execution_policy_name(policy: ExecutionPolicy) -> &'static str {
     }
 }
 
-async fn split_range(args: SplitRangeArgs, policy: &RegistryPolicy) -> Result<(), String> {
+async fn split_range(
+    args: SplitRangeArgs,
+    policy: &RegistryPolicy,
+) -> Result<CommandResult, String> {
     let tenant_name = TenantName::try_from(args.tenant.as_str()).map_err(|e| e.to_string())?;
     let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let record = registry
@@ -734,7 +730,7 @@ async fn split_range(args: SplitRangeArgs, policy: &RegistryPolicy) -> Result<()
         .begin_split_operation(&operation)
         .await
         .map_err(|e| e.to_string())?;
-    println!(
+    let message = format!(
         "initiated split {} for tenant {tenant_name} range {} at table {} bucket {:?} rowid {} into ranges {} and {}",
         args.operation_id,
         source.range_id,
@@ -744,7 +740,16 @@ async fn split_range(args: SplitRangeArgs, policy: &RegistryPolicy) -> Result<()
         left_range_id,
         successor_range_id
     );
-    Ok(())
+    Ok(CommandResult::success(
+        vec![message],
+        json!({
+            "operationId": args.operation_id,
+            "tenant": tenant_name.as_str(),
+            "sourceRangeId": source.range_id,
+            "leftRangeId": left_range_id,
+            "rightRangeId": successor_range_id,
+        }),
+    ))
 }
 
 fn split_boundary(
@@ -768,7 +773,7 @@ fn split_boundary(
     }
 }
 
-async fn move_range(args: MoveRangeArgs, policy: &RegistryPolicy) -> Result<(), String> {
+async fn move_range(args: MoveRangeArgs, policy: &RegistryPolicy) -> Result<CommandResult, String> {
     let tenant_name = TenantName::try_from(args.tenant.as_str()).map_err(|e| e.to_string())?;
     let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let record = registry
@@ -782,7 +787,7 @@ async fn move_range(args: MoveRangeArgs, policy: &RegistryPolicy) -> Result<(), 
         .begin_split_operation(&operation)
         .await
         .map_err(|e| e.to_string())?;
-    println!(
+    let message = format!(
         "initiated move {} for tenant {tenant_name} range {} generation {} to range {} generation {}",
         args.operation_id,
         operation.source_range_id(),
@@ -790,7 +795,15 @@ async fn move_range(args: MoveRangeArgs, policy: &RegistryPolicy) -> Result<(), 
         replacement.range_id,
         replacement.wal_generation,
     );
-    Ok(())
+    Ok(CommandResult::success(
+        vec![message],
+        json!({
+            "operationId": args.operation_id,
+            "tenant": tenant_name.as_str(),
+            "sourceRangeId": operation.source_range_id(),
+            "replacementRangeId": replacement.range_id,
+        }),
+    ))
 }
 
 fn build_move_operation(
@@ -850,22 +863,16 @@ fn build_move_operation(
     .map_err(|e| e.to_string())
 }
 
-async fn create_tenant(args: CreateTenantArgs, policy: &RegistryPolicy) -> Result<(), String> {
+async fn create_tenant(
+    args: CreateTenantArgs,
+    policy: &RegistryPolicy,
+) -> Result<CommandResult, String> {
     let password = read_password(&args)?;
     let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let current = registry.get(&args.name).await.map_err(|e| e.to_string())?;
     let expected_record_version = current.as_ref().map(|record| record.record_version);
     let record_version = next_record_version(expected_record_version)?;
     let record = build_create_tenant_record(&args, &password, record_version)?;
-    registry
-        .replace_if_version(&record, expected_record_version)
-        .await
-        .map_err(|e| e.to_string())?;
-    let record = registry
-        .get(&args.name)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("tenant {} disappeared after replacement", args.name))?;
     registry
         .upsert_tenant_config(&record, args.wal_replication.into_value())
         .await
@@ -878,8 +885,19 @@ async fn create_tenant(args: CreateTenantArgs, policy: &RegistryPolicy) -> Resul
         policy,
     )
     .await?;
-    println!("created tenant {}", record.name);
-    Ok(())
+    registry
+        .replace_if_version(&record, expected_record_version)
+        .await
+        .map_err(|e| e.to_string())?;
+    let record = registry
+        .get(&args.name)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("tenant {} disappeared after replacement", args.name))?;
+    Ok(CommandResult::success(
+        vec![format!("created tenant {}", record.name)],
+        redact_tenant(&record),
+    ))
 }
 
 async fn provision_tenant_kafka_access(
@@ -930,7 +948,7 @@ async fn provision_tenant_kafka_access(
 fn tenant_acls(principal: &str, tenant: &TenantName) -> Vec<AclEntry> {
     let mut acls = Vec::new();
     for (resource_name, pattern_type) in [
-        (format!("__gres_wal.{tenant}"), PatternType::Prefixed),
+        (format!("__gres_wal.{tenant}."), PatternType::Prefixed),
         (tenant_config_topic(tenant), PatternType::Literal),
     ] {
         for operation in [
@@ -954,7 +972,7 @@ fn tenant_acls(principal: &str, tenant: &TenantName) -> Vec<AclEntry> {
     for operation in [AclOperation::Write, AclOperation::Describe] {
         acls.push(AclEntry {
             resource_type: ResourceType::TransactionalId,
-            resource_name: format!("__gres.{tenant}"),
+            resource_name: format!("__gres.{tenant}."),
             pattern_type: PatternType::Prefixed,
             principal: principal.to_string(),
             host: "*".to_string(),
@@ -962,17 +980,15 @@ fn tenant_acls(principal: &str, tenant: &TenantName) -> Vec<AclEntry> {
             permission_type: PermissionType::Allow,
         });
     }
-    for operation in [AclOperation::Create, AclOperation::IdempotentWrite] {
-        acls.push(AclEntry {
-            resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster".to_string(),
-            pattern_type: PatternType::Literal,
-            principal: principal.to_string(),
-            host: "*".to_string(),
-            operation,
-            permission_type: PermissionType::Allow,
-        });
-    }
+    acls.push(AclEntry {
+        resource_type: ResourceType::Cluster,
+        resource_name: "kafka-cluster".to_string(),
+        pattern_type: PatternType::Literal,
+        principal: principal.to_string(),
+        host: "*".to_string(),
+        operation: AclOperation::IdempotentWrite,
+        permission_type: PermissionType::Allow,
+    });
     acls
 }
 
@@ -980,28 +996,34 @@ fn tenant_kafka_username(tenant: &TenantName) -> String {
     format!("gres-{tenant}")
 }
 
-async fn describe_tenant(args: TenantNameArgs, policy: &RegistryPolicy) -> Result<(), String> {
+async fn describe_tenant(
+    args: TenantNameArgs,
+    policy: &RegistryPolicy,
+) -> Result<CommandResult, String> {
     let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let tenant = registry
         .get(&args.name)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("tenant {} not found", args.name))?;
-    print_json(&redact_tenant(&tenant))
+    json_command_result(redact_tenant(&tenant))
 }
 
-async fn list_tenants(args: BootstrapArgs, policy: &RegistryPolicy) -> Result<(), String> {
+async fn list_tenants(
+    args: BootstrapArgs,
+    policy: &RegistryPolicy,
+) -> Result<CommandResult, String> {
     let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let tenants = registry.list().await.map_err(|e| e.to_string())?;
     let redacted = tenants.iter().map(redact_tenant).collect::<Vec<_>>();
-    print_json(&redacted)
+    json_command_result(redacted)
 }
 
 async fn change_tenant_state(
     args: TenantNameArgs,
     state: TenantState,
     policy: &RegistryPolicy,
-) -> Result<(), String> {
+) -> Result<CommandResult, String> {
     let mut registry = connect_registry(&args.bootstrap, policy).await?;
     match state {
         TenantState::Suspended => registry.mark_suspended(&args.name).await,
@@ -1027,24 +1049,41 @@ async fn change_tenant_state(
         }
     }
     .map_err(|e| e.to_string())?;
-    println!("updated tenant {}", args.name);
-    Ok(())
+    Ok(CommandResult::success(
+        vec![format!("updated tenant {}", args.name)],
+        json!({"tenant": args.name, "state": state}),
+    ))
 }
 
-async fn delete_tenant(args: TenantNameArgs, policy: &RegistryPolicy) -> Result<(), String> {
+async fn delete_tenant(
+    args: TenantNameArgs,
+    policy: &RegistryPolicy,
+) -> Result<CommandResult, String> {
     let mut registry = connect_registry(&args.bootstrap, policy).await?;
     registry
         .delete(&args.name)
         .await
         .map_err(|e| e.to_string())?;
-    println!("deleted tenant {}", args.name);
-    Ok(())
+    Ok(CommandResult::success(
+        vec![format!("deleted tenant {}", args.name)],
+        json!({"tenant": args.name, "deleted": true}),
+    ))
 }
 
-async fn render_pgdog(args: RenderPgdogArgs, policy: &RegistryPolicy) -> Result<(), String> {
+async fn render_pgdog(
+    args: RenderPgdogArgs,
+    policy: &RegistryPolicy,
+) -> Result<CommandResult, String> {
     let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let tenants = registry.list().await.map_err(|e| e.to_string())?;
-    render_pgdog_files(&tenants, &args)
+    render_pgdog_files(&tenants, &args)?;
+    Ok(CommandResult::success(
+        vec![format!(
+            "rendered PgDog configuration in {}",
+            args.out_dir.display()
+        )],
+        json!({"outputDirectory": args.out_dir, "tenantCount": tenants.len()}),
+    ))
 }
 
 async fn connect_registry(bootstrap: &str, policy: &RegistryPolicy) -> Result<Registry, String> {
@@ -1332,14 +1371,14 @@ fn redact_tenant(record: &TenantRecord) -> RedactedTenantRecord {
         checkpoint_frames: record.checkpoint_frames,
         checkpoint_size: record.checkpoint_size,
         idle_seconds: record.idle_seconds,
+        hash_placements: record.hash_placements.clone(),
         ranges: record.ranges.clone(),
     }
 }
 
-fn print_json(value: &impl Serialize) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    println!("{json}");
-    Ok(())
+fn json_command_result<T: Serialize>(value: T) -> Result<CommandResult, String> {
+    let human = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    Ok(CommandResult::success(vec![human], value))
 }
 
 fn trim_single_trailing_newline(value: &mut String) {
@@ -1445,8 +1484,8 @@ mod tests {
                     "gres::tests::create_tenant_policy_reads_environment_and_prefers_cli",
                 ])
                 .env(CHILD, "1")
-                .env("CRABKA_GRES_WAL_REPLICATION", "2")
-                .env("CRABKA_GRES_SCRAM_ITERATIONS", "8192")
+                .env("KRABKA_GRES_WAL_REPLICATION", "2")
+                .env("KRABKA_GRES_SCRAM_ITERATIONS", "8192")
                 .status()
                 .expect("child test");
             assert!(status.success());
@@ -1491,16 +1530,16 @@ mod tests {
     fn registry_policy_options_read_environment_and_prefer_cli() {
         const CHILD: &str = "CRABKA_TEST_CLI_REGISTRY_ENV_CHILD";
         let vars = [
-            ("CRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
-            ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", "15001ms"),
-            ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF", "251ms"),
-            ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT", "501ms"),
-            ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX", "1048577B"),
-            ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
-            ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
-            ("CRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY", "7"),
-            ("CRABKA_GRES_CLIENT_FRAME_MAX", "32KiB"),
-            ("CRABKA_GRES_REGISTRY_READER_FETCH_MIN", "3B"),
+            ("KRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
+            ("KRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", "15001ms"),
+            ("KRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF", "251ms"),
+            ("KRABKA_GRES_REGISTRY_FETCH_MAX_WAIT", "501ms"),
+            ("KRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX", "1048577B"),
+            ("KRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
+            ("KRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
+            ("KRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY", "7"),
+            ("KRABKA_GRES_CLIENT_FRAME_MAX", "32KiB"),
+            ("KRABKA_GRES_REGISTRY_READER_FETCH_MIN", "3B"),
         ];
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
@@ -1669,19 +1708,19 @@ mod tests {
     fn render_pgdog_options_read_environment_and_prefer_cli() {
         const CHILD: &str = "CRABKA_TEST_CLI_PGDOG_ENV_CHILD";
         let vars = [
-            ("CRABKA_GRES_PGDOG_BOOTSTRAP", "env:9092"),
-            ("CRABKA_GRES_PGDOG_OUT_DIR", "/tmp/env-pgdog"),
-            ("CRABKA_GRES_PGDOG_ACTIVATOR", "env-activator:7443"),
-            ("CRABKA_GRES_PGDOG_LISTEN_PORT", "6542"),
-            ("CRABKA_GRES_PGDOG_TLS_CERTIFICATE", "/env/cert.pem"),
-            ("CRABKA_GRES_PGDOG_TLS_PRIVATE_KEY", "/env/key.pem"),
-            ("CRABKA_GRES_PGDOG_TLS_CLIENT_CA_CERTIFICATE", "/env/ca.pem"),
-            ("CRABKA_GRES_PGDOG_POOLER_MODE", "session"),
-            ("CRABKA_GRES_PGDOG_CONNECT_ATTEMPTS", "5"),
-            ("CRABKA_GRES_PGDOG_COLD_START_CEILING", "30005ms"),
-            ("CRABKA_GRES_PGDOG_IDLE_TIMEOUT", "60005ms"),
-            ("CRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT", "1005ms"),
-            ("CRABKA_GRES_PGDOG_SERVER_LIFETIME", "300005ms"),
+            ("KRABKA_GRES_PGDOG_BOOTSTRAP", "env:9092"),
+            ("KRABKA_GRES_PGDOG_OUT_DIR", "/tmp/env-pgdog"),
+            ("KRABKA_GRES_PGDOG_ACTIVATOR", "env-activator:7443"),
+            ("KRABKA_GRES_PGDOG_LISTEN_PORT", "6542"),
+            ("KRABKA_GRES_PGDOG_TLS_CERTIFICATE", "/env/cert.pem"),
+            ("KRABKA_GRES_PGDOG_TLS_PRIVATE_KEY", "/env/key.pem"),
+            ("KRABKA_GRES_PGDOG_TLS_CLIENT_CA_CERTIFICATE", "/env/ca.pem"),
+            ("KRABKA_GRES_PGDOG_POOLER_MODE", "session"),
+            ("KRABKA_GRES_PGDOG_CONNECT_ATTEMPTS", "5"),
+            ("KRABKA_GRES_PGDOG_COLD_START_CEILING", "30005ms"),
+            ("KRABKA_GRES_PGDOG_IDLE_TIMEOUT", "60005ms"),
+            ("KRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT", "1005ms"),
+            ("KRABKA_GRES_PGDOG_SERVER_LIFETIME", "300005ms"),
         ];
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
@@ -1928,13 +1967,45 @@ mod tests {
 
     #[test]
     fn redacted_tenant_output_never_contains_verifier_material() {
-        let record = test_record("tenant-a", TenantState::Active);
+        let mut record = test_record("tenant-a", TenantState::Active);
+        record.hash_placements = vec![HashPlacement {
+            table_id: 7,
+            hash_columns: vec!["tenant_id".into()],
+            bucket_count: 8,
+            co_location_group: Some("orders".into()),
+        }];
 
         let json = serde_json::to_string(&redact_tenant(&record)).expect("redaction serializes");
 
         assert!(json.contains("<redacted>"));
+        assert!(json.contains("tenant_id"));
+        assert!(json.contains("orders"));
         assert!(!json.contains("stored"));
         assert!(!json.contains("server"));
+    }
+
+    #[test]
+    fn tenant_acls_stop_at_namespace_boundaries_and_limit_cluster_scope() {
+        let tenant = TenantName::try_from("foo").expect("tenant name");
+        let acls = tenant_acls("User:gres-foo", &tenant);
+
+        assert!(acls.iter().any(|acl| {
+            acl.resource_type == ResourceType::Topic
+                && acl.resource_name == "__gres_wal.foo."
+                && acl.pattern_type == PatternType::Prefixed
+        }));
+        assert!(acls.iter().any(|acl| {
+            acl.resource_type == ResourceType::TransactionalId
+                && acl.resource_name == "__gres.foo."
+                && acl.pattern_type == PatternType::Prefixed
+        }));
+        assert!(!acls.iter().any(|acl| {
+            acl.resource_type == ResourceType::Cluster && acl.operation == AclOperation::Create
+        }));
+        assert!(acls.iter().any(|acl| {
+            acl.resource_type == ResourceType::Cluster
+                && acl.operation == AclOperation::IdempotentWrite
+        }));
     }
 
     #[test]
