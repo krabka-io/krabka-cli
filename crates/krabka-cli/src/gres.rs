@@ -2279,6 +2279,25 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_dispatches_balance_dry_run_from_a_metrics_file() {
+        let snapshot = tempfile::NamedTempFile::new().expect("snapshot file");
+        std::fs::write(snapshot.path(), BALANCE_SNAPSHOT_ENABLED).expect("write snapshot");
+        let parsed = TestCli::try_parse_from([
+            "test",
+            "balance-dry-run",
+            "--metrics-file",
+            snapshot.path().to_str().expect("UTF-8 path"),
+        ])
+        .expect("balance-dry-run arguments");
+        let input: BalanceDryRunInput = serde_json::from_str(BALANCE_SNAPSHOT_ENABLED).unwrap();
+
+        let result = run(parsed.gres).await.expect("dry run succeeds");
+
+        check!(!result.failed);
+        check!(result.data == serde_json::to_value(plan_balance_dry_run(&input)).unwrap());
+    }
+
     #[test]
     fn gres_balance_dry_run_disabled_goal_suppresses_operations() {
         let input: BalanceDryRunInput = serde_json::from_str(BALANCE_SNAPSHOT_DISABLED).unwrap();
