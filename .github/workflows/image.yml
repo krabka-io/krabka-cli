@@ -63,7 +63,6 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: aspect-build/setup-aspect@1ccd1e095c68556648eb5482231283e445e3dc5e # 2026.34
         with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
           bazelisk-cache: true
           disk-cache: image
           repository-cache: true
