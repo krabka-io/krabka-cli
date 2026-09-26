@@ -90,6 +90,14 @@ bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.3")
 rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
 use_repo(rules_rust, "rules_rust")
 
+# See the patch header: `bazel coverage` otherwise drops the lines that only a
+# subprocess test -- one running a `CARGO_BIN_EXE_*` binary from `data` --
+# reaches.
+rules_rust.patch(
+    patches = ["//bazel/patches:rules-rust-coverage-subprocess-objects.patch"],
+    strip = 1,
+)
+
 # ---------------------------------------------------------------------------
 # Rust toolchain — pinned to the same channel as rust-toolchain.toml.
 # ---------------------------------------------------------------------------
