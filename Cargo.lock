@@ -1047,7 +1047,7 @@ dependencies = [
 [[package]]
 name = "crabka-client-admin"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "assert2",
  "async-trait",
@@ -1068,7 +1068,7 @@ dependencies = [
 [[package]]
 name = "crabka-client-consumer"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "assert2",
  "bon",
@@ -1088,7 +1088,7 @@ dependencies = [
 [[package]]
 name = "crabka-client-core"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "async-trait",
  "bon",
@@ -1112,7 +1112,7 @@ dependencies = [
 [[package]]
 name = "crabka-client-producer"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "assert2",
  "async-trait",
@@ -1135,7 +1135,7 @@ dependencies = [
 [[package]]
 name = "crabka-compression"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "assert2",
  "bytes",
@@ -1151,7 +1151,7 @@ dependencies = [
 [[package]]
 name = "crabka-gres-balancer"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "crabka-gres-control",
  "crabka-gres-substrate",
@@ -1162,7 +1162,7 @@ dependencies = [
 [[package]]
 name = "crabka-gres-control"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "bytes",
  "crabka-client-admin",
@@ -1183,7 +1183,7 @@ dependencies = [
 [[package]]
 name = "crabka-gres-ranges"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1214,7 +1214,7 @@ dependencies = [
 [[package]]
 name = "crabka-gres-substrate"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1244,7 +1244,7 @@ dependencies = [
 [[package]]
 name = "crabka-ids"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "assert2",
  "derive_more",
@@ -1254,7 +1254,7 @@ dependencies = [
 [[package]]
 name = "crabka-metadata"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "assert2",
  "bytes",
@@ -1274,7 +1274,7 @@ dependencies = [
 [[package]]
 name = "crabka-object-store"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1287,7 +1287,7 @@ dependencies = [
 [[package]]
 name = "crabka-pgcatalog"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "crabka-pgkv",
  "crabka-pgmvcc",
@@ -1299,7 +1299,7 @@ dependencies = [
 [[package]]
 name = "crabka-pgexec"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1335,7 +1335,7 @@ dependencies = [
 [[package]]
 name = "crabka-pgkv"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "crabka-pgtypes",
  "crabka-units",
@@ -1349,7 +1349,7 @@ dependencies = [
 [[package]]
 name = "crabka-pgmvcc"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "crabka-pgkv",
  "crabka-pgtypes",
@@ -1360,7 +1360,7 @@ dependencies = [
 [[package]]
 name = "crabka-pgparser"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "crabka-pgtypes",
  "thiserror 2.0.20",
@@ -1369,7 +1369,7 @@ dependencies = [
 [[package]]
 name = "crabka-pgtypes"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "bigdecimal",
  "dashu-float",
@@ -1381,7 +1381,7 @@ dependencies = [
 [[package]]
 name = "crabka-pgwire"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1404,7 +1404,7 @@ dependencies = [
 [[package]]
 name = "crabka-protocol"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "arbitrary",
  "assert2",
@@ -1421,7 +1421,7 @@ dependencies = [
 [[package]]
 name = "crabka-security"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "arc-swap",
  "assert2",
@@ -1455,7 +1455,7 @@ dependencies = [
 [[package]]
 name = "crabka-trace-context"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "opentelemetry",
  "serde",
@@ -1467,7 +1467,7 @@ dependencies = [
 [[package]]
 name = "crabka-units"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "num-traits",
  "serde",
@@ -1478,7 +1478,7 @@ dependencies = [
 [[package]]
 name = "crabka-voters"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/gres?rev=470bf092bc03e2ff767fb97c671827f9ab4f2ecc#470bf092bc03e2ff767fb97c671827f9ab4f2ecc"
+source = "git+https://github.com/krabka-io/gres?rev=b664acf3b9a4895bc8df154581adf9c56d7df119#b664acf3b9a4895bc8df154581adf9c56d7df119"
 dependencies = [
  "assert2",
  "crabka-ids",
@@ -6005,7 +6005,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
