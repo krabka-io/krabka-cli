@@ -1,6 +1,7 @@
 //! `krabka gres` subcommands.
 
 use std::{
+    future::Future,
     io::Read as _,
     num::NonZeroU16,
     path::{Path, PathBuf},
@@ -493,7 +494,15 @@ struct RedactedTenantRecord {
     ranges: Vec<RangeLayoutEntry>,
 }
 
-pub async fn run(args: GresArgs) -> Result<CommandResult, String> {
+/// Run a `krabka gres` subcommand.
+///
+/// The command future is large, so it is boxed here rather than at each
+/// caller.
+pub fn run(args: GresArgs) -> impl Future<Output = Result<CommandResult, String>> {
+    Box::pin(execute(args))
+}
+
+async fn execute(args: GresArgs) -> Result<CommandResult, String> {
     let policy = args.registry.policy();
     match args.command {
         GresCommand::CreateTenant(args) => create_tenant(args, &policy).await,
@@ -2268,6 +2277,25 @@ mod tests {
                     split_at: RangeBoundary::new(10, 500),
                 }]
         );
+    }
+
+    #[tokio::test]
+    async fn run_dispatches_balance_dry_run_from_a_metrics_file() {
+        let snapshot = tempfile::NamedTempFile::new().expect("snapshot file");
+        std::fs::write(snapshot.path(), BALANCE_SNAPSHOT_ENABLED).expect("write snapshot");
+        let parsed = TestCli::try_parse_from([
+            "test",
+            "balance-dry-run",
+            "--metrics-file",
+            snapshot.path().to_str().expect("UTF-8 path"),
+        ])
+        .expect("balance-dry-run arguments");
+        let input: BalanceDryRunInput = serde_json::from_str(BALANCE_SNAPSHOT_ENABLED).unwrap();
+
+        let result = run(parsed.gres).await.expect("dry run succeeds");
+
+        check!(!result.failed);
+        check!(result.data == serde_json::to_value(plan_balance_dry_run(&input)).unwrap());
     }
 
     #[test]
