@@ -1772,8 +1772,11 @@ mod tests {
         assert!(cli.connect_attempts.into_value() == 6);
     }
 
+    // Not a constant, so no password is baked into the source. The prefix keeps
+    // it from being a short run of digits: a two-digit pid alone turns up in a
+    // base64 SCRAM verifier often enough to fail the leak check by chance.
     fn fixture_password() -> String {
-        std::process::id().to_string()
+        format!("fixture-password-{}", std::process::id())
     }
 
     const BALANCE_SNAPSHOT_ENABLED: &str = r#"{
