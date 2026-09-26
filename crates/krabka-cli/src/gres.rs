@@ -1,6 +1,7 @@
 //! `krabka gres` subcommands.
 
 use std::{
+    future::Future,
     io::Read as _,
     num::NonZeroU16,
     path::{Path, PathBuf},
@@ -493,7 +494,15 @@ struct RedactedTenantRecord {
     ranges: Vec<RangeLayoutEntry>,
 }
 
-pub async fn run(args: GresArgs) -> Result<CommandResult, String> {
+/// Run a `krabka gres` subcommand.
+///
+/// The command future is large, so it is boxed here rather than at each
+/// caller.
+pub fn run(args: GresArgs) -> impl Future<Output = Result<CommandResult, String>> {
+    Box::pin(execute(args))
+}
+
+async fn execute(args: GresArgs) -> Result<CommandResult, String> {
     let policy = args.registry.policy();
     match args.command {
         GresCommand::CreateTenant(args) => create_tenant(args, &policy).await,
