@@ -1773,7 +1773,7 @@ mod tests {
     }
 
     fn fixture_password() -> String {
-        format!("fixture-password-{}", std::process::id())
+        std::process::id().to_string()
     }
 
     const BALANCE_SNAPSHOT_ENABLED: &str = r#"{
