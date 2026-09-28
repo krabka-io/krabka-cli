@@ -16,8 +16,11 @@ use assert2::assert;
 use serde_json::{Value, json};
 
 fn run(bootstrap: &str, config: &str, args: &[&str]) -> std::process::Output {
+    // The connection flags follow the command name, where `kafka-features`
+    // requires them to precede its subcommand.
+    let (command, rest) = args.split_at(1);
     Command::new(env!("CARGO_BIN_EXE_krabka"))
-        .args(args)
+        .args(command)
         .args([
             "--bootstrap-server",
             bootstrap,
@@ -30,6 +33,7 @@ fn run(bootstrap: &str, config: &str, args: &[&str]) -> std::process::Output {
             "--output",
             "json",
         ])
+        .args(rest)
         .output()
         .expect("run krabka")
 }
@@ -413,11 +417,11 @@ fn qualify_offsets_and_features(matrix: &mut Matrix<'_>) {
         "features-inspect",
         matrix.admin_config,
         "admin",
-        &["features", "--describe"],
+        &["features", "describe"],
         0,
     );
     assert!(
-        data(&features)["supported"]
+        data(&features)["features"]
             .as_array()
             .is_some_and(|features| !features.is_empty())
     );

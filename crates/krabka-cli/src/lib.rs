@@ -12,17 +12,18 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use tokio_util::sync::CancellationToken;
 
 mod acls;
-mod common;
 mod configs;
 pub mod connection;
 mod consumer_groups;
 pub mod exit;
 pub mod external;
+mod feature_catalog;
 mod features;
 mod gres;
 pub mod output;
 mod reassign_partitions;
 pub mod safety;
+mod storage;
 mod topics;
 
 use self::{
@@ -82,8 +83,12 @@ enum Command {
     /// Inspect consumer-group offsets.
     ConsumerGroups(consumer_groups::ConsumerGroupsArgs),
 
-    /// Inspect supported features or update metadata.version.
+    /// Describe, upgrade, downgrade and disable feature flags (KIP-584,
+    /// KIP-1022), as `kafka-features` does.
     Features(features::FeaturesArgs),
+
+    /// Report on and format log directories, as `kafka-storage` does.
+    Storage(storage::StorageArgs),
 
     /// Execute or verify replication-factor reassignment.
     ReassignPartitions(reassign_partitions::ReassignPartitionsArgs),
@@ -136,6 +141,10 @@ pub async fn run() -> Exit {
             run_admin("consumer-groups", Box::pin(args.run()), output).await
         }
         Command::Features(args) => run_admin("features", Box::pin(args.run()), output).await,
+        Command::Storage(args) => match args.into_format() {
+            Ok(format) => Exit::Passthrough(krabka_format::run(format).await),
+            Err(args) => run_admin("storage", Box::pin(args.run()), output).await,
+        },
         Command::ReassignPartitions(args) => {
             run_admin("reassign-partitions", Box::pin(args.run()), output).await
         }
@@ -356,21 +365,23 @@ mod tests {
             vec![
                 "krabka",
                 "features",
-                "--describe",
                 "--bootstrap-server",
                 "host:9092",
+                "describe",
             ],
             vec![
                 "krabka",
                 "features",
-                "--upgrade",
+                "--bootstrap-controller",
+                "controller:9093",
+                "upgrade",
                 "--feature",
                 "metadata.version=20",
                 "--feature",
                 "kraft.version=1",
-                "--bootstrap-controller",
-                "controller:9093",
             ],
+            vec!["krabka", "storage", "version-mapping", "-r", "4.0"],
+            vec!["krabka", "storage", "info", "-c", "server.properties"],
             vec![
                 "krabka",
                 "reassign-partitions",
@@ -407,31 +418,32 @@ mod tests {
 
     #[test]
     fn conflicting_feature_actions_are_rejected() {
-        assert!(
-            Cli::try_parse_from([
+        let refused: &[&[&str]] = &[
+            &["krabka", "features", "--bootstrap-server", "host:9092"],
+            &[
                 "krabka",
                 "features",
-                "--describe",
-                "--upgrade",
-                "--feature",
-                "metadata.version=20",
                 "--bootstrap-server",
                 "host:9092",
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "krabka",
-                "features",
-                "--describe",
+                "describe",
                 "--feature",
                 "metadata.version=20",
-                "--bootstrap-server",
-                "host:9092",
-            ])
-            .is_err()
-        );
+            ],
+            &["krabka", "storage", "info"],
+        ];
+        for argv in refused {
+            check!(Cli::try_parse_from(*argv).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn storage_format_takes_the_formatter_flags() {
+        let cli = Cli::try_parse_from(["krabka", "storage", "format", "--log-dir", "/tmp/x"])
+            .expect("storage format parses");
+        let Command::Storage(args) = cli.command else {
+            panic!("expected the storage arm");
+        };
+        check!(args.into_format().is_ok());
     }
 
     #[test]

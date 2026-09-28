@@ -36,6 +36,12 @@ crabka-units = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a48
 krabka-client-admin = { version = "0.4.0" }
 krabka-client-core = { version = "0.4.0" }
 krabka-format = { version = "0.6.1" }
+# The KIP-584 feature registry and the `metadata.version` table that
+# `krabka features` and `krabka storage` read.
+krabka-metadata = { version = "0.4.0" }
+# `Record`, the envelope `krabka_metadata::from_kafka_record` decodes a
+# bootstrap record from, for `krabka storage info`.
+krabka-protocol = { version = "0.4.0" }
 krabka-security = { workspace = true }
 krabka-units = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
