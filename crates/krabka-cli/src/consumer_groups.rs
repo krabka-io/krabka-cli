@@ -6,9 +6,8 @@ use clap::{ArgGroup, Args};
 use serde_json::json;
 
 use crate::{
-    common::{error, kafka_error},
     connection::ConnectionArgs,
-    output::CommandResult,
+    output::{CommandError, CommandResult, kafka_error},
 };
 
 #[derive(Debug, Args)]
@@ -33,7 +32,7 @@ pub struct ConsumerGroupsArgs {
 }
 
 impl ConsumerGroupsArgs {
-    pub async fn run(self) -> Result<CommandResult, String> {
+    pub async fn run(self) -> Result<CommandResult, CommandError> {
         if self.reset_offsets && !self.yes {
             return Err("offset reset requires --yes".into());
         }
@@ -42,11 +41,7 @@ impl ConsumerGroupsArgs {
         {
             return Err("--partition and --to-offset must be non-negative".into());
         }
-        let mut client = self
-            .connection
-            .connect("consumer-groups")
-            .await
-            .map_err(error)?;
+        let mut client = self.connection.connect("consumer-groups").await?;
         if self.reset_offsets {
             let topic = self
                 .topic
@@ -62,8 +57,7 @@ impl ConsumerGroupsArgs {
                     &self.group,
                     &BTreeMap::from([((topic, partition), offset)]),
                 )
-                .await
-                .map_err(error)?;
+                .await?;
             let failed = outcomes.iter().any(|outcome| outcome.error.is_some());
             let human = outcomes
                 .iter()
@@ -84,10 +78,7 @@ impl ConsumerGroupsArgs {
                 .collect::<Vec<_>>();
             return Ok(CommandResult::rows(human, values, failed));
         }
-        let offsets = client
-            .list_consumer_group_offsets(&self.group)
-            .await
-            .map_err(error)?;
+        let offsets = client.list_consumer_group_offsets(&self.group).await?;
         Ok(group_offsets_result(&self.group, &offsets))
     }
 }

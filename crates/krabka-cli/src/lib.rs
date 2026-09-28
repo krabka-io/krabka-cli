@@ -20,13 +20,13 @@ pub mod exit;
 pub mod external;
 mod features;
 mod gres;
-mod output;
+pub mod output;
 mod reassign_partitions;
 mod topics;
 
 use self::{
     exit::Exit,
-    output::{OutputArgs, OutputFormat, emit_error, emit_success},
+    output::{CommandError, CommandResult, OutputArgs, OutputFormat, emit_error, emit_success},
 };
 
 #[derive(Parser)]
@@ -95,15 +95,23 @@ enum Command {
     External(Vec<OsString>),
 }
 
+/// The log filter when `RUST_LOG` is not set: `info`, raised by each `-v` and
+/// lowered by each `-q`.
+const fn default_filter(verbose: u8, quiet: u8) -> &'static str {
+    match (verbose, quiet) {
+        (0, 0) => "info",
+        (1, _) => "debug",
+        (2.., _) => "trace",
+        (_, 1) => "warn",
+        (_, 2) => "error",
+        (_, 3..) => "off",
+    }
+}
+
 /// Parses the command line, installs logging, and runs the command.
 pub async fn run() -> Exit {
     let cli = Cli::parse();
-    let default_filter = match (cli.verbose, cli.quiet) {
-        (_, 1..) => "warn",
-        (1, 0) => "debug",
-        (2.., 0) => "trace",
-        _ => "info",
-    };
+    let default_filter = default_filter(cli.verbose, cli.quiet);
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
     match cli.log_format {
@@ -120,19 +128,26 @@ pub async fn run() -> Exit {
     let output = cli.output.output;
     match cli.command {
         Command::Format(args) => Exit::Passthrough(krabka_format::run(args).await),
-        Command::Topics(args) => run_admin(args.run(), output).await,
-        Command::Configs(args) => run_admin(args.run(), output).await,
-        Command::Acls(args) => run_admin(args.run(), output).await,
-        Command::ConsumerGroups(args) => run_admin(args.run(), output).await,
-        Command::Features(args) => run_admin(args.run(), output).await,
-        Command::ReassignPartitions(args) => run_admin(args.run(), output).await,
-        Command::Gres(args) => run_admin(gres::run(args), output).await,
+        Command::Topics(args) => run_admin("topics", args.run(), output).await,
+        Command::Configs(args) => run_admin("configs", args.run(), output).await,
+        Command::Acls(args) => run_admin("acls", args.run(), output).await,
+        Command::ConsumerGroups(args) => run_admin("consumer-groups", args.run(), output).await,
+        Command::Features(args) => run_admin("features", args.run(), output).await,
+        Command::ReassignPartitions(args) => {
+            run_admin("reassign-partitions", args.run(), output).await
+        }
+        Command::Gres(args) => run_admin("gres", gres_run(args), output).await,
         Command::External(argv) => external::run(&argv).await,
     }
 }
 
-async fn run_admin(
-    future: impl Future<Output = Result<output::CommandResult, String>>,
+async fn gres_run(args: gres::GresArgs) -> Result<CommandResult, CommandError> {
+    Ok(gres::run(args).await?)
+}
+
+async fn run_admin<E: Into<CommandError>>(
+    command: &str,
+    future: impl Future<Output = Result<CommandResult, E>>,
     format: OutputFormat,
 ) -> Exit {
     let cancel = CancellationToken::new();
@@ -142,7 +157,8 @@ async fn run_admin(
             on_signal.cancel();
         }
     });
-    let outcome = run_until_cancelled(future, &cancel, format).await;
+    let command = format!("krabka {command}");
+    let outcome = run_until_cancelled(&command, future, &cancel, format).await;
     watcher.abort();
     outcome
 }
@@ -152,8 +168,9 @@ async fn run_admin(
 /// A cancelled command exits [`Exit::Cancelled`]. The command reports no
 /// partial result, because the request in flight may or may not have reached
 /// the broker.
-async fn run_until_cancelled(
-    future: impl Future<Output = Result<output::CommandResult, String>>,
+async fn run_until_cancelled<E: Into<CommandError>>(
+    command: &str,
+    future: impl Future<Output = Result<CommandResult, E>>,
     cancel: &CancellationToken,
     format: OutputFormat,
 ) -> Exit {
@@ -166,19 +183,20 @@ async fn run_until_cancelled(
                     // failure of the command. The Rust runtime ignores
                     // SIGPIPE, so the closed pipe arrives here as an error.
                     Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => {
-                        let _ = emit_error(&error.to_string(), Exit::Failure, format);
+                        let _ = emit_error(command, &error.to_string(), Exit::Failure, format);
                         Exit::Failure
                     }
                     _ => Exit::from_failed(failed),
                 }
             }
             Err(error) => {
-                let _ = emit_error(&error, Exit::Failure, format);
+                let _ = emit_error(command, &error.into().to_string(), Exit::Failure, format);
                 Exit::Failure
             }
         },
         () = cancel.cancelled() => {
             let _ = emit_error(
+                command,
                 "cancelled; a request in flight may already have reached the broker",
                 Exit::Cancelled,
                 format,
@@ -368,6 +386,22 @@ mod tests {
     }
 
     #[test]
+    fn verbosity_raises_and_lowers_the_default_log_filter() {
+        let cases = [
+            (0, 0, "info"),
+            (1, 0, "debug"),
+            (2, 0, "trace"),
+            (5, 0, "trace"),
+            (0, 1, "warn"),
+            (0, 2, "error"),
+            (0, 3, "off"),
+        ];
+        for (verbose, quiet, expected) in cases {
+            check!(super::default_filter(verbose, quiet) == expected);
+        }
+    }
+
+    #[test]
     fn conflicting_acl_principals_are_rejected() {
         assert!(
             Cli::try_parse_from([
@@ -442,13 +476,25 @@ mod tests {
         let Command::Acls(args) = cli.command else {
             panic!("expected ACL command")
         };
-        check!(args.run().await.unwrap_err().contains("scope filter"));
+        check!(
+            args.run()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("scope filter")
+        );
 
         let cli =
             Cli::try_parse_from(["krabka", "topics", "--list", "--dry-run"]).expect("valid syntax");
         let Command::Topics(args) = cli.command else {
             panic!("expected topics command")
         };
-        check!(args.run().await.unwrap_err().contains("only valid"));
+        check!(
+            args.run()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("only valid")
+        );
     }
 }

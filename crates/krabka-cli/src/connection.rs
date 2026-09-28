@@ -82,6 +82,15 @@ fn parse_time(value: &str) -> Result<Time, String> {
         .map_err(|error| format!("invalid timeout: {error}"))
 }
 
+impl From<ConnectionError> for crate::output::CommandError {
+    fn from(error: ConnectionError) -> Self {
+        match error {
+            ConnectionError::Admin(error) => error.into(),
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
 /// Why a connection could not be set up.
 #[derive(Debug, Error)]
 #[non_exhaustive]

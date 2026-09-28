@@ -8,9 +8,8 @@ use krabka_client_admin::{
 use serde_json::json;
 
 use crate::{
-    common::{error, kafka_error},
     connection::ConnectionArgs,
-    output::CommandResult,
+    output::{CommandError, CommandResult, kafka_error},
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -75,7 +74,7 @@ pub struct AclsArgs {
 }
 
 impl AclsArgs {
-    pub async fn run(self) -> Result<CommandResult, String> {
+    pub async fn run(self) -> Result<CommandResult, CommandError> {
         if self.remove.is_some() && !self.yes {
             return Err("ACL removal requires --yes".into());
         }
@@ -104,11 +103,9 @@ impl AclsArgs {
             self.operation,
             permission,
         );
-        let mut client = self.connection.connect("acls").await.map_err(error)?;
+        let mut client = self.connection.connect("acls").await?;
         if self.list.is_some() {
-            return Ok(acl_entries(
-                &client.describe_acls(&filter).await.map_err(error)?,
-            ));
+            return Ok(acl_entries(&client.describe_acls(&filter).await?));
         }
         if self.add.is_some() {
             let entry = AclEntry {
@@ -120,7 +117,7 @@ impl AclsArgs {
                 operation: self.operation.ok_or("--operation is required")?.into(),
                 permission_type: permission,
             };
-            let outcomes = client.create_acls(&[entry]).await.map_err(error)?;
+            let outcomes = client.create_acls(&[entry]).await?;
             let failed = outcomes.iter().any(|outcome| outcome.error.is_some());
             return Ok(CommandResult::rows(
                 vec![
@@ -138,7 +135,7 @@ impl AclsArgs {
                 failed,
             ));
         }
-        let outcomes = client.delete_acls(&[filter]).await.map_err(error)?;
+        let outcomes = client.delete_acls(&[filter]).await?;
         Ok(acl_delete_outcomes(&outcomes))
     }
 }

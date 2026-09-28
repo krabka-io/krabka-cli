@@ -5,9 +5,9 @@ use krabka_client_admin::FeatureUpdate;
 use serde_json::json;
 
 use crate::{
-    common::{error, kafka_error, key_value},
+    common::key_value,
     connection::ConnectionArgs,
-    output::CommandResult,
+    output::{CommandError, CommandResult, kafka_error},
 };
 
 #[derive(Debug, Args)]
@@ -29,10 +29,10 @@ pub struct FeaturesArgs {
 }
 
 impl FeaturesArgs {
-    pub async fn run(self) -> Result<CommandResult, String> {
+    pub async fn run(self) -> Result<CommandResult, CommandError> {
         if self.describe {
-            let mut client = self.connection.connect("features").await.map_err(error)?;
-            let metadata = client.describe_features().await.map_err(error)?;
+            let mut client = self.connection.connect("features").await?;
+            let metadata = client.describe_features().await?;
             let human = metadata
                 .supported
                 .iter()
@@ -69,11 +69,10 @@ impl FeaturesArgs {
                 safe_downgrade: self.downgrade,
             })
             .collect::<Vec<_>>();
-        let mut client = self.connection.connect("features").await.map_err(error)?;
+        let mut client = self.connection.connect("features").await?;
         let outcomes = client
             .update_features(&updates, self.connection.timeout)
-            .await
-            .map_err(error)?;
+            .await?;
         let failed = outcomes.iter().any(|outcome| outcome.error.is_some());
         let human = outcomes
             .iter()

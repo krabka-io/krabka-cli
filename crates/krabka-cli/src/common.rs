@@ -1,6 +1,4 @@
-//! Argument parsers and renderings that more than one admin command uses.
-
-use serde_json::{Value, json};
+//! Argument parsers that more than one admin command uses.
 
 /// Parses a `key=value` argument. The value keeps every `=` after the first.
 pub fn key_value(value: &str) -> Result<(String, String), String> {
@@ -8,19 +6,6 @@ pub fn key_value(value: &str) -> Result<(String, String), String> {
         .split_once('=')
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .ok_or_else(|| "expected key=value".into())
-}
-
-/// Renders a per-row Kafka error as JSON, or `null` for a row that succeeded.
-pub fn kafka_error(error: Option<&krabka_client_admin::KafkaError>) -> Value {
-    error.map_or(
-        Value::Null,
-        |error| json!({"code": error.code, "name": error.name, "message": error.message}),
-    )
-}
-
-/// Flattens an error to the message that the output layer prints.
-pub fn error(error: impl std::fmt::Display) -> String {
-    error.to_string()
 }
 
 #[cfg(test)]

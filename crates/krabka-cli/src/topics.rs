@@ -7,9 +7,9 @@ use krabka_client_admin::CreateTopicSpec;
 use serde_json::json;
 
 use crate::{
-    common::{error, kafka_error, key_value},
+    common::key_value,
     connection::ConnectionArgs,
-    output::CommandResult,
+    output::{CommandError, CommandResult, kafka_error},
 };
 
 #[derive(Debug, Args)]
@@ -40,7 +40,7 @@ pub struct TopicsArgs {
 }
 
 impl TopicsArgs {
-    pub async fn run(self) -> Result<CommandResult, String> {
+    pub async fn run(self) -> Result<CommandResult, CommandError> {
         if (self.create.is_some() || self.delete.is_some() || self.describe.is_some())
             && self.topic.is_empty()
         {
@@ -61,7 +61,7 @@ impl TopicsArgs {
                 json!({"topics": self.topic, "dry_run": true}),
             ));
         }
-        let mut client = self.connection.connect("topics").await.map_err(error)?;
+        let mut client = self.connection.connect("topics").await?;
         if self.create.is_some() {
             let configs = self.config.into_iter().collect::<BTreeMap<_, _>>();
             let specs = self
@@ -76,8 +76,7 @@ impl TopicsArgs {
                 .collect::<Vec<_>>();
             let outcomes = client
                 .create_topics(&specs, self.connection.timeout)
-                .await
-                .map_err(error)?;
+                .await?;
             let failed = outcomes.iter().any(|outcome| outcome.error.is_some());
             let values = outcomes
                 .iter()
@@ -98,8 +97,7 @@ impl TopicsArgs {
             let names = self.topic.iter().map(String::as_str).collect::<Vec<_>>();
             let outcomes = client
                 .delete_topics(&names, self.connection.timeout)
-                .await
-                .map_err(error)?;
+                .await?;
             let failed = outcomes.iter().any(|outcome| outcome.error.is_some());
             let values = outcomes
                 .iter()
@@ -117,7 +115,7 @@ impl TopicsArgs {
             return Ok(CommandResult::rows(human, values, failed));
         }
         let names = self.topic.iter().map(String::as_str).collect::<Vec<_>>();
-        let metadata = client.metadata(&names).await.map_err(error)?;
+        let metadata = client.metadata(&names).await?;
         let values = metadata
             .topics
             .iter()

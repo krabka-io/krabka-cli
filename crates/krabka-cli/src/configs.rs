@@ -5,9 +5,9 @@ use krabka_client_admin::IncrementalAlterOp;
 use serde_json::json;
 
 use crate::{
-    common::{error, kafka_error, key_value},
+    common::key_value,
     connection::ConnectionArgs,
-    output::CommandResult,
+    output::{CommandError, CommandResult, kafka_error},
 };
 
 #[derive(Debug, Args)]
@@ -30,13 +30,10 @@ pub struct ConfigsArgs {
 }
 
 impl ConfigsArgs {
-    pub async fn run(self) -> Result<CommandResult, String> {
-        let mut client = self.connection.connect("configs").await.map_err(error)?;
+    pub async fn run(self) -> Result<CommandResult, CommandError> {
+        let mut client = self.connection.connect("configs").await?;
         if self.describe {
-            let result = client
-                .describe_configs(&[&self.entity_name])
-                .await
-                .map_err(error)?;
+            let result = client.describe_configs(&[&self.entity_name]).await?;
             let values = result
                 .iter()
                 .map(|item| json!({"entity_type": self.entity_type, "entity_name": item.topic, "configs": item.overrides}))
@@ -71,10 +68,7 @@ impl ConfigsArgs {
         if ops.is_empty() {
             return Err("--alter requires --add-config or --delete-config".into());
         }
-        let outcomes = client
-            .incremental_alter_configs(&ops)
-            .await
-            .map_err(error)?;
+        let outcomes = client.incremental_alter_configs(&ops).await?;
         let failed = outcomes.iter().any(|outcome| outcome.error.is_some());
         let human = outcomes
             .iter()

@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use clap::Args;
 use serde_json::json;
 
-use crate::{common::error, connection::ConnectionArgs, output::CommandResult};
+use crate::{
+    connection::ConnectionArgs,
+    output::{CommandError, CommandResult},
+};
 
 #[derive(Debug, Args)]
 pub struct ReassignPartitionsArgs {
@@ -24,18 +27,14 @@ pub struct ReassignPartitionsArgs {
 }
 
 impl ReassignPartitionsArgs {
-    pub async fn run(self) -> Result<CommandResult, String> {
+    pub async fn run(self) -> Result<CommandResult, CommandError> {
         if self.execute == self.verify {
             return Err("choose --execute or --verify".into());
         }
         if self.execute && !self.yes {
             return Err("reassignment execution requires --yes".into());
         }
-        let mut client = self
-            .connection
-            .connect("reassign-partitions")
-            .await
-            .map_err(error)?;
+        let mut client = self.connection.connect("reassign-partitions").await?;
         let (status, incomplete) = if self.execute {
             let status = client
                 .reconcile_topic_replication_factor(
@@ -43,14 +42,12 @@ impl ReassignPartitionsArgs {
                     self.replication_factor,
                     self.connection.timeout,
                 )
-                .await
-                .map_err(error)?;
+                .await?;
             (format!("{status:?}"), false)
         } else {
             let assignments = client
                 .describe_partition_assignments(&[&self.topic])
-                .await
-                .map_err(error)?;
+                .await?;
             let partitions = assignments
                 .iter()
                 .map(|assignment| assignment.partition)
@@ -60,8 +57,7 @@ impl ReassignPartitionsArgs {
                     &BTreeMap::from([(self.topic.clone(), partitions)]),
                     self.connection.timeout,
                 )
-                .await
-                .map_err(error)?;
+                .await?;
             if !active.is_empty() {
                 ("ReassignmentInProgress".into(), true)
             } else if !assignments.is_empty()
