@@ -35,4 +35,8 @@ crate_tests(
     # on the compile action, which is where `env!` reads it.
     data = [":krabka"],
     lib = "krabka-cli",
+    # `conformance` starts a Kafka container through the Docker CLI, which a
+    # Bazel test sandbox does not have. Its cases are `#[ignore]`d under cargo
+    # for the same reason.
+    manual = ["conformance"],
 )
