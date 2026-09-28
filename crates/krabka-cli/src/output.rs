@@ -142,6 +142,10 @@ pub enum CommandError {
     },
     /// The command did not proceed, such as a declined confirmation.
     Refused(Refusal),
+    /// The command line is not valid in a way that clap cannot check, such as
+    /// a combination of flags that the JVM tool refuses. Exits
+    /// [`Exit::Usage`].
+    Usage(String),
     /// Any other failure, as a message.
     Other(String),
 }
@@ -152,6 +156,7 @@ impl CommandError {
     pub const fn exit(&self) -> Exit {
         match self {
             Self::Refused(refusal) => refusal.exit(),
+            Self::Usage(_) => Exit::Usage,
             Self::Broker { .. } | Self::Other(_) => Exit::Failure,
         }
     }
@@ -213,7 +218,7 @@ impl fmt::Display for CommandError {
                 }
             }
             Self::Refused(refusal) => f.write_str(refusal.message()),
-            Self::Other(message) => f.write_str(message),
+            Self::Usage(message) | Self::Other(message) => f.write_str(message),
         }
     }
 }
