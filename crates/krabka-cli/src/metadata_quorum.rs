@@ -12,13 +12,13 @@ use std::{
 
 use clap::{Args, Subcommand};
 use krabka_client_admin::{MetadataQuorum, QuorumReplica};
+use krabka_ids::KafkaUuid;
 use serde_json::{Value, json};
 
 use crate::{
     cluster,
     common::unsupported,
     connection::{ConnectionArgs, Properties},
-    kafka_uuid::KafkaUuid,
     output::{CommandError, CommandResult},
     safety::{ConfirmArgs, Impact, confirm},
 };
@@ -201,7 +201,7 @@ fn replication_rows(quorum: &MetadataQuorum, now: Option<i64>) -> Result<Vec<[St
         .map(|(replica, status)| {
             Ok([
                 replica.node_id.to_string(),
-                KafkaUuid::from_bytes(*replica.directory_id.as_bytes()).to_string(),
+                KafkaUuid(replica.directory_id).to_string(),
                 replica.log_end_offset.to_string(),
                 (leader.log_end_offset - replica.log_end_offset).to_string(),
                 timestamp(replica.last_fetch_timestamp, now, "last fetch")?,
@@ -321,7 +321,7 @@ fn status_json(cluster_id: &str, quorum: &MetadataQuorum) -> Value {
             .map(|replica| {
                 json!({
                     "id": replica.node_id,
-                    "directory_id": KafkaUuid::from_bytes(*replica.directory_id.as_bytes()).to_string(),
+                    "directory_id": KafkaUuid(replica.directory_id).to_string(),
                     "log_end_offset": replica.log_end_offset,
                 })
             })
@@ -344,7 +344,7 @@ fn replica_list(replicas: &[QuorumReplica], nodes: &NodeEndpoints) -> String {
         .iter()
         .map(|replica| {
             let mut entry = format!("{{\"id\": {}", replica.node_id);
-            let directory_id = KafkaUuid::from_bytes(*replica.directory_id.as_bytes());
+            let directory_id = KafkaUuid(replica.directory_id);
             if directory_id != KafkaUuid::ZERO {
                 entry.push_str(", \"directoryId\": \"");
                 entry.push_str(&directory_id.to_string());
@@ -538,12 +538,13 @@ fn metadata_directory_id(directory: &str, read_meta: &MetaReader<'_>) -> Result<
             .get("directory_id")
             .and_then(Value::as_str)
             .ok_or_else(missing)?;
-        return KafkaUuid::parse_either(id)
+        return KafkaUuid::parse_kafka_or_hyphenated(id)
             .map_err(|error| format!("Unable to read directory_id as a Uuid: {error}"));
     }
     let properties = Properties::parse(text.as_bytes()).map_err(|error| error.to_string())?;
     let id = properties.get("directory.id").ok_or_else(missing)?;
-    KafkaUuid::parse(id).map_err(|error| format!("Unable to read directory.id as a Uuid: {error}"))
+    id.parse::<KafkaUuid>()
+        .map_err(|error| format!("Unable to read directory.id as a Uuid: {error}"))
 }
 
 /// `SocketServerConfigs.listenerListToEndPoints` of one CSV property: each
@@ -650,7 +651,8 @@ fn removal(controller_id: i32, directory_id: &str) -> Result<(i32, KafkaUuid), S
     if controller_id < 0 {
         return Err(format!("Invalid negative --controller-id: {controller_id}"));
     }
-    let directory_id = KafkaUuid::parse(directory_id)
+    let directory_id = directory_id
+        .parse::<KafkaUuid>()
         .map_err(|error| format!("Failed to parse --controller-directory-id: {error}"))?;
     Ok((controller_id, directory_id))
 }

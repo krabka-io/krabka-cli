@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, sync::LazyLock};
 
 use regex::Regex;
 
-use super::java::{Construction, hash_map_order, parse_int, split};
+use super::java::{default_order, parse_int, split};
 
 /// The type of a topic config value, as Kafka's `ConfigDef.Type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +120,7 @@ pub fn parse_topic_configs(values: &[String]) -> Result<BTreeMap<String, String>
         configs.insert(key, value);
     }
     // `validateNames` walks the keys of the `HashMap` that holds them.
-    for name in hash_map_order(names, Construction::Default) {
+    for name in default_order(names) {
         if !TOPIC_CONFIGS.iter().any(|(known, _)| *known == name) {
             return Err(format!("Unknown topic config name: {name}"));
         }

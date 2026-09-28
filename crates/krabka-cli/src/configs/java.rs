@@ -3,67 +3,22 @@
 //! `String.trim`, `Integer.parseInt` failures, and the `toString` of the
 //! Scala collections that its error messages print.
 
-/// A `HashMap` bin longer than this is treeified, or the table grows when it
-/// is smaller than [`MIN_TREEIFY_CAPACITY`].
-const TREEIFY_THRESHOLD: usize = 8;
-const MIN_TREEIFY_CAPACITY: usize = 64;
-const DEFAULT_CAPACITY: usize = 16;
-
 /// The largest Scala immutable collection that keeps insertion order. A
 /// larger one is a `HashMap` or `HashSet`.
 const SCALA_SMALL_COLLECTION: usize = 4;
 
-/// `String.hashCode`, over the UTF-16 code units.
-fn string_hash(value: &str) -> i32 {
-    value.encode_utf16().fold(0_i32, |hash, unit| {
-        hash.wrapping_mul(31).wrapping_add(i32::from(unit))
-    })
-}
-
-/// `HashMap.hash`: the high half of the hash folded into the low half.
-fn spread(value: &str) -> usize {
-    let hash = string_hash(value).cast_unsigned();
-    usize::try_from(hash ^ (hash >> 16)).expect("a u32 fits in usize")
-}
+pub use crate::jvm::parse_int;
+use crate::jvm::{Table, hash_order, string_hash};
 
 /// The order in which a `java.util.HashMap` iterates `keys`, inserted in the
-/// given order, as JDK 21 does.
-///
-/// `initial_capacity` is the argument of `new HashMap<>(n)`, or `None` for
-/// `new HashMap<>()`. The keys must be distinct. A bin that the JDK would
-/// treeify, which needs nine colliding keys in a table of at least 64 bins,
-/// keeps its insertion order here.
+/// given order. `initial_capacity` is the argument of `new HashMap<>(n)`, or
+/// `None` for `new HashMap<>()`.
 pub fn hash_map_order<'a>(
     keys: impl IntoIterator<Item = &'a str>,
     initial_capacity: Option<usize>,
 ) -> Vec<&'a str> {
-    let mut capacity = initial_capacity.map_or(DEFAULT_CAPACITY, |n| n.max(1).next_power_of_two());
-    let mut bins: Vec<Vec<&str>> = vec![Vec::new(); capacity];
-    let mut size = 0;
-    for key in keys {
-        let bin = spread(key) & (capacity - 1);
-        bins[bin].push(key);
-        if bins[bin].len() > TREEIFY_THRESHOLD && capacity < MIN_TREEIFY_CAPACITY {
-            capacity *= 2;
-            bins = rehash(&bins, capacity);
-        }
-        size += 1;
-        if size > capacity * 3 / 4 {
-            capacity *= 2;
-            bins = rehash(&bins, capacity);
-        }
-    }
-    bins.into_iter().flatten().collect()
-}
-
-/// A resize: each bin splits into two and keeps the relative order of its
-/// keys.
-fn rehash<'a>(bins: &[Vec<&'a str>], capacity: usize) -> Vec<Vec<&'a str>> {
-    let mut resized = vec![Vec::new(); capacity];
-    for key in bins.iter().flatten() {
-        resized[spread(key) & (capacity - 1)].push(*key);
-    }
-    resized
+    let table = initial_capacity.map_or(Table::Default, Table::WithCapacity);
+    hash_order(keys.into_iter().collect(), table, |key| string_hash(key))
 }
 
 /// `Double.toString`: the shortest digits that round-trip, in plain notation
@@ -132,18 +87,6 @@ pub fn parse_double(value: &str) -> Option<f64> {
     decimal.parse().ok()
 }
 
-/// `Integer.parseInt`, with the message of the `NumberFormatException` it
-/// throws.
-pub fn parse_int(value: &str) -> Result<i32, String> {
-    let digits = value.strip_prefix(['-', '+']).unwrap_or(value);
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(format!("For input string: \"{value}\""));
-    }
-    value
-        .parse()
-        .map_err(|_| format!("For input string: \"{value}\""))
-}
-
 /// `String.trim`: strips every leading and trailing character at or below
 /// U+0020.
 pub fn trim(value: &str) -> &str {
@@ -178,121 +121,6 @@ mod tests {
     use assert2::check;
 
     use super::*;
-
-    const QUOTAS: [&str; 4] = [
-        "consumer_byte_rate",
-        "producer_byte_rate",
-        "request_percentage",
-        "controller_mutation_rate",
-    ];
-    const TOPIC_CONFIGS: [&str; 6] = [
-        "retention.ms",
-        "cleanup.policy",
-        "segment.bytes",
-        "max.message.bytes",
-        "min.insync.replicas",
-        "flush.ms",
-    ];
-    const TOPICS: [&str; 14] = [
-        "t1",
-        "orders",
-        "__consumer_offsets",
-        "payments",
-        "a",
-        "b",
-        "c",
-        "d",
-        "e",
-        "f",
-        "g",
-        "h",
-        "i",
-        "j",
-    ];
-
-    // Every expected order below is what JDK 21 printed for the same keys.
-    #[test]
-    fn hash_map_order_matches_the_jdk() {
-        let cases: [(&[&str], Option<usize>, &[&str]); 8] = [
-            (
-                &QUOTAS,
-                Some(4),
-                &[
-                    "producer_byte_rate",
-                    "consumer_byte_rate",
-                    "controller_mutation_rate",
-                    "request_percentage",
-                ],
-            ),
-            (
-                &QUOTAS,
-                None,
-                &[
-                    "request_percentage",
-                    "producer_byte_rate",
-                    "consumer_byte_rate",
-                    "controller_mutation_rate",
-                ],
-            ),
-            (
-                &["request_percentage", "producer_byte_rate"],
-                Some(2),
-                &["request_percentage", "producer_byte_rate"],
-            ),
-            (&["foo", "bar"], None, &["bar", "foo"]),
-            (
-                &TOPIC_CONFIGS,
-                None,
-                &[
-                    "cleanup.policy",
-                    "flush.ms",
-                    "max.message.bytes",
-                    "min.insync.replicas",
-                    "retention.ms",
-                    "segment.bytes",
-                ],
-            ),
-            (
-                &TOPIC_CONFIGS,
-                Some(6),
-                &[
-                    "cleanup.policy",
-                    "min.insync.replicas",
-                    "retention.ms",
-                    "segment.bytes",
-                    "flush.ms",
-                    "max.message.bytes",
-                ],
-            ),
-            (
-                &TOPICS,
-                None,
-                &[
-                    "a",
-                    "b",
-                    "c",
-                    "d",
-                    "e",
-                    "f",
-                    "payments",
-                    "g",
-                    "h",
-                    "i",
-                    "j",
-                    "orders",
-                    "t1",
-                    "__consumer_offsets",
-                ],
-            ),
-            (&[], Some(0), &[]),
-        ];
-        for (keys, capacity, expected) in cases {
-            check!(
-                hash_map_order(keys.iter().copied(), capacity) == expected,
-                "{keys:?} {capacity:?}"
-            );
-        }
-    }
 
     #[test]
     fn double_to_string_matches_the_jdk() {

@@ -221,7 +221,7 @@ fn describe_flags_resolve_or_fail_with_kafkas_messages() {
 
 #[test]
 fn remove_controller_checks_match_kafka() {
-    let one = KafkaUuid::parse("AAAAAAAAAAAAAAAAAAAAAQ").unwrap();
+    let one = KafkaUuid::ONE;
     check!(removal(7, "AAAAAAAAAAAAAAAAAAAAAQ") == Ok((7, one)));
     check!(
         removal(-1, "AAAAAAAAAAAAAAAAAAAAAQ") == Err("Invalid negative --controller-id: -1".into())
@@ -340,7 +340,7 @@ fn add_controller_reads_the_controllers_identity_as_kafka_does() {
     );
     let expected = NewController {
         id: 3,
-        directory_id: KafkaUuid::parse("AAAAAAAAAAAAAAAAAAAAAQ").unwrap(),
+        directory_id: KafkaUuid::ONE,
         endpoints: vec![VoterEndpoint {
             listener: "CONTROLLER".into(),
             host: "controller-3".into(),

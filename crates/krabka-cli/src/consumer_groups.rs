@@ -38,10 +38,11 @@ use self::{
     reset::{Partition, Plan, Scenario},
 };
 use crate::{
-    compat::{KafkaException, default_capacity, hash_order, not_supported, string_hash},
+    compat::{KafkaException, not_supported},
     connection::ConnectionArgs,
     fan_out,
     get_offsets::{OffsetLookup, Unavailable},
+    jvm::{Table, hash_order, string_hash},
     output::{CommandError, CommandResult, kafka_error},
     safety::{ConfirmArgs, Impact, confirm},
 };
@@ -241,10 +242,7 @@ pub struct GroupDescription {
 /// The listings in the order of the `HashMap<String, GroupListing>` that
 /// Kafka's `ListGroupsResults` collects them in.
 fn listing_order(listed: Vec<GroupListing>) -> Vec<GroupListing> {
-    let count = listed.len();
-    hash_order(listed, default_capacity(count), |group| {
-        string_hash(&group.group_id)
-    })
+    hash_order(listed, Table::Default, |group| string_hash(&group.group_id))
 }
 
 /// The exception of a broker that failed `ListGroups`, as Kafka's
@@ -948,8 +946,7 @@ fn reset_report(
     export: bool,
     single_group: bool,
 ) -> CommandResult {
-    let capacity = default_capacity(plans.len());
-    let plans = hash_order(plans, capacity, |(group, _)| string_hash(group));
+    let plans = hash_order(plans, Table::Default, |(group, _)| string_hash(group));
     let data = plans
         .iter()
         .flat_map(|(group, plan)| {
@@ -1181,8 +1178,7 @@ fn delete_report(results: &[(String, Option<i16>)]) -> CommandResult {
             .iter()
             .filter(|(_, error)| error.is_some() == failed)
             .collect::<Vec<_>>();
-        let capacity = default_capacity(groups.len());
-        hash_order(groups, capacity, |(group, _)| string_hash(group))
+        hash_order(groups, Table::Default, |(group, _)| string_hash(group))
     };
     let (failed, succeeded) = (pick(true), pick(false));
     let mut human = Vec::new();

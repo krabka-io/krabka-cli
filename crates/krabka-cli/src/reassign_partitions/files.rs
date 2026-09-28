@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::{
-    java_collections::{hash_set_order, string_hash, to_string},
+    jvm::{collection_to_string as to_string, hash_set_order, string_hash},
     kafka_json,
     topic_partition::TopicPartition,
 };

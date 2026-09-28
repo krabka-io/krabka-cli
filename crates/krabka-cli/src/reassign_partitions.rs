@@ -20,7 +20,7 @@ use crate::{
     cluster,
     common::unsupported,
     connection::ConnectionArgs,
-    java_collections::hash_set_order,
+    jvm::hash_set_order,
     output::{CommandError, CommandResult},
     replica_placer::{self, Lcg48},
     safety::{ConfirmArgs, Impact, confirm},

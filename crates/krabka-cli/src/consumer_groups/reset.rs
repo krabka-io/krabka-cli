@@ -10,8 +10,9 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    compat::{KafkaException, default_capacity, hash_order, topic_partition_hash},
+    compat::KafkaException,
     get_offsets::{OffsetLookup, OffsetSpec, PartitionOffset},
+    jvm::{Table, hash_order, topic_partition_hash},
     output::CommandError,
 };
 
@@ -58,8 +59,7 @@ fn name((topic, partition): &Partition) -> String {
 /// A plan in the order of the `HashMap` that Kafka collects it into.
 fn ordered(offsets: impl IntoIterator<Item = (Partition, i64)>) -> Plan {
     let offsets = offsets.into_iter().collect::<Vec<_>>();
-    let capacity = default_capacity(offsets.len());
-    hash_order(offsets, capacity, |((topic, partition), _)| {
+    hash_order(offsets, Table::Default, |((topic, partition), _)| {
         topic_partition_hash(topic, *partition)
     })
 }

@@ -3563,6 +3563,7 @@ dependencies = [
  "krabka-client-core",
  "krabka-client-producer",
  "krabka-format",
+ "krabka-ids",
  "krabka-metadata",
  "krabka-protocol",
  "krabka-security",

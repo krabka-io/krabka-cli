@@ -1,11 +1,7 @@
-//! What the JVM tools print that a Rust port has to reproduce: the Java class
-//! name and message of a Kafka error code, and the iteration order of a
-//! `java.util.HashMap`.
-//!
-//! `kafka-log-dirs` and `kafka-consumer-groups` print collections in the order
-//! a `HashMap` yields them and errors as `Throwable.toString()`. Operators diff
-//! and grep those lines, so the port computes the same order and the same text
-//! rather than sorting or renaming.
+//! Kafka's `Errors` table: the name, exception class and message of every
+//! Kafka error code, as the JVM tools print an error with
+//! `Throwable.toString()`. Operators grep those lines, so krabka prints the
+//! same text rather than renaming.
 
 use crate::output::CommandError;
 
@@ -848,6 +844,12 @@ impl KafkaException {
         }
     }
 
+    /// Whether Kafka's `Errors` defines `code`.
+    #[must_use]
+    pub fn is_known(code: i16) -> bool {
+        ERRORS.iter().any(|(known, ..)| *known == code)
+    }
+
     /// The name of the `Errors` constant, as `Errors.toString()` returns it.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -886,182 +888,11 @@ pub fn not_supported(what: &str, method: &str) -> CommandError {
     ))
 }
 
-/// `String.hashCode()`: the UTF-16 code units folded with 31.
-#[must_use]
-pub fn string_hash(value: &str) -> i32 {
-    value.encode_utf16().fold(0_i32, |hash, unit| {
-        hash.wrapping_mul(31).wrapping_add(i32::from(unit))
-    })
-}
-
-/// `TopicPartition.hashCode()`.
-#[must_use]
-pub fn topic_partition_hash(topic: &str, partition: i32) -> i32 {
-    31_i32
-        .wrapping_mul(31_i32.wrapping_add(partition))
-        .wrapping_add(string_hash(topic))
-}
-
-/// The largest table that a `HashMap` allocates, `1 << 30`.
-const MAXIMUM_CAPACITY: u32 = 1 << 30;
-
-/// `HashMap.tableSizeFor`: the smallest power of two at or above `wanted`,
-/// and at least 1.
-fn table_size_for(wanted: usize) -> u32 {
-    u32::try_from(wanted.max(1).next_power_of_two())
-        .map_or(MAXIMUM_CAPACITY, |size| size.min(MAXIMUM_CAPACITY))
-}
-
-/// Grows `capacity` the way `HashMap.resize` does until `entries` fit under
-/// the 0.75 load factor.
-fn grown(mut capacity: u32, entries: usize) -> u32 {
-    while capacity < MAXIMUM_CAPACITY
-        && usize::try_from(capacity / 4 * 3 + capacity % 4 * 3 / 4).unwrap_or(usize::MAX) < entries
-    {
-        capacity *= 2;
-    }
-    capacity
-}
-
-/// The table size of `new HashMap<>()`, or of `Collectors.toMap` and
-/// `Collectors.toSet`, after `entries` insertions.
-#[must_use]
-pub fn default_capacity(entries: usize) -> u32 {
-    grown(16, entries)
-}
-
-/// The table size of `new HashMap<>(initial)` after `entries` insertions.
-#[must_use]
-pub fn presized_capacity(initial: usize, entries: usize) -> u32 {
-    grown(table_size_for(initial), entries)
-}
-
-/// `ceil(entries / 0.75)`, the table size that JDK 19 and later derive for a
-/// map that must hold `entries` without resizing.
-fn capacity_for(entries: usize) -> usize {
-    (entries * 4).div_ceil(3)
-}
-
-/// The table size of `new HashMap<>(map)` for a map of `entries` entries, and
-/// of `putAll` into a `HashMap` that has no table yet.
-#[must_use]
-pub fn copy_capacity(entries: usize) -> u32 {
-    grown(table_size_for(capacity_for(entries)), entries)
-}
-
-/// The table size of `new HashSet<>(collection)` for `entries` elements,
-/// which JDK 19 and later size for at least 12.
-#[must_use]
-pub fn hash_set_copy_capacity(entries: usize) -> u32 {
-    table_size_for(capacity_for(entries.max(12)))
-}
-
-/// The bucket of `hash` in a table of `capacity`, after `HashMap.hash`
-/// spreads the high bits down.
-fn bucket(hash: i32, capacity: u32) -> u32 {
-    let hash = u32::from_ne_bytes(hash.to_ne_bytes());
-    (hash ^ (hash >> 16)) & (capacity - 1)
-}
-
-/// The order in which a `HashMap` of `capacity` iterates `keys`, given in
-/// insertion order: by bucket, and in insertion order within a bucket.
-///
-/// The keys must be distinct. A bucket that `HashMap` turns into a tree,
-/// which takes more than eight colliding keys in a table of 64 or more, is
-/// iterated in insertion order here too, which is where the two can differ.
-#[must_use]
-pub fn hash_order<T>(mut keys: Vec<T>, capacity: u32, hash: impl Fn(&T) -> i32) -> Vec<T> {
-    keys.sort_by_key(|key| bucket(hash(key), capacity));
-    keys
-}
-
 #[cfg(test)]
 mod tests {
     use assert2::check;
 
     use super::*;
-
-    #[test]
-    fn hashes_match_the_jvm() {
-        let cases = [
-            (string_hash(""), 0),
-            (string_hash("orders"), -1_008_770_331),
-            (string_hash("\u{e9}t\u{e9}"), 227_742),
-            (topic_partition_hash("orders", 0), -1_008_769_370),
-            (topic_partition_hash("orders", 7), -1_008_769_153),
-        ];
-        for (actual, expected) in cases {
-            check!(actual == expected);
-        }
-    }
-
-    #[test]
-    fn capacities_follow_hash_map_growth() {
-        let cases = [
-            (default_capacity(0), 16),
-            (default_capacity(12), 16),
-            (default_capacity(13), 32),
-            (default_capacity(75), 128),
-            (presized_capacity(0, 0), 1),
-            (presized_capacity(1, 1), 2),
-            (presized_capacity(3, 3), 4),
-            (presized_capacity(4, 4), 8),
-            (copy_capacity(1), 2),
-            (copy_capacity(3), 4),
-            (copy_capacity(4), 8),
-            (copy_capacity(0), 1),
-            (hash_set_copy_capacity(3), 16),
-            (hash_set_copy_capacity(12), 16),
-            (hash_set_copy_capacity(13), 32),
-        ];
-        for (actual, expected) in cases {
-            check!(actual == expected);
-        }
-    }
-
-    // The order `kafka-log-dirs --topic-list events,orders` printed on a
-    // Kafka 4.3.1 broker holding events-0..19 and orders-0..1.
-    #[test]
-    fn hash_order_reproduces_a_kafka_log_dirs_listing() {
-        let keys = (0..20)
-            .map(|partition| ("events", partition))
-            .chain([("orders", 0), ("orders", 1)])
-            .collect::<Vec<_>>();
-        let capacity = default_capacity(keys.len());
-        let order = hash_order(keys, capacity, |(topic, partition)| {
-            topic_partition_hash(topic, *partition)
-        })
-        .into_iter()
-        .map(|(topic, partition)| format!("{topic}-{partition}"))
-        .collect::<Vec<_>>();
-        check!(
-            order
-                == [
-                    "events-19",
-                    "events-11",
-                    "events-12",
-                    "events-13",
-                    "events-14",
-                    "events-15",
-                    "events-16",
-                    "events-17",
-                    "events-18",
-                    "events-3",
-                    "events-4",
-                    "events-5",
-                    "events-6",
-                    "events-7",
-                    "events-8",
-                    "events-9",
-                    "events-10",
-                    "orders-0",
-                    "orders-1",
-                    "events-0",
-                    "events-1",
-                    "events-2",
-                ]
-        );
-    }
 
     #[test]
     fn exceptions_carry_the_kafka_class_and_message() {

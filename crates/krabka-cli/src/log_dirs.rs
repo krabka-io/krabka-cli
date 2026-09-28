@@ -26,11 +26,9 @@ use krabka_client_admin::{
 use serde_json::{Value, json};
 
 use crate::{
-    compat::{
-        KafkaException, copy_capacity, default_capacity, hash_order, hash_set_copy_capacity,
-        presized_capacity, string_hash, topic_partition_hash,
-    },
+    compat::KafkaException,
     connection::ConnectionArgs,
+    jvm::{Table, hash_order, integer_hash, string_hash, topic_partition_hash},
     output::{CommandError, CommandResult, kafka_error},
     safety::{ConfirmArgs, Impact, confirm},
 };
@@ -127,30 +125,21 @@ fn broker_list(value: &str) -> Result<Vec<i32>, CommandError> {
     Ok(brokers)
 }
 
-/// `Integer.hashCode()`.
-const fn integer_hash(value: i32) -> i32 {
-    value
-}
-
 /// The brokers to query, in the order `kafka-log-dirs` holds them: every
 /// cluster broker when `requested` is empty, else the requested ones. A
 /// requested broker the cluster does not have is an error that names both
 /// sets, as Kafka words it.
 fn brokers_to_query(cluster: &[i32], requested: &[i32]) -> Result<Vec<i32>, CommandError> {
-    let cluster_set = hash_order(
-        cluster.to_vec(),
-        default_capacity(cluster.len()),
-        |broker| integer_hash(*broker),
-    );
+    let cluster_set = hash_order(cluster.to_vec(), Table::Default, |broker| {
+        integer_hash(*broker)
+    });
     let missing = requested
         .iter()
         .copied()
         .filter(|broker| !cluster.contains(broker))
         .collect::<Vec<_>>();
     if !missing.is_empty() {
-        let missing = hash_order(missing, hash_set_copy_capacity(requested.len()), |broker| {
-            integer_hash(*broker)
-        });
+        let missing = hash_order(missing, Table::HashSetCopy, |broker| integer_hash(*broker));
         return Err(format!(
             "ERROR: The given brokers do not exist from --broker-list: {}. Current existent brokers: {}",
             join(&missing),
@@ -163,25 +152,20 @@ fn brokers_to_query(cluster: &[i32], requested: &[i32]) -> Result<Vec<i32>, Comm
     } else {
         requested.to_vec()
     };
-    let count = wanted.len();
-    Ok(hash_order(
-        wanted,
-        hash_set_copy_capacity(count),
-        |broker| integer_hash(*broker),
-    ))
+    Ok(hash_order(wanted, Table::HashSetCopy, |broker| {
+        integer_hash(*broker)
+    }))
 }
 
 /// The order of the brokers in the JSON document: the maps that Kafka's admin
 /// client copies the per-broker results through.
 fn document_order(brokers: Vec<i32>) -> Vec<i32> {
     let count = brokers.len();
-    let brokers = hash_order(brokers, presized_capacity(count, count), |broker| {
+    let brokers = hash_order(brokers, Table::WithCapacity(count), |broker| {
         integer_hash(*broker)
     });
-    let brokers = hash_order(brokers, copy_capacity(count), |broker| {
-        integer_hash(*broker)
-    });
-    hash_order(brokers, presized_capacity(count, count), |broker| {
+    let brokers = hash_order(brokers, Table::Copy, |broker| integer_hash(*broker));
+    hash_order(brokers, Table::WithCapacity(count), |broker| {
         integer_hash(*broker)
     })
 }
@@ -233,24 +217,22 @@ fn printable_log_dirs(infos: &[LogDirInfo], topics: &BTreeSet<&str>) -> Vec<LogD
                 })
                 .collect::<Vec<_>>();
             let hash = |replica: &Replica| topic_partition_hash(&replica.topic, replica.partition);
-            let all = replicas.len();
-            let replicas = hash_order(replicas, default_capacity(all), hash)
+            let replicas = hash_order(replicas, Table::Default, hash)
                 .into_iter()
                 .filter(|replica| topics.is_empty() || topics.contains(replica.topic.as_str()))
                 .collect::<Vec<_>>();
-            let kept = replicas.len();
             LogDir {
                 path: info.log_dir.clone(),
                 error: info
                     .error
                     .as_ref()
                     .map(|error| KafkaException::for_code(error.code).class()),
-                replicas: hash_order(replicas, default_capacity(kept), hash),
+                replicas: hash_order(replicas, Table::Default, hash),
             }
         })
         .collect::<Vec<_>>();
     let count = dirs.len();
-    hash_order(dirs, presized_capacity(count, count), |dir| {
+    hash_order(dirs, Table::WithCapacity(count), |dir| {
         string_hash(&dir.path)
     })
 }

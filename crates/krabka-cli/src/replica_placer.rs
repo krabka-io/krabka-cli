@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::java_collections::{hash_order, string_hash};
+use crate::jvm::{Table, hash_order, string_hash};
 
 /// The pseudo-random source of `java.util.Random`: `next(bits)` and the
 /// methods that Kafka's placer derives from it.
@@ -186,15 +186,9 @@ impl<'r, R: JavaRandom> RackList<'r, R> {
             total += 1;
         }
         // `Optional.hashCode` is the value's hash, or 0 when empty.
-        let hashes = inserted
-            .iter()
-            .map(|(name, _)| name.as_deref().map_or(0, string_hash))
-            .collect::<Vec<_>>();
-        let mut slots = inserted.into_iter().map(Some).collect::<Vec<_>>();
-        let racks = hash_order(&hashes)
-            .into_iter()
-            .filter_map(|index| slots[index].take())
-            .collect::<Vec<_>>();
+        let racks = hash_order(inserted, Table::Default, |(name, _)| {
+            name.as_deref().map_or(0, string_hash)
+        });
         let mut list = Self {
             random,
             racks,
@@ -356,13 +350,7 @@ pub fn propose(
     }
     let names = topics.keys().copied().collect::<Vec<_>>();
     let mut proposed = BTreeMap::new();
-    for index in hash_order(
-        &names
-            .iter()
-            .map(|name| string_hash(name))
-            .collect::<Vec<_>>(),
-    ) {
-        let topic = names[index];
+    for topic in hash_order(names, Table::Default, |name| string_hash(name)) {
         let (partitions, replication_factor) = topics[topic];
         for (partition, replicas) in place(random, partitions, replication_factor, brokers)?
             .into_iter()

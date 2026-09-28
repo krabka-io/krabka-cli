@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::java_collections::string_hash;
+use crate::jvm::topic_partition_hash;
 
 /// One partition of one topic.
 ///
@@ -34,10 +34,7 @@ impl TopicPartition {
     /// Kafka's tools print a set of partitions.
     #[must_use]
     pub fn java_hash(&self) -> i32 {
-        31_i32
-            .wrapping_add(self.partition)
-            .wrapping_mul(31)
-            .wrapping_add(string_hash(&self.topic))
+        topic_partition_hash(&self.topic, self.partition)
     }
 }
 
