@@ -16,14 +16,18 @@ mod common;
 mod configs;
 pub mod connection;
 mod consumer_groups;
+mod delegation_tokens;
+mod delete_records;
 pub mod exit;
 pub mod external;
 mod features;
 mod gres;
+mod kafka_errors;
 pub mod output;
 mod reassign_partitions;
 pub mod safety;
 mod topics;
+mod transactions;
 
 use self::{
     exit::Exit,
@@ -91,6 +95,15 @@ enum Command {
     /// Operate the Gres tenant registry and range layout.
     Gres(gres::GresArgs),
 
+    /// List, describe, abort and force-terminate transactions.
+    Transactions(transactions::TransactionsArgs),
+
+    /// Create, renew, expire and describe delegation tokens.
+    DelegationTokens(delegation_tokens::DelegationTokensArgs),
+
+    /// Delete the records of partitions below an offset.
+    DeleteRecords(delete_records::DeleteRecordsArgs),
+
     /// Anything not built in, delegated to `krabka-<name>` on `PATH`.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -138,6 +151,11 @@ pub async fn run() -> Exit {
             run_admin("reassign-partitions", args.run(), output).await
         }
         Command::Gres(args) => run_admin("gres", gres_run(args), output).await,
+        Command::Transactions(args) => run_admin("transactions", args.run(), output).await,
+        Command::DelegationTokens(args) => {
+            Box::pin(run_admin("delegation-tokens", args.run(), output)).await
+        }
+        Command::DeleteRecords(args) => run_admin("delete-records", args.run(), output).await,
         Command::External(argv) => external::run(&argv).await,
     }
 }
