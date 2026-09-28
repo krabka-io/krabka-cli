@@ -12,6 +12,8 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use tokio_util::sync::CancellationToken;
 
 mod acls;
+mod cluster;
+mod common;
 mod compat;
 mod configs;
 pub mod connection;
@@ -28,12 +30,19 @@ mod feature_catalog;
 mod features;
 mod get_offsets;
 mod gres;
+mod java_collections;
 mod kafka_errors;
+mod kafka_json;
+mod kafka_uuid;
+mod leader_election;
 mod log_dirs;
+mod metadata_quorum;
 pub mod output;
 mod reassign_partitions;
+mod replica_placer;
 pub mod safety;
 mod storage;
+mod topic_partition;
 mod topics;
 mod transactions;
 
@@ -107,7 +116,16 @@ enum Command {
     /// Report on and format log directories, as `kafka-storage` does.
     Storage(storage::StorageArgs),
 
-    /// Execute or verify replication-factor reassignment.
+    /// Describe the `KRaft` metadata quorum, and add or remove controllers.
+    MetadataQuorum(metadata_quorum::MetadataQuorumArgs),
+
+    /// Get the cluster ID, unregister a broker, or list endpoints.
+    Cluster(cluster::ClusterArgs),
+
+    /// Elect the preferred or an unclean leader for partitions.
+    LeaderElection(leader_election::LeaderElectionArgs),
+
+    /// Generate, execute, verify, cancel or list partition reassignments.
     ReassignPartitions(reassign_partitions::ReassignPartitionsArgs),
 
     /// Operate the Gres tenant registry and range layout.
@@ -182,6 +200,13 @@ pub async fn run() -> Exit {
                 output,
             )
             .await
+        }
+        Command::MetadataQuorum(args) => {
+            run_admin("metadata-quorum", Box::pin(args.run()), output).await
+        }
+        Command::Cluster(args) => run_admin("cluster", Box::pin(args.run()), output).await,
+        Command::LeaderElection(args) => {
+            run_admin("leader-election", Box::pin(args.run()), output).await
         }
         Command::LogDirs(args) => run_admin("log-dirs", Box::pin(args.run()), output).await,
         Command::GetOffsets(args) => run_admin("get-offsets", Box::pin(args.run()), output).await,
@@ -467,6 +492,44 @@ mod tests {
                 "1",
                 "--bootstrap-server",
                 "host:9092",
+            ],
+            vec![
+                "krabka",
+                "reassign-partitions",
+                "--bootstrap-server",
+                "host:9092",
+                "--execute",
+                "--reassignment-json-file",
+                "plan.json",
+                "--throttle",
+                "50000000",
+                "--additional",
+            ],
+            vec![
+                "krabka",
+                "metadata-quorum",
+                "--bootstrap-controller",
+                "controller:9093",
+                "describe",
+                "--replication",
+                "--human-readable",
+            ],
+            vec![
+                "krabka",
+                "cluster",
+                "list-endpoints",
+                "-b",
+                "host:9092",
+                "--include-fenced-brokers",
+            ],
+            vec![
+                "krabka",
+                "leader-election",
+                "--bootstrap-server",
+                "host:9092",
+                "--election-type",
+                "preferred",
+                "--all-topic-partitions",
             ],
         ];
 
