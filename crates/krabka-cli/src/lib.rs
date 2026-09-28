@@ -12,6 +12,7 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use tokio_util::sync::CancellationToken;
 
 mod acls;
+mod cluster;
 mod common;
 mod configs;
 pub mod connection;
@@ -20,9 +21,16 @@ pub mod exit;
 pub mod external;
 mod features;
 mod gres;
+mod java_collections;
+mod kafka_json;
+mod kafka_uuid;
+mod leader_election;
+mod metadata_quorum;
 pub mod output;
 mod reassign_partitions;
+mod replica_placer;
 pub mod safety;
+mod topic_partition;
 mod topics;
 
 use self::{
@@ -85,7 +93,16 @@ enum Command {
     /// Inspect supported features or update metadata.version.
     Features(features::FeaturesArgs),
 
-    /// Execute or verify replication-factor reassignment.
+    /// Describe the `KRaft` metadata quorum, and add or remove controllers.
+    MetadataQuorum(metadata_quorum::MetadataQuorumArgs),
+
+    /// Get the cluster ID, unregister a broker, or list endpoints.
+    Cluster(cluster::ClusterArgs),
+
+    /// Elect the preferred or an unclean leader for partitions.
+    LeaderElection(leader_election::LeaderElectionArgs),
+
+    /// Generate, execute, verify, cancel or list partition reassignments.
     ReassignPartitions(reassign_partitions::ReassignPartitionsArgs),
 
     /// Operate the Gres tenant registry and range layout.
@@ -134,8 +151,11 @@ pub async fn run() -> Exit {
         Command::Acls(args) => run_admin("acls", args.run(), output).await,
         Command::ConsumerGroups(args) => run_admin("consumer-groups", args.run(), output).await,
         Command::Features(args) => run_admin("features", args.run(), output).await,
+        Command::MetadataQuorum(args) => run_admin("metadata-quorum", args.run(), output).await,
+        Command::Cluster(args) => run_admin("cluster", args.run(), output).await,
+        Command::LeaderElection(args) => run_admin("leader-election", args.run(), output).await,
         Command::ReassignPartitions(args) => {
-            run_admin("reassign-partitions", args.run(), output).await
+            run_admin("reassign-partitions", Box::pin(args.run()), output).await
         }
         Command::Gres(args) => run_admin("gres", gres_run(args), output).await,
         Command::External(argv) => external::run(&argv).await,
@@ -379,6 +399,44 @@ mod tests {
                 "1",
                 "--bootstrap-server",
                 "host:9092",
+            ],
+            vec![
+                "krabka",
+                "reassign-partitions",
+                "--bootstrap-server",
+                "host:9092",
+                "--execute",
+                "--reassignment-json-file",
+                "plan.json",
+                "--throttle",
+                "50000000",
+                "--additional",
+            ],
+            vec![
+                "krabka",
+                "metadata-quorum",
+                "--bootstrap-controller",
+                "controller:9093",
+                "describe",
+                "--replication",
+                "--human-readable",
+            ],
+            vec![
+                "krabka",
+                "cluster",
+                "list-endpoints",
+                "-b",
+                "host:9092",
+                "--include-fenced-brokers",
+            ],
+            vec![
+                "krabka",
+                "leader-election",
+                "--bootstrap-server",
+                "host:9092",
+                "--election-type",
+                "preferred",
+                "--all-topic-partitions",
             ],
         ];
 
