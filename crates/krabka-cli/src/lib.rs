@@ -9,11 +9,12 @@
 use std::{ffi::OsString, future::Future};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use tokio_util::sync::CancellationToken;
 
 mod acls;
 mod common;
 mod configs;
-mod connection;
+pub mod connection;
 mod consumer_groups;
 pub mod exit;
 pub mod external;
@@ -134,6 +135,28 @@ async fn run_admin(
     future: impl Future<Output = Result<output::CommandResult, String>>,
     format: OutputFormat,
 ) -> Exit {
+    let cancel = CancellationToken::new();
+    let on_signal = cancel.clone();
+    let watcher = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            on_signal.cancel();
+        }
+    });
+    let outcome = run_until_cancelled(future, &cancel, format).await;
+    watcher.abort();
+    outcome
+}
+
+/// Runs a command until it finishes or `cancel` fires, and renders the result.
+///
+/// A cancelled command exits [`Exit::Cancelled`]. The command reports no
+/// partial result, because the request in flight may or may not have reached
+/// the broker.
+async fn run_until_cancelled(
+    future: impl Future<Output = Result<output::CommandResult, String>>,
+    cancel: &CancellationToken,
+    format: OutputFormat,
+) -> Exit {
     tokio::select! {
         result = future => match result {
             Ok(result) => {
@@ -154,9 +177,12 @@ async fn run_admin(
                 Exit::Failure
             }
         },
-        signal = tokio::signal::ctrl_c() => {
-            let message = signal.map_or_else(|error| format!("Ctrl-C handler failed: {error}"), |()| "interrupted".into());
-            let _ = emit_error(&message, Exit::Cancelled, format);
+        () = cancel.cancelled() => {
+            let _ = emit_error(
+                "cancelled; a request in flight may already have reached the broker",
+                Exit::Cancelled,
+                format,
+            );
             Exit::Cancelled
         }
     }

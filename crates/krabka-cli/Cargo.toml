@@ -54,12 +54,17 @@ rustix = { workspace = true, features = ["process"] }
 assert2 = { workspace = true }
 # `mock` builds `MockBroker`, which tests/support/mod.rs wraps.
 krabka-client-core = { version = "0.4.0", features = ["mock"] }
-# Encodes the canned responses that the mock broker sends.
+# The canned responses that the mock broker sends, and the errors that the
+# tests match.
+krabka-client-admin = { version = "0.4.0" }
 krabka-protocol = { version = "0.4.0" }
+krabka-units = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 # Names each qualification run in tests/candidate_broker.rs.
 uuid = { workspace = true }
 
-# tests/delegation.rs signals `krabka` and the plugin it runs.
+# tests/delegation.rs and tests/cancel.rs signal `krabka` and the plugin it
+# runs.
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { workspace = true, features = ["process"] }
