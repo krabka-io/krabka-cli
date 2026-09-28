@@ -12,6 +12,7 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use tokio_util::sync::CancellationToken;
 
 mod acls;
+mod compat;
 mod configs;
 pub mod connection;
 mod console;
@@ -22,10 +23,13 @@ mod delegation_tokens;
 mod delete_records;
 pub mod exit;
 pub mod external;
+mod fan_out;
 mod feature_catalog;
 mod features;
+mod get_offsets;
 mod gres;
 mod kafka_errors;
+mod log_dirs;
 pub mod output;
 mod reassign_partitions;
 pub mod safety;
@@ -87,8 +91,14 @@ enum Command {
     /// List, add and remove access-control entries.
     Acls(acls::AclsArgs),
 
-    /// Inspect consumer-group offsets.
+    /// List, describe, delete and reset consumer groups and their offsets.
     ConsumerGroups(consumer_groups::ConsumerGroupsArgs),
+
+    /// Describe the log directories of brokers, or move replicas between them.
+    LogDirs(log_dirs::LogDirsArgs),
+
+    /// Print the offsets of topic partitions.
+    GetOffsets(get_offsets::GetOffsetsArgs),
 
     /// Describe, upgrade, downgrade and disable feature flags (KIP-584,
     /// KIP-1022), as `kafka-features` does.
@@ -139,7 +149,13 @@ const fn default_filter(verbose: u8, quiet: u8) -> &'static str {
 /// Parses the command line, installs logging, and runs the command.
 pub async fn run() -> Exit {
     let cli = Cli::parse();
-    let default_filter = default_filter(cli.verbose, cli.quiet);
+    // `kafka-consumer-groups --verbose` selects more columns, not more logs.
+    let log_verbosity = if matches!(cli.command, Command::ConsumerGroups(_)) {
+        0
+    } else {
+        cli.verbose
+    };
+    let default_filter = default_filter(log_verbosity, cli.quiet);
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
     match cli.log_format {
@@ -160,8 +176,15 @@ pub async fn run() -> Exit {
         Command::Configs(args) => run_admin("configs", Box::pin(args.run()), output).await,
         Command::Acls(args) => run_admin("acls", Box::pin(args.run()), output).await,
         Command::ConsumerGroups(args) => {
-            run_admin("consumer-groups", Box::pin(args.run()), output).await
+            run_admin(
+                "consumer-groups",
+                Box::pin(args.run(cli.verbose > 0)),
+                output,
+            )
+            .await
         }
+        Command::LogDirs(args) => run_admin("log-dirs", Box::pin(args.run()), output).await,
+        Command::GetOffsets(args) => run_admin("get-offsets", Box::pin(args.run()), output).await,
         Command::Features(args) => run_admin("features", Box::pin(args.run()), output).await,
         Command::Storage(args) => match args.into_format() {
             Ok(format) => Exit::Passthrough(krabka_format::run(format).await),
@@ -386,12 +409,31 @@ mod tests {
                 "--group",
                 "workers",
                 "--topic",
-                "orders",
-                "--partition",
-                "0",
+                "orders:0",
                 "--to-offset",
                 "42",
-                "--yes",
+                "--execute",
+                "--bootstrap-server",
+                "host:9092",
+            ],
+            vec![
+                "krabka",
+                "log-dirs",
+                "--describe",
+                "--broker-list",
+                "0,1",
+                "--topic-list",
+                "orders",
+                "--bootstrap-server",
+                "host:9092",
+            ],
+            vec![
+                "krabka",
+                "get-offsets",
+                "--topic-partitions",
+                "orders:0-2",
+                "--time",
+                "-2",
                 "--bootstrap-server",
                 "host:9092",
             ],
@@ -488,12 +530,10 @@ mod tests {
             "--group",
             "workers",
             "--topic",
-            "orders",
-            "--partition",
-            "-1",
+            "orders:-1",
             "--to-offset",
             "-1",
-            "--yes",
+            "--execute",
             "--bootstrap-server",
             "host:9092",
         ])

@@ -47,8 +47,9 @@ krabka-metadata = { version = "0.4.0" }
 krabka-protocol = { version = "0.4.0" }
 krabka-security = { workspace = true }
 krabka-units = { workspace = true }
-# `console-consumer --include` and the `headers.separator` of
-# `console-producer` are Java regular expressions.
+# `console-consumer --include`, the `headers.separator` of `console-producer`,
+# and the topic patterns of `get-offsets` and `consumer-groups
+# --validate-regex` are Java regular expressions.
 regex = "1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

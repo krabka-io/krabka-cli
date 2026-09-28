@@ -512,6 +512,41 @@ fn flags_override_the_command_config() {
     ));
 }
 
+#[test]
+fn the_admin_config_takes_the_call_deadline_and_backoff_from_the_command_config() {
+    let admin = |text: &str| {
+        args().admin_config(&Properties::parse(text.as_bytes()).unwrap(), "test", None)
+    };
+    let base_config = || AdminClientConfig {
+        client_id: Some(base().client_id),
+        ..AdminClientConfig::default()
+    };
+    let cases = [
+        ("", base_config()),
+        (
+            "default.api.timeout.ms=90000\nretry.backoff.ms=250\nretry.backoff.max.ms=2000\nrequest.timeout.ms=5000\n",
+            AdminClientConfig {
+                default_api_timeout: Some(Time::from_millis(90_000)),
+                retry_backoff: Time::from_millis(250),
+                retry_backoff_max: Time::from_millis(2_000),
+                request_timeout: Time::from_millis(5_000),
+                ..base_config()
+            },
+        ),
+    ];
+    for (text, expected) in cases {
+        // `AdminClientConfig` derives `Debug` and not `PartialEq`.
+        check!(
+            format!("{:?}", admin(text).unwrap()) == format!("{expected:?}"),
+            "{text}"
+        );
+    }
+    check!(matches!(
+        admin("default.api.timeout.ms=0\n"),
+        Err(ConfigError::Invalid { property, .. }) if property == "default.api.timeout.ms"
+    ));
+}
+
 #[tokio::test]
 async fn options_read_the_command_config_file() {
     let file = tempfile::NamedTempFile::new().unwrap();

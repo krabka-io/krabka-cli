@@ -59,7 +59,18 @@ pub trait Emit {
     fn dry_run(&self) -> bool {
         false
     }
+
+    /// Lines that the human rendering writes to stderr rather than stdout,
+    /// where the equivalent `kafka-*` tool prints them to stderr: warnings
+    /// and per-resource failures that do not end the command. The JSON
+    /// rendering carries the same facts inside `data`, so it ignores these.
+    fn notices(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
+
+/// The line that marks the human report of a `--dry-run`.
+const DRY_RUN_MARKER: &str = "DRY RUN: no change was made.";
 
 /// The payload that the admin commands return: prepared human lines, a JSON
 /// value, and whether any row failed.
@@ -74,6 +85,12 @@ pub struct CommandResult {
     pub failed: bool,
     /// Whether this reports a `--dry-run`.
     pub dry_run: bool,
+    /// Lines for stderr under `--output human`. See [`Emit::notices`].
+    pub notices: Vec<String>,
+    /// Whether the human dry-run marker goes to stderr rather than stdout,
+    /// for a command whose stdout must stay byte-identical to the Kafka
+    /// tool's own dry-run report.
+    pub marker_on_stderr: bool,
 }
 
 impl CommandResult {
@@ -97,7 +114,16 @@ impl CommandResult {
             data: serde_json::to_value(data).expect("command data serializes to JSON"),
             failed,
             dry_run: false,
+            notices: Vec::new(),
+            marker_on_stderr: false,
         }
+    }
+
+    /// Adds lines for stderr under `--output human`.
+    #[must_use]
+    pub fn with_notices(mut self, notices: Vec<String>) -> Self {
+        self.notices.extend(notices);
+        self
     }
 
     /// Marks the payload as the report of a `--dry-run`.
@@ -108,12 +134,24 @@ impl CommandResult {
             ..self
         }
     }
+
+    /// Marks the payload as the report of a `--dry-run` whose human stdout is
+    /// already the Kafka tool's dry-run report. The human marker then goes to
+    /// stderr, and the JSON marker is unchanged.
+    #[must_use]
+    pub fn into_kafka_dry_run(self) -> Self {
+        Self {
+            dry_run: true,
+            marker_on_stderr: true,
+            ..self
+        }
+    }
 }
 
 impl Emit for CommandResult {
     fn human(&self, writer: &mut dyn io::Write) -> io::Result<()> {
-        if self.dry_run {
-            writeln!(writer, "DRY RUN: no change was made.")?;
+        if self.dry_run && !self.marker_on_stderr {
+            writeln!(writer, "{DRY_RUN_MARKER}")?;
         }
         for line in &self.human {
             writeln!(writer, "{line}")?;
@@ -127,6 +165,14 @@ impl Emit for CommandResult {
 
     fn dry_run(&self) -> bool {
         self.dry_run
+    }
+
+    fn notices(&self) -> Vec<String> {
+        let marker = (self.dry_run && self.marker_on_stderr).then(|| DRY_RUN_MARKER.to_owned());
+        marker
+            .into_iter()
+            .chain(self.notices.iter().cloned())
+            .collect()
     }
 }
 
@@ -146,6 +192,10 @@ pub enum CommandError {
     /// a combination of flags that the JVM tool refuses. Exits
     /// [`Exit::Usage`].
     Usage(String),
+    /// The command needs an `AdminClient` call that the pinned
+    /// `krabka-client-rs` revision does not have. See
+    /// [`crate::compat::not_supported`].
+    Unsupported(String),
     /// Any other failure, as a message.
     Other(String),
 }
@@ -157,7 +207,7 @@ impl CommandError {
         match self {
             Self::Refused(refusal) => refusal.exit(),
             Self::Usage(_) => Exit::Usage,
-            Self::Broker { .. } | Self::Other(_) => Exit::Failure,
+            Self::Broker { .. } | Self::Unsupported(_) | Self::Other(_) => Exit::Failure,
         }
     }
 }
@@ -179,7 +229,13 @@ impl From<AdminError> for CommandError {
             } => Self::Broker {
                 api,
                 code,
-                name,
+                // The client names only the codes it acts on. Kafka's
+                // `Errors` names every code, and runbooks search for those.
+                name: if name == "UNKNOWN" {
+                    crate::compat::KafkaException::for_code(code).name()
+                } else {
+                    name
+                },
                 message,
             },
             other => Self::Other(other.to_string()),
@@ -218,7 +274,9 @@ impl fmt::Display for CommandError {
                 }
             }
             Self::Refused(refusal) => f.write_str(refusal.message()),
-            Self::Usage(message) | Self::Other(message) => f.write_str(message),
+            Self::Usage(message) | Self::Unsupported(message) | Self::Other(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -278,11 +336,30 @@ pub fn render_error(
     }
 }
 
-/// Writes a payload to stdout.
+/// Writes the [`Emit::notices`] of a payload in `format`: one line each under
+/// `--output human`, nothing under `--output json`.
 ///
 /// # Errors
-/// Returns the error of stdout.
+/// Returns the error of the writer.
+pub fn render_notices(
+    value: &impl Emit,
+    format: OutputFormat,
+    writer: &mut dyn io::Write,
+) -> io::Result<()> {
+    if format == OutputFormat::Human {
+        for notice in value.notices() {
+            writeln!(writer, "{notice}")?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes a payload to stdout and its notices to stderr.
+///
+/// # Errors
+/// Returns the error of stdout or stderr.
 pub fn emit_success(value: &impl Emit, format: OutputFormat) -> io::Result<()> {
+    render_notices(value, format, &mut io::stderr().lock())?;
     render_success(value, format, &mut io::stdout().lock())
 }
 

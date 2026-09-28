@@ -17,7 +17,7 @@
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 
 use clap::Args;
-use krabka_client_admin::{AdminClient, AdminError};
+use krabka_client_admin::{AdminClient, AdminClientConfig, AdminError};
 use krabka_client_core::{
     ConnectionOptions, OAuthBearerTokenSource,
     security::{ClientSecurity, KeyStore, SaslCredentials, TlsConnectorConfig, TrustStore},
@@ -65,12 +65,17 @@ pub struct ConnectionArgs {
     /// `request.timeout.ms` in the command config.
     #[arg(long)]
     pub request_timeout_ms: Option<i64>,
-    /// The deadline of the whole command, for example `30s` or `2m`.
+    /// The deadline of the whole command, for example `30s` or `2m`. A bare
+    /// number is milliseconds, as the `--timeout` of `kafka-consumer-groups`
+    /// reads it.
     #[arg(long, env = "KRABKA_TIMEOUT", default_value = "30s", value_parser = parse_time)]
     pub timeout: Time,
 }
 
 fn parse_time(value: &str) -> Result<Time, String> {
+    if let Ok(millis) = value.parse::<i64>() {
+        return Ok(Time::from_millis(millis));
+    }
     if let Ok(time) = value.parse() {
         return Ok(time);
     }
@@ -906,18 +911,64 @@ impl ConnectionArgs {
     /// command config, and [`ConnectionError::Admin`] when the client cannot
     /// connect.
     pub async fn connect(&self, command: &str) -> Result<AdminClient, ConnectionError> {
-        let options = self.options(command).await?;
+        let properties = self.properties().await?;
+        let kdc_url = std::env::var(KDC_URL_ENV).ok();
+        let config = self.admin_config(&properties, command, kdc_url.as_deref())?;
         if !self.bootstrap_controller.is_empty() {
-            return Ok(AdminClient::connect_controller_with_options(
+            return Ok(AdminClient::connect_controller_with_config(
                 &self.bootstrap_controller,
-                options,
+                config,
             )
             .await?);
         }
         if self.bootstrap_server.is_empty() {
             return Err(ConnectionError::MissingBootstrap);
         }
-        Ok(AdminClient::connect_with_options(&self.bootstrap_server, options).await?)
+        Ok(AdminClient::connect_with_config(&self.bootstrap_server, config).await?)
+    }
+
+    /// The admin client settings of `command`: the connection options, and
+    /// the call deadline and retry backoff of Kafka's `AdminClientConfig`
+    /// (`default.api.timeout.ms`, `retry.backoff.ms`, `retry.backoff.max.ms`)
+    /// from the command config.
+    fn admin_config(
+        &self,
+        properties: &Properties,
+        command: &str,
+        kdc_url: Option<&str>,
+    ) -> Result<AdminClientConfig, ConfigError> {
+        let options = self.options_from(properties, command, kdc_url)?;
+        let mut config = AdminClientConfig {
+            client_id: Some(options.client_id),
+            request_timeout: options.request_timeout,
+            socket_connection_setup_timeout: options.socket_connection_setup_timeout,
+            security: options.security.map(|security| *security),
+            default_api_timeout: positive_millis(properties, "default.api.timeout.ms")?,
+            ..AdminClientConfig::default()
+        };
+        if let Some(backoff) = positive_millis(properties, "retry.backoff.ms")? {
+            config.retry_backoff = backoff;
+        }
+        if let Some(backoff) = positive_millis(properties, "retry.backoff.max.ms")? {
+            config.retry_backoff_max = backoff;
+        }
+        Ok(config)
+    }
+
+    async fn properties(&self) -> Result<Properties, ConnectionError> {
+        match &self.command_config {
+            Some(path) => {
+                let bytes =
+                    tokio::fs::read(path)
+                        .await
+                        .map_err(|source| ConnectionError::Read {
+                            path: path.clone(),
+                            source,
+                        })?;
+                Ok(Properties::parse(&bytes)?)
+            }
+            None => Ok(Properties::default()),
+        }
     }
 
     /// The connection options for `command`: the command config, the flags
@@ -927,19 +978,7 @@ impl ConnectionArgs {
     /// Returns [`ConnectionError::Read`] when the command config cannot be
     /// read, and [`ConnectionError::Config`] when it cannot be used.
     pub async fn options(&self, command: &str) -> Result<ConnectionOptions, ConnectionError> {
-        let properties = match &self.command_config {
-            Some(path) => {
-                let bytes =
-                    tokio::fs::read(path)
-                        .await
-                        .map_err(|source| ConnectionError::Read {
-                            path: path.clone(),
-                            source,
-                        })?;
-                Properties::parse(&bytes)?
-            }
-            None => Properties::default(),
-        };
+        let properties = self.properties().await?;
         let kdc_url = std::env::var(KDC_URL_ENV).ok();
         Ok(self.options_from(&properties, command, kdc_url.as_deref())?)
     }
