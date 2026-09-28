@@ -6,7 +6,7 @@
 //! operator commands needed by the demo, including `krabka gres`, ship in one
 //! reliable CLI image.
 
-use std::{ffi::OsString, future::Future, process::Command as Process};
+use std::{ffi::OsString, future::Future};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
@@ -15,43 +15,18 @@ mod common;
 mod configs;
 mod connection;
 mod consumer_groups;
+pub mod exit;
+pub mod external;
 mod features;
 mod gres;
 mod output;
 mod reassign_partitions;
 mod topics;
 
-use self::output::{OutputArgs, OutputFormat, emit_error, emit_success};
-
-/// Prefix an external subcommand's binary carries: `krabka-gres` provides
-/// `krabka gres`.
-const EXTERNAL_PREFIX: &str = "krabka-";
-
-/// Tail of `krabka -h`.
-///
-/// Short help stays one screen, so this gives only the rule and the two names
-/// an operator can then look for.
-const SHORT_EXTERNAL_HELP: &str = "\
-Any subcommand that is not built in runs as `krabka-<name>` from PATH, such as
-`admin-ui` and `restore`. Run `krabka --help` for where each one ships
-from.";
-
-/// Tail of `krabka --help`.
-///
-/// Without this list, an external subcommand is invisible: an operator who
-/// installed one cannot see it here, and an operator who did not install one
-/// learns the name only after a guess fails.
-const LONG_EXTERNAL_HELP: &str = "\
-External subcommands:
-  A subcommand that is not built in runs as `krabka-<name>` from PATH, the way
-  git runs `git-foo`. Krabka looks the binary up at run time, so a subcommand
-  that you did not install does not run.
-
-  admin-ui  The operator web UI. This repository builds it as
-            `krabka-admin-ui`, as a separate binary rather than a module of
-            this one, so `krabka` keeps its own dependency graph.
-  restore   Point-in-time restore of a cluster data directory. The
-            krabka-broker repository ships it as `krabka-restore`.";
+use self::{
+    exit::Exit,
+    output::{OutputArgs, OutputFormat, emit_error, emit_success},
+};
 
 #[derive(Parser)]
 #[command(
@@ -61,8 +36,8 @@ External subcommands:
     // An unrecognised subcommand is not an error here: it may be an external
     // one. clap hands it over rather than rejecting it.
     allow_external_subcommands = true,
-    after_help = SHORT_EXTERNAL_HELP,
-    after_long_help = LONG_EXTERNAL_HELP
+    after_help = external::short_help(),
+    after_long_help = external::long_help()
 )]
 pub struct Cli {
     #[command(flatten)]
@@ -119,62 +94,8 @@ enum Command {
     External(Vec<OsString>),
 }
 
-/// Runs `krabka-<name>` with the remaining arguments, passing its exit status
-/// straight through.
-///
-/// Signals are reported by `ExitStatus::code()` as `None`; a shell reports the
-/// same death as 128 + signal, so that is what this returns rather than
-/// collapsing it to a generic failure.
-fn run_external(argv: &[OsString]) -> i32 {
-    let (name, rest) = argv.split_first().expect("clap yields a non-empty argv");
-    let mut binary = OsString::from(EXTERNAL_PREFIX);
-    binary.push(name);
-
-    match Process::new(&binary).args(rest).status() {
-        Ok(status) => status.code().unwrap_or_else(|| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt as _;
-                status.signal().map_or(1, |signal| 128 + signal)
-            }
-            #[cfg(not(unix))]
-            {
-                1
-            }
-        }),
-        Err(error) => spawn_failure(&error, &binary, name),
-    }
-}
-
-/// Exit code for a subcommand that could not be spawned.
-///
-/// The two cases are worth telling apart, and the shell already has codes for
-/// them: 127 is "no such command", which for `krabka foo` means neither a
-/// built-in nor a `krabka-foo` exists and the user probably mistyped or has not
-/// installed it. 126 is "found but could not be run" -- present on PATH but not
-/// executable, or a bad interpreter -- which is an installation problem rather
-/// than a wrong name, and deserves the underlying error rather than a
-/// suggestion to read `--help`.
-fn spawn_failure(error: &std::io::Error, binary: &OsString, name: &OsString) -> i32 {
-    if error.kind() == std::io::ErrorKind::NotFound {
-        eprintln!(
-            "krabka: `{}` is not a krabka command, and no `{}` was found on PATH",
-            name.to_string_lossy(),
-            binary.to_string_lossy(),
-        );
-        eprintln!("krabka: see `krabka --help` for the built-in commands");
-        127
-    } else {
-        eprintln!(
-            "krabka: failed to run {}: {error}",
-            binary.to_string_lossy()
-        );
-        126
-    }
-}
-
 /// Parses the command line, installs logging, and runs the command.
-pub async fn run() -> i32 {
+pub async fn run() -> Exit {
     let cli = Cli::parse();
     let default_filter = match (cli.verbose, cli.quiet) {
         (_, 1..) => "warn",
@@ -197,7 +118,7 @@ pub async fn run() -> i32 {
     }
     let output = cli.output.output;
     match cli.command {
-        Command::Format(args) => krabka_format::run(args).await,
+        Command::Format(args) => Exit::Passthrough(krabka_format::run(args).await),
         Command::Topics(args) => run_admin(args.run(), output).await,
         Command::Configs(args) => run_admin(args.run(), output).await,
         Command::Acls(args) => run_admin(args.run(), output).await,
@@ -205,34 +126,38 @@ pub async fn run() -> i32 {
         Command::Features(args) => run_admin(args.run(), output).await,
         Command::ReassignPartitions(args) => run_admin(args.run(), output).await,
         Command::Gres(args) => run_admin(gres::run(args), output).await,
-        Command::External(argv) => run_external(&argv),
+        Command::External(argv) => external::run(&argv).await,
     }
 }
 
 async fn run_admin(
     future: impl Future<Output = Result<output::CommandResult, String>>,
     format: OutputFormat,
-) -> i32 {
+) -> Exit {
     tokio::select! {
         result = future => match result {
             Ok(result) => {
                 let failed = result.failed;
-                if let Err(error) = emit_success(&result, format) {
-                    let _ = emit_error(&error.to_string(), 1, format);
-                    1
-                } else {
-                    i32::from(failed)
+                match emit_success(&result, format) {
+                    // A reader that closes early, as `| head` does, is not a
+                    // failure of the command. The Rust runtime ignores
+                    // SIGPIPE, so the closed pipe arrives here as an error.
+                    Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => {
+                        let _ = emit_error(&error.to_string(), Exit::Failure, format);
+                        Exit::Failure
+                    }
+                    _ => Exit::from_failed(failed),
                 }
             }
             Err(error) => {
-                let _ = emit_error(&error, 1, format);
-                1
+                let _ = emit_error(&error, Exit::Failure, format);
+                Exit::Failure
             }
         },
         signal = tokio::signal::ctrl_c() => {
             let message = signal.map_or_else(|error| format!("Ctrl-C handler failed: {error}"), |()| "interrupted".into());
-            let _ = emit_error(&message, 130, format);
-            130
+            let _ = emit_error(&message, Exit::Cancelled, format);
+            Exit::Cancelled
         }
     }
 }
@@ -242,9 +167,9 @@ mod tests {
     use std::ffi::OsString;
 
     use assert2::check;
-    use clap::{CommandFactory as _, Parser};
+    use clap::Parser;
 
-    use super::{Cli, Command, spawn_failure};
+    use super::{Cli, Command};
 
     /// An unknown subcommand is delegated rather than rejected, and the name
     /// and its arguments arrive intact: `allow_external_subcommands` off, or
@@ -263,37 +188,6 @@ mod tests {
                 OsString::from("--flag"),
             ]
         );
-    }
-
-    /// Long help states the `krabka-<name>` rule and names each known external
-    /// subcommand with the binary that provides it, because nothing else in the
-    /// CLI tells an operator that an external subcommand exists.
-    #[test]
-    fn long_help_documents_the_external_subcommand_convention() {
-        let help = Cli::command().render_long_help().to_string();
-
-        check!(help.contains("krabka-<name>"));
-        check!(help.contains("PATH"));
-        check!(help.contains("run time"));
-        check!(help.contains("admin-ui"));
-        check!(help.contains("krabka-admin-ui"));
-        check!(help.contains("restore"));
-        check!(help.contains("krabka-restore"));
-        check!(help.contains("krabka-broker"));
-        check!(help.contains("gres"));
-    }
-
-    /// Short help carries the rule and the names too: an operator who types
-    /// `-h` gets the same discovery path, only shorter.
-    #[test]
-    fn short_help_points_at_the_external_subcommand_convention() {
-        let help = Cli::command().render_help().to_string();
-
-        check!(help.contains("krabka-<name>"));
-        check!(help.contains("PATH"));
-        check!(help.contains("admin-ui"));
-        check!(help.contains("restore"));
-        check!(help.contains("gres"));
     }
 
     /// Naming `restore` in the help text must not turn it into a built-in: it
@@ -530,24 +424,5 @@ mod tests {
             panic!("expected topics command")
         };
         check!(args.run().await.unwrap_err().contains("only valid"));
-    }
-
-    /// A missing external binary is 127 and an unrunnable one is 126, matching
-    /// what a shell reports for each.
-    ///
-    /// The mapping is asserted rather than an actual spawn: what a failed
-    /// lookup returns is the environment's to decide, and a sandbox that
-    /// answers `PermissionDenied` where a normal PATH answers `NotFound` would
-    /// make a spawn-based test disagree with itself depending on where it ran.
-    #[test]
-    fn a_failed_spawn_distinguishes_missing_from_unrunnable() {
-        use std::io::{Error, ErrorKind};
-
-        let binary = OsString::from("krabka-gres");
-        let name = OsString::from("gres");
-
-        check!(spawn_failure(&Error::from(ErrorKind::NotFound), &binary, &name) == 127);
-        check!(spawn_failure(&Error::from(ErrorKind::PermissionDenied), &binary, &name) == 126);
-        check!(spawn_failure(&Error::from(ErrorKind::Other), &binary, &name) == 126);
     }
 }

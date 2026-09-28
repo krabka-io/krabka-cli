@@ -2,5 +2,5 @@
 
 #[tokio::main]
 async fn main() {
-    std::process::exit(krabka_cli::run().await);
+    krabka_cli::run().await.exit();
 }

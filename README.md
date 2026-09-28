@@ -18,21 +18,37 @@ Everything else is a plugin. An unrecognised subcommand is delegated to
 `cargo-foo`:
 
 ```bash
-krabka gres list --bootstrap localhost:9092
+krabka restore --help   # runs krabka-restore --help
 ```
 
 Each plugin is a separate install, and `krabka --help` lists the known ones:
 
 - `krabka admin-ui` runs `krabka-admin-ui`, the operator web UI. This repository builds it; see [Admin UI](#admin-ui) below.
-- `krabka restore` runs `krabka-restore`, a point-in-time restore of a cluster data directory from a tiered-storage archive. It ships from [`krabka-broker`](https://github.com/krabka-io/krabka-broker), so install it separately.
+- `krabka backup` runs `krabka-backup`, which captures the inputs of a point-in-time restore.
+- `krabka barrier` runs `krabka-barrier`, which defines barrier groups and triggers and verifies cuts.
+- `krabka guard` runs `krabka-guard`, which freezes and thaws topic writes under a two-person break-glass rule.
+- `krabka restore` runs `krabka-restore`, a point-in-time restore of a cluster data directory from a tiered-storage archive.
+
+The last four ship from [`krabka-broker`](https://github.com/krabka-io/krabka-broker), so install them separately.
 
 The Gres operator command is built in because the demo uses it to provision its
 tenant before the Gres server starts accepting PostgreSQL connections.
 
-A built-in always wins, so a stray `krabka-format` on `PATH` cannot shadow the
-compiled-in one. A subcommand that is neither built in nor on `PATH` exits 127,
-and one that is found but cannot be run exits 126 -- the codes a shell uses for
-the same two cases.
+A built-in always wins, so a stray `krabka-format` on `PATH` cannot shadow the compiled-in one. `krabka` resolves the plugin on `PATH` itself and runs the first executable match. A subcommand that is neither built in nor on `PATH` exits 127, and one that is found but cannot be run exits 126, naming the file it found. These are the codes a shell uses for the same two cases. The plugin's own exit code passes through unchanged, and a plugin killed by signal n exits 128 + n. While a plugin runs, Ctrl-C goes to the plugin, and `krabka` forwards SIGTERM to it.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | The operation failed, or at least one row of it failed |
+| 2 | Usage error: clap's code, and a refusal such as a missing `--yes` |
+| 126 | A `krabka-<name>` plugin is on `PATH` but cannot be run |
+| 127 | No built-in and no `krabka-<name>` on `PATH` |
+| 128 + n | The plugin died from signal n |
+| 130 | Cancelled with Ctrl-C, or a declined confirmation |
+
+`krabka format` returns the codes of `krabka-format`, and a plugin returns its own.
 
 ## Admin UI
 

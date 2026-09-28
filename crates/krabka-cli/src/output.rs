@@ -4,6 +4,8 @@ use clap::{Args, ValueEnum};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::exit::Exit;
+
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum OutputFormat {
     #[default]
@@ -78,7 +80,7 @@ pub fn emit_success(value: &impl Emit, format: OutputFormat) -> io::Result<()> {
     }
 }
 
-pub fn emit_error(message: &str, code: i32, format: OutputFormat) -> io::Result<()> {
+pub fn emit_error(message: &str, code: Exit, format: OutputFormat) -> io::Result<()> {
     let stderr = io::stderr();
     let mut writer = stderr.lock();
     match format {
@@ -86,7 +88,7 @@ pub fn emit_error(message: &str, code: i32, format: OutputFormat) -> io::Result<
         OutputFormat::Json => {
             serde_json::to_writer(
                 &mut writer,
-                &json!({"error": {"code": code, "message": message}}),
+                &json!({"error": {"code": code.code(), "message": message}}),
             )?;
             writeln!(writer)
         }
