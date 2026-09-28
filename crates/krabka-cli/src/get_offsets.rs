@@ -311,18 +311,18 @@ pub trait OffsetLookup {
 pub struct Unavailable;
 
 impl OffsetLookup for Unavailable {
-    async fn offsets(
+    fn offsets(
         &self,
         _partitions: &[(String, i32)],
         spec: OffsetSpec,
-    ) -> Result<BTreeMap<(String, i32), PartitionOffset>, CommandError> {
-        Err(not_supported(
+    ) -> impl Future<Output = Result<BTreeMap<(String, i32), PartitionOffset>, CommandError>> {
+        std::future::ready(Err(not_supported(
             &format!(
                 "reading log offsets (ListOffsets timestamp {})",
                 spec.wire_timestamp()
             ),
             "list_offsets",
-        ))
+        )))
     }
 }
 

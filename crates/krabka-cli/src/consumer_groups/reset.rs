@@ -568,24 +568,25 @@ mod tests {
     }
 
     impl OffsetLookup for Fixed {
-        async fn offsets(
+        fn offsets(
             &self,
             partitions: &[Partition],
             spec: OffsetSpec,
-        ) -> Result<BTreeMap<Partition, PartitionOffset>, CommandError> {
+        ) -> impl Future<Output = Result<BTreeMap<Partition, PartitionOffset>, CommandError>>
+        {
             let table = match spec {
                 OffsetSpec::Earliest => &self.starts,
                 OffsetSpec::Latest => &self.ends,
                 _ => &self.at,
             };
-            Ok(partitions
+            std::future::ready(Ok(partitions
                 .iter()
                 .filter_map(|partition| {
                     table
                         .get(partition)
                         .map(|offset| (partition.clone(), Ok(*offset)))
                 })
-                .collect())
+                .collect()))
         }
     }
 

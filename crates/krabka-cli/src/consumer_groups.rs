@@ -282,30 +282,33 @@ pub trait Groups {
 
     /// `deleteConsumerGroupOffsets`: the top-level error code, and the error
     /// code of each partition.
-    async fn delete_offsets(
-        &self,
-        group: &str,
-        partitions: &[Partition],
-    ) -> Result<(Option<i16>, BTreeMap<Partition, Option<i16>>), CommandError>;
+    async fn delete_offsets(&self, group: &str, partitions: &[Partition]) -> DeleteOffsetsAnswer;
 }
 
+/// The answer of [`Groups::delete_offsets`]: the top-level error code, and the
+/// error code of each partition.
+type DeleteOffsetsAnswer = Result<(Option<i16>, BTreeMap<Partition, Option<i16>>), CommandError>;
+
 impl Groups for Unavailable {
-    async fn list(
+    fn list(
         &self,
         _states: &[&str],
         _types: &[&str],
-    ) -> Result<Vec<ListedGroup>, CommandError> {
-        Err(not_supported(
+    ) -> impl Future<Output = Result<Vec<ListedGroup>, CommandError>> {
+        std::future::ready(Err(not_supported(
             "--list with --state or --type",
             "list_groups with ListGroupsOptions (group state and type)",
-        ))
+        )))
     }
 
-    async fn describe(&self, _group: &str) -> Result<GroupDescription, CommandError> {
-        Err(not_supported(
+    fn describe(
+        &self,
+        _group: &str,
+    ) -> impl Future<Output = Result<GroupDescription, CommandError>> {
+        std::future::ready(Err(not_supported(
             "describing a consumer group",
             "describe_consumer_groups",
-        ))
+        )))
     }
 
     fn can_delete(&self, what: &str) -> Result<(), CommandError> {
@@ -317,17 +320,19 @@ impl Groups for Unavailable {
         Err(not_supported(what, method))
     }
 
-    async fn delete(&self, _group: &str) -> Result<Option<i16>, CommandError> {
-        self.can_delete("--delete").map(|()| None)
+    fn delete(&self, _group: &str) -> impl Future<Output = Result<Option<i16>, CommandError>> {
+        std::future::ready(self.can_delete("--delete").map(|()| None))
     }
 
-    async fn delete_offsets(
+    fn delete_offsets(
         &self,
         _group: &str,
         _partitions: &[Partition],
-    ) -> Result<(Option<i16>, BTreeMap<Partition, Option<i16>>), CommandError> {
-        self.can_delete("--delete-offsets")
-            .map(|()| (None, BTreeMap::new()))
+    ) -> impl Future<Output = DeleteOffsetsAnswer> {
+        std::future::ready(
+            self.can_delete("--delete-offsets")
+                .map(|()| (None, BTreeMap::new())),
+        )
     }
 }
 

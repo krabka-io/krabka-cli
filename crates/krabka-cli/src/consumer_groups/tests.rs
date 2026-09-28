@@ -541,12 +541,12 @@ fn the_offsets_report_prints_every_group_and_fails_for_a_failed_one() {
 struct Known(BTreeMap<String, GroupDescription>);
 
 impl Groups for Known {
-    async fn list(
+    fn list(
         &self,
         states: &[&str],
         _types: &[&str],
-    ) -> Result<Vec<ListedGroup>, CommandError> {
-        Ok(self
+    ) -> impl Future<Output = Result<Vec<ListedGroup>, CommandError>> {
+        std::future::ready(Ok(self
             .0
             .iter()
             .filter(|(_, description)| {
@@ -557,38 +557,43 @@ impl Groups for Known {
                 group_type: "Classic".into(),
                 state: description.state.clone(),
             })
-            .collect())
+            .collect()))
     }
 
-    async fn describe(&self, group: &str) -> Result<GroupDescription, CommandError> {
-        self.0.get(group).cloned().ok_or_else(|| {
+    fn describe(
+        &self,
+        group: &str,
+    ) -> impl Future<Output = Result<GroupDescription, CommandError>> {
+        std::future::ready(self.0.get(group).cloned().ok_or_else(|| {
             format!(
                 "org.apache.kafka.common.errors.GroupIdNotFoundException: Group {group} not found."
             )
             .into()
-        })
+        }))
     }
 
     fn can_delete(&self, _what: &str) -> Result<(), CommandError> {
         Ok(())
     }
 
-    async fn delete(&self, group: &str) -> Result<Option<i16>, CommandError> {
-        Ok((!self.0.contains_key(group)).then_some(GROUP_ID_NOT_FOUND))
+    fn delete(&self, group: &str) -> impl Future<Output = Result<Option<i16>, CommandError>> {
+        std::future::ready(Ok(
+            (!self.0.contains_key(group)).then_some(GROUP_ID_NOT_FOUND)
+        ))
     }
 
-    async fn delete_offsets(
+    fn delete_offsets(
         &self,
         _group: &str,
         partitions: &[Partition],
-    ) -> Result<(Option<i16>, BTreeMap<Partition, Option<i16>>), CommandError> {
-        Ok((
+    ) -> impl Future<Output = DeleteOffsetsAnswer> {
+        std::future::ready(Ok((
             None,
             partitions
                 .iter()
                 .map(|partition| (partition.clone(), None))
                 .collect(),
-        ))
+        )))
     }
 }
 
