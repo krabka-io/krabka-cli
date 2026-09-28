@@ -237,6 +237,19 @@ impl Properties {
     fn contains(&self, key: &str) -> bool {
         self.0.contains_key(key)
     }
+
+    /// Sets `key` to `value`, replacing an earlier value, as a
+    /// `--command-property key=value` overrides the command config.
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.0.insert(key.into(), value.into());
+    }
+
+    /// Every key and its untrimmed value, in key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
 }
 
 const fn is_blank(c: char) -> bool {
@@ -961,6 +974,36 @@ impl ConnectionArgs {
         };
         options.security = security(properties, context)?.map(Box::new);
         Ok(options)
+    }
+
+    /// The connection options of a data-plane tool, such as
+    /// `console-consumer`, that merges its own client properties:
+    /// `properties` is that merged set, `bootstrap` is `--bootstrap-server`,
+    /// and `default_client_id` is the `client.id` that the Kafka tool sets
+    /// when `properties` sets none, such as `console-consumer`.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] for a property that cannot be used, as
+    /// [`ConnectionArgs::options`] does.
+    pub fn client_options(
+        properties: &Properties,
+        bootstrap: &[String],
+        default_client_id: &str,
+    ) -> Result<ConnectionOptions, ConfigError> {
+        let client_id = properties
+            .get("client.id")
+            .filter(|id| !id.is_empty())
+            .unwrap_or(default_client_id);
+        let args = Self {
+            bootstrap_server: bootstrap.to_vec(),
+            bootstrap_controller: Vec::new(),
+            command_config: None,
+            client_id: Some(client_id.to_owned()),
+            request_timeout_ms: None,
+            timeout: Time::from_secs(30),
+        };
+        let kdc_url = std::env::var(KDC_URL_ENV).ok();
+        args.options_from(properties, default_client_id, kdc_url.as_deref())
     }
 
     fn bootstrap_host(&self) -> &str {

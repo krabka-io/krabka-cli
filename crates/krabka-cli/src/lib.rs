@@ -15,6 +15,9 @@ mod acls;
 mod common;
 mod configs;
 pub mod connection;
+mod console;
+mod console_consumer;
+mod console_producer;
 mod consumer_groups;
 pub mod exit;
 pub mod external;
@@ -91,6 +94,12 @@ enum Command {
     /// Operate the Gres tenant registry and range layout.
     Gres(gres::GresArgs),
 
+    /// Read records from topics and write them to stdout.
+    ConsoleConsumer(console_consumer::ConsoleConsumerArgs),
+
+    /// Read lines from stdin and produce each as a record.
+    ConsoleProducer(console_producer::ConsoleProducerArgs),
+
     /// Anything not built in, delegated to `krabka-<name>` on `PATH`.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -138,6 +147,8 @@ pub async fn run() -> Exit {
             run_admin("reassign-partitions", args.run(), output).await
         }
         Command::Gres(args) => run_admin("gres", gres_run(args), output).await,
+        Command::ConsoleConsumer(args) => console_consumer::run(args, output).await,
+        Command::ConsoleProducer(args) => console_producer::run(args, output).await,
         Command::External(argv) => external::run(&argv).await,
     }
 }

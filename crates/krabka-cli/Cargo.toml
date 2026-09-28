@@ -34,15 +34,23 @@ crabka-gres-control = { git = "https://github.com/krabka-io/gres", rev = "b664ac
 crabka-security = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
 crabka-units = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
 krabka-client-admin = { version = "0.4.0" }
+krabka-client-consumer = { version = "0.4.0" }
 krabka-client-core = { version = "0.4.0" }
+krabka-client-producer = { version = "0.4.0" }
 krabka-format = { version = "0.4.0" }
+# Names the topic id of the fetch that `console-consumer --partition` sends.
+krabka-protocol = { version = "0.4.0" }
 krabka-security = { workspace = true }
 krabka-units = { workspace = true }
+# `console-consumer --include` and the `headers.separator` of
+# `console-producer` are Java regular expressions.
+regex = "1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "io-std", "io-util", "process", "signal"] }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # Forwards SIGTERM to a delegated plugin through a safe wrapper; the crate
