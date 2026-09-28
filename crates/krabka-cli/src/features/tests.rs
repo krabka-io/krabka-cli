@@ -678,23 +678,20 @@ fn response_errors_reach_each_feature_as_the_admin_client_reports_them() {
 }
 
 #[tokio::test]
-async fn unsupported_sub_features_fail_before_connecting() {
+async fn sub_features_the_client_cannot_send_fail_before_connecting() {
     let cases: &[(&[&str], &str)] = &[
-        (
-            &["describe", "--node-id", "1"],
-            "describe --node-id is not supported by this build: the pinned krabka-client-admin cannot send DescribeFeatures to one node",
-        ),
+        (&["describe", "--node-id", "1"], NODE_ID_UNSUPPORTED),
         (
             &["describe", "--node-id", "-1"],
             "Invalid node id -1: must be non-negative.",
         ),
         (
             &["downgrade", "--unsafe", "--feature", "group.version=0"],
-            "--unsafe is not supported by this build: the pinned krabka-client-admin cannot send an UNSAFE_DOWNGRADE feature update",
+            UNSAFE_UNSUPPORTED,
         ),
         (
             &["disable", "--unsafe", "--feature", "group.version"],
-            "--unsafe is not supported by this build: the pinned krabka-client-admin cannot send an UNSAFE_DOWNGRADE feature update",
+            UNSAFE_UNSUPPORTED,
         ),
     ];
     for (argv, expected) in cases {

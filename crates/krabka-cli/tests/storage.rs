@@ -197,16 +197,32 @@ fn feature_dependencies_answers_each_query_in_kafka_storage_wording() {
 }
 
 #[test]
-fn random_uuid_is_deferred_with_a_clear_error() {
-    let run = krabka(&["storage", "random-uuid"]);
+fn random_uuid_prints_a_kafka_uuid_that_format_accepts_as_the_cluster_id() {
+    let first = krabka(&["storage", "random-uuid"]);
+    let second = krabka(&["storage", "random-uuid"]);
+    let id = first.stdout.trim_end_matches('\n');
+    check!((first.code, first.stderr.as_str()) == (Some(0), ""));
+    check!(first.stdout == format!("{id}\n"));
+    check!(id.len() == 22);
     check!(
-        (run.code, run.stdout, run.stderr)
-            == (
-                Some(1),
-                String::new(),
-                "krabka storage: random-uuid is not supported by this build: Kafka's base64url Uuid form is not in the pinned krabka-protocol\n".to_owned()
-            )
+        id.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     );
+    check!(id.parse::<krabka_ids::KafkaUuid>().is_ok());
+    check!(first.stdout != second.stdout);
+
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("a");
+    let format = krabka(&[
+        "storage",
+        "format",
+        "--log-dir",
+        dir.to_str().unwrap(),
+        "--cluster-id",
+        id,
+    ]);
+    assert!(format.code == Some(0), "{}", format.stderr);
+    check!(meta_properties(&dir)["cluster_id"] == json!(id));
 }
 
 fn meta_properties(dir: &Path) -> Value {
@@ -347,5 +363,74 @@ fn help_lists_the_storage_and_features_subcommands() {
             features.stdout.contains(&format!("\n  {subcommand} ")),
             "{subcommand}"
         );
+    }
+}
+
+#[test]
+fn info_prints_kafka_storage_s_report_for_every_directory_that_one_format_wrote() {
+    let root = tempfile::tempdir().unwrap();
+    let a = root.path().join("a");
+    let b = root.path().join("b");
+    let cluster_id = "XzoePA17S1OaTjotmm97EA";
+    let format = krabka(&[
+        "storage",
+        "format",
+        "--log-dir",
+        a.to_str().unwrap(),
+        "--log-dir",
+        b.to_str().unwrap(),
+        "--cluster-id",
+        cluster_id,
+        "--release-version",
+        "4.0",
+    ]);
+    assert!(format.code == Some(0), "{}", format.stderr);
+    let (meta_a, meta_b) = (meta_properties(&a), meta_properties(&b));
+    check!(meta_a["cluster_id"] == meta_b["cluster_id"]);
+    check!(meta_a["directory_id"] != meta_b["directory_id"]);
+    check!(meta_a["version"] == json!(krabka_format::META_PROPERTIES_VERSION));
+
+    // A repeated `--log-dir` and a comma-separated one name the same set.
+    let repeated = krabka(&[
+        "storage",
+        "info",
+        "--log-dir",
+        b.to_str().unwrap(),
+        "--log-dir",
+        a.to_str().unwrap(),
+    ]);
+    let listed = krabka(&[
+        "storage",
+        "info",
+        "--log-dir",
+        &format!("{},{}", b.display(), a.display()),
+    ]);
+    let level = metadata_version::from_version_string("4.0")
+        .unwrap()
+        .feature_level();
+    let features = feature_registry()
+        .iter()
+        .map(|feature| feature.name())
+        .filter(|name| *name != KRAFT_VERSION_FEATURE)
+        .map(|name| {
+            let feature = krabka_metadata::feature(name).unwrap();
+            (name, feature.default_level(level))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_iter()
+        .map(|(name, level)| format!("{name}={level}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let expected = format!(
+        "Found log directories:\n  {}\n  {}\n\n\
+         Found metadata: {{cluster.id={cluster_id}, directory.id={}, version={}}}\n\
+         Found features: {{{features}}}\n\n",
+        a.display(),
+        b.display(),
+        meta_a["directory_id"].as_str().unwrap(),
+        krabka_format::META_PROPERTIES_VERSION,
+    );
+    for run in [repeated, listed] {
+        check!((run.code, run.stdout, run.stderr) == (Some(0), expected.clone(), String::new()));
     }
 }

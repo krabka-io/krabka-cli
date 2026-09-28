@@ -11,11 +11,6 @@
 //!   is not a terminal refuses instead of asking.
 //! - The JVM tool prints resources and entries in hash order. This command
 //!   prints them sorted.
-//!
-//! The pinned `krabka-client-admin` has no `DELEGATION_TOKEN` or `USER`
-//! resource type, no `MATCH` filter pattern type, and no `CREATE_TOKENS` or
-//! `DESCRIBE_TOKENS` operation. A command that needs one of them fails before
-//! it connects, with a message that names the flag.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -235,14 +230,14 @@ impl ResourceType {
         }
     }
 
-    fn to_wire(self) -> Result<admin::ResourceType, CommandError> {
+    const fn to_wire(self) -> admin::ResourceType {
         match self {
-            Self::Topic => Ok(admin::ResourceType::Topic),
-            Self::Group => Ok(admin::ResourceType::Group),
-            Self::Cluster => Ok(admin::ResourceType::Cluster),
-            Self::TransactionalId => Ok(admin::ResourceType::TransactionalId),
-            Self::DelegationToken => Err(unsupported("--delegation-token", self.name())),
-            Self::User => Err(unsupported("--user-principal", self.name())),
+            Self::Topic => admin::ResourceType::Topic,
+            Self::Group => admin::ResourceType::Group,
+            Self::Cluster => admin::ResourceType::Cluster,
+            Self::TransactionalId => admin::ResourceType::TransactionalId,
+            Self::DelegationToken => admin::ResourceType::DelegationToken,
+            Self::User => admin::ResourceType::User,
         }
     }
 
@@ -299,14 +294,16 @@ impl PatternType {
     }
 
     /// The filter value, where `None` is the wire `ANY`.
-    fn to_wire_filter(self) -> Result<Option<admin::PatternType>, CommandError> {
+    const fn to_wire_filter(self) -> Option<admin::PatternType> {
         match self {
-            Self::Any => Ok(None),
-            Self::Match => Err(unsupported("--resource-pattern-type match", self.name())),
-            Self::Literal | Self::Prefixed => self.to_wire().map(Some),
+            Self::Any => None,
+            Self::Match => Some(admin::PatternType::Match),
+            Self::Literal => Some(admin::PatternType::Literal),
+            Self::Prefixed => Some(admin::PatternType::Prefixed),
         }
     }
 
+    /// The pattern type of a stored ACL, which only a specific type names.
     fn to_wire(self) -> Result<admin::PatternType, CommandError> {
         match self {
             Self::Literal => Ok(admin::PatternType::Literal),
@@ -414,11 +411,9 @@ impl Operation {
             Self::DescribeConfigs => Ok(admin::AclOperation::DescribeConfigs),
             Self::AlterConfigs => Ok(admin::AclOperation::AlterConfigs),
             Self::IdempotentWrite => Ok(admin::AclOperation::IdempotentWrite),
+            Self::CreateTokens => Ok(admin::AclOperation::CreateTokens),
+            Self::DescribeTokens => Ok(admin::AclOperation::DescribeTokens),
             Self::TwoPhaseCommit => Ok(admin::AclOperation::TwoPhaseCommit),
-            Self::CreateTokens | Self::DescribeTokens => Err(unsupported(
-                &format!("--operation {}", pascal_case(self.name())),
-                self.name(),
-            )),
             Self::Unknown | Self::Any => Err(CommandError::Other(format!(
                 "operation {} does not name a concrete operation",
                 self.name()
@@ -517,13 +512,13 @@ impl Resource {
     }
 
     /// The filter that matches the resource and any entry on it.
-    fn wire_filter(&self) -> Result<AclEntryFilter, CommandError> {
-        Ok(AclEntryFilter {
-            resource_type: Some(self.kind.to_wire()?),
+    fn wire_filter(&self) -> AclEntryFilter {
+        AclEntryFilter {
+            resource_type: Some(self.kind.to_wire()),
             resource_name: Some(self.name.clone()),
-            pattern_type: self.pattern_type.to_wire_filter()?,
+            pattern_type: self.pattern_type.to_wire_filter(),
             ..AclEntryFilter::default()
-        })
+        }
     }
 
     fn json(&self) -> Value {
@@ -561,7 +556,7 @@ impl Entry {
     /// pattern.
     fn wire(&self, resource: &Resource) -> Result<AclEntry, CommandError> {
         Ok(AclEntry {
-            resource_type: resource.kind.to_wire()?,
+            resource_type: resource.kind.to_wire(),
             resource_name: resource.name.clone(),
             pattern_type: resource.pattern_type.to_wire()?,
             principal: self.principal.clone(),
@@ -640,13 +635,6 @@ fn usage(message: impl Into<String>) -> CommandError {
     CommandError::Usage(message.into())
 }
 
-fn unsupported(flag: &str, missing: &str) -> CommandError {
-    CommandError::Other(format!(
-        "{flag} is not supported by this build: the pinned krabka-client-admin has no {missing} \
-         ACL value"
-    ))
-}
-
 /// `CommandLineUtils.checkInvalidArgs`: `used`, when given, refuses the first
 /// of `invalid` that is also given.
 fn check_invalid(used: (&str, bool), invalid: &[(&str, bool)]) -> Result<(), CommandError> {
@@ -711,7 +699,7 @@ impl AclsArgs {
                 filters,
                 principals,
             } => {
-                let requests = list_requests(&filters)?;
+                let requests = list_requests(&filters);
                 let mut client = self.connection.connect("acls").await?;
                 let mut acls = Acls::new();
                 for request in &requests {
@@ -986,9 +974,9 @@ impl AclsArgs {
 
 /// The `DescribeAcls` filters of `--list`: one per resource, or one that
 /// matches everything when no resource is named.
-fn list_requests(filters: &BTreeSet<Resource>) -> Result<Vec<AclEntryFilter>, CommandError> {
+fn list_requests(filters: &BTreeSet<Resource>) -> Vec<AclEntryFilter> {
     if filters.is_empty() {
-        return Ok(vec![AclEntryFilter::default()]);
+        return vec![AclEntryFilter::default()];
     }
     filters.iter().map(Resource::wire_filter).collect()
 }
@@ -1006,7 +994,7 @@ fn add_steps(acls: Acls) -> Result<Vec<AddStep>, CommandError> {
     acls.into_iter()
         .map(|(resource, entries)| {
             Ok(AddStep {
-                existing: resource.wire_filter()?,
+                existing: resource.wire_filter(),
                 creations: entries
                     .into_iter()
                     .map(|entry| {
@@ -1032,7 +1020,7 @@ struct RemoveStep {
 fn remove_steps(acls: Acls) -> Result<Vec<RemoveStep>, CommandError> {
     acls.into_iter()
         .map(|(resource, entries)| {
-            let base = resource.wire_filter()?;
+            let base = resource.wire_filter();
             let filters = if entries.is_empty() {
                 vec![base]
             } else {

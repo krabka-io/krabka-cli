@@ -11,14 +11,18 @@
 //! name, a level outside the feature's supported range, and a KIP-1022
 //! dependency that the proposed levels do not meet. Second, `--dry-run` sends
 //! no `UpdateFeatures` request at all. `kafka-features` sends one with
-//! `validateOnly` set, and the pinned `krabka-client-admin` cannot set that
-//! flag. The dry run instead reads the cluster's supported and finalized levels
-//! and applies the controller's checks to them. The report has the shape of
-//! Kafka's dry-run report.
+//! `validateOnly` set, and `AdminClient::update_features` in the pinned
+//! `krabka-client-admin` takes no options, so it cannot set that flag. The dry
+//! run instead reads the cluster's supported and finalized levels and applies
+//! the controller's checks to them. The report has the shape of Kafka's
+//! dry-run report.
 //!
-//! A `kafka-features` invocation with `--unsafe` or `describe --node-id` fails
-//! with a "not supported by this build" error, because the pinned admin client
-//! cannot send an `UNSAFE_DOWNGRADE` update or address one node.
+//! Two `kafka-features` invocations fail with a "not supported by this build"
+//! error that names the missing client call. `downgrade` or `disable` with
+//! `--unsafe` fails, because the client's `FeatureUpdate` has only a
+//! `safe_downgrade` flag and so cannot carry `UNSAFE_DOWNGRADE`. `describe
+//! --node-id` fails, because `AdminClient::describe_features` takes no
+//! `DescribeFeaturesOptions.nodeId`.
 
 use std::collections::BTreeMap;
 
@@ -38,6 +42,16 @@ use crate::{
     },
     output::{CommandError, CommandResult},
 };
+
+/// The refusal of `--unsafe`, which the pinned client cannot send.
+const UNSAFE_UNSUPPORTED: &str = "--unsafe is not supported by this build: \
+    krabka-client-admin's FeatureUpdate has no UNSAFE_DOWNGRADE upgrade type, only \
+    safe_downgrade, so AdminClient::update_features cannot send an unsafe downgrade";
+
+/// The refusal of `describe --node-id`, which the pinned client cannot send.
+const NODE_ID_UNSUPPORTED: &str = "describe --node-id is not supported by this build: \
+    AdminClient::describe_features in krabka-client-admin takes no node id \
+    (Kafka's DescribeFeaturesOptions.nodeId), so it cannot send DescribeFeatures to one node";
 
 /// The printed notice of `kafka-features upgrade --metadata`, leading space
 /// included.
@@ -245,10 +259,7 @@ impl FeaturesArgs {
                 .values()
                 .any(|update| update.upgrade_type == UpgradeType::UnsafeDowngrade)
         {
-            return Err(
-                "--unsafe is not supported by this build: the pinned krabka-client-admin cannot send an UNSAFE_DOWNGRADE feature update"
-                    .into(),
-            );
+            return Err(UNSAFE_UNSUPPORTED.into());
         }
         let mut client = self.connection.connect("features").await?;
         if plan.dry_run {
@@ -677,10 +688,7 @@ async fn describe(
         if node_id < 0 {
             return Err(format!("Invalid node id {node_id}: must be non-negative.").into());
         }
-        return Err(
-            "describe --node-id is not supported by this build: the pinned krabka-client-admin cannot send DescribeFeatures to one node"
-                .into(),
-        );
+        return Err(NODE_ID_UNSUPPORTED.into());
     }
     let mut client = connection.connect("features").await?;
     Ok(render_describe(&client.describe_features().await?))

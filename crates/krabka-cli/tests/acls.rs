@@ -28,12 +28,17 @@ const VERSION: i16 = 3;
 // Kafka's wire codes.
 const ANY: i8 = 1;
 const TOPIC: i8 = 2;
+const DELEGATION_TOKEN: i8 = 6;
+const USER: i8 = 7;
+const MATCH: i8 = 2;
 const LITERAL: i8 = 3;
 const PREFIXED: i8 = 4;
 const READ: i8 = 3;
 const WRITE: i8 = 4;
 const CREATE: i8 = 5;
 const DESCRIBE: i8 = 8;
+const CREATE_TOKENS: i8 = 13;
+const DESCRIBE_TOKENS: i8 = 14;
 const ALLOW: i8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,8 +174,17 @@ fn deleted(matching_acls: Vec<DeleteAclsMatchingAcl>) -> (i16, Vec<u8>) {
 }
 
 fn topic(name: &str, pattern_type: i8, acls: &[(&str, i8)]) -> DescribeAclsResource {
+    stored(TOPIC, name, pattern_type, acls)
+}
+
+fn stored(
+    resource_type: i8,
+    name: &str,
+    pattern_type: i8,
+    acls: &[(&str, i8)],
+) -> DescribeAclsResource {
     DescribeAclsResource {
-        resource_type: TOPIC,
+        resource_type,
         resource_name: name.into(),
         pattern_type,
         acls: acls
@@ -188,8 +202,12 @@ fn topic(name: &str, pattern_type: i8, acls: &[(&str, i8)]) -> DescribeAclsResou
 }
 
 fn describe(name: &str, pattern_type: i8) -> Request {
+    describe_of(TOPIC, name, pattern_type)
+}
+
+fn describe_of(resource_type: i8, name: &str, pattern_type: i8) -> Request {
     Request::Describe(DescribeAclsRequest {
-        resource_type_filter: TOPIC,
+        resource_type_filter: resource_type,
         resource_name_filter: Some(name.into()),
         pattern_type_filter: pattern_type,
         principal_filter: None,
@@ -201,8 +219,12 @@ fn describe(name: &str, pattern_type: i8) -> Request {
 }
 
 fn creation(principal: &str, name: &str, operation: i8) -> AclCreation {
+    creation_on(TOPIC, principal, name, operation)
+}
+
+fn creation_on(resource_type: i8, principal: &str, name: &str, operation: i8) -> AclCreation {
     AclCreation {
-        resource_type: TOPIC,
+        resource_type,
         resource_name: name.into(),
         resource_pattern_type: LITERAL,
         principal: principal.into(),
@@ -429,11 +451,15 @@ async fn add_of_entries_that_all_exist_creates_nothing() {
 }
 
 fn delete_all(name: &str) -> Request {
+    delete_all_of(name, LITERAL)
+}
+
+fn delete_all_of(name: &str, pattern_type: i8) -> Request {
     Request::Delete(DeleteAclsRequest {
         filters: vec![DeleteAclsFilter {
             resource_type_filter: TOPIC,
             resource_name_filter: Some(name.into()),
-            pattern_type_filter: LITERAL,
+            pattern_type_filter: pattern_type,
             principal_filter: None,
             host_filter: None,
             operation: ANY,
@@ -597,10 +623,18 @@ async fn a_refused_command_line_exits_two_without_a_request() {
              trying to add ACLs.\n",
         ),
         (
-            &["--list", "--resource-pattern-type", "match", "--topic", "t"],
-            1,
-            "krabka acls: --resource-pattern-type match is not supported by this build: the \
-             pinned krabka-client-admin has no MATCH ACL value\n",
+            &[
+                "--add",
+                "--allow-principal",
+                "User:a",
+                "--user-principal",
+                "User:b",
+                "--operation",
+                "Read",
+            ],
+            2,
+            "krabka acls: ResourceType USER only supports operations [CREATE_TOKENS, \
+             DESCRIBE_TOKENS, ALL]\n",
         ),
     ];
     for (args, code, stderr) in cases {
@@ -611,4 +645,157 @@ async fn a_refused_command_line_exits_two_without_a_request() {
         );
     }
     check!(broker.received() == []);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn token_resources_token_operations_and_match_filters_reach_the_wire() {
+    struct Case {
+        args: &'static [&'static str],
+        replies: BTreeMap<i16, Vec<u8>>,
+        requests: Vec<Request>,
+        stdout: &'static str,
+    }
+    let cases = [
+        Case {
+            args: &[
+                "--add",
+                "--allow-principal",
+                "User:a",
+                "--user-principal",
+                "User:b",
+                "--operation",
+                "CreateTokens",
+                "--operation",
+                "DescribeTokens",
+            ],
+            replies: BTreeMap::from([described(Vec::new(), 0), created(2)]),
+            requests: vec![
+                describe_of(USER, "User:b", LITERAL),
+                Request::Create(CreateAclsRequest {
+                    creations: vec![
+                        creation_on(USER, "User:a", "User:b", CREATE_TOKENS),
+                        creation_on(USER, "User:a", "User:b", DESCRIBE_TOKENS),
+                    ],
+                    ..Default::default()
+                }),
+            ],
+            stdout: "Adding ACLs for resource `ResourcePattern(resourceType=USER, name=User:b, \
+                     patternType=LITERAL)`: \n \
+                     \t(principal=User:a, host=*, operation=CREATE_TOKENS, permissionType=ALLOW)\n\
+                     \t(principal=User:a, host=*, operation=DESCRIBE_TOKENS, permissionType=ALLOW)\n\n",
+        },
+        Case {
+            args: &[
+                "--add",
+                "--allow-principal",
+                "User:a",
+                "--delegation-token",
+                "token-1",
+                "--operation",
+                "Describe",
+            ],
+            replies: BTreeMap::from([described(Vec::new(), 0), created(1)]),
+            requests: vec![
+                describe_of(DELEGATION_TOKEN, "token-1", LITERAL),
+                Request::Create(CreateAclsRequest {
+                    creations: vec![creation_on(DELEGATION_TOKEN, "User:a", "token-1", DESCRIBE)],
+                    ..Default::default()
+                }),
+            ],
+            stdout: "Adding ACLs for resource `ResourcePattern(resourceType=DELEGATION_TOKEN, \
+                     name=token-1, patternType=LITERAL)`: \n \
+                     \t(principal=User:a, host=*, operation=DESCRIBE, permissionType=ALLOW)\n\n",
+        },
+        Case {
+            args: &[
+                "--list",
+                "--delegation-token",
+                "token-1",
+                "--user-principal",
+                "User:b",
+            ],
+            replies: BTreeMap::from([described(
+                vec![
+                    stored(
+                        DELEGATION_TOKEN,
+                        "token-1",
+                        LITERAL,
+                        &[("User:a", DESCRIBE)],
+                    ),
+                    stored(USER, "User:b", LITERAL, &[("User:a", CREATE_TOKENS)]),
+                ],
+                0,
+            )]),
+            requests: vec![
+                describe_of(DELEGATION_TOKEN, "token-1", LITERAL),
+                describe_of(USER, "User:b", LITERAL),
+            ],
+            stdout: "Current ACLs for resource `ResourcePattern(resourceType=DELEGATION_TOKEN, \
+                     name=token-1, patternType=LITERAL)`:\n\
+                     \t(principal=User:a, host=*, operation=DESCRIBE, permissionType=ALLOW)\n\
+                     \n\
+                     Current ACLs for resource `ResourcePattern(resourceType=USER, name=User:b, \
+                     patternType=LITERAL)`:\n\
+                     \t(principal=User:a, host=*, operation=CREATE_TOKENS, permissionType=ALLOW)\n\
+                     \n",
+        },
+        Case {
+            args: &[
+                "--list",
+                "--topic",
+                "orders",
+                "--resource-pattern-type",
+                "match",
+            ],
+            replies: BTreeMap::from([described(
+                vec![
+                    topic("orders", LITERAL, &[("User:a", READ)]),
+                    topic("ord", PREFIXED, &[("User:b", WRITE)]),
+                    topic("*", LITERAL, &[("User:c", DESCRIBE)]),
+                ],
+                0,
+            )]),
+            requests: vec![describe("orders", MATCH)],
+            stdout: "Current ACLs for resource `ResourcePattern(resourceType=TOPIC, name=*, \
+                     patternType=LITERAL)`:\n\
+                     \t(principal=User:c, host=*, operation=DESCRIBE, permissionType=ALLOW)\n\
+                     \n\
+                     Current ACLs for resource `ResourcePattern(resourceType=TOPIC, name=ord, \
+                     patternType=PREFIXED)`:\n\
+                     \t(principal=User:b, host=*, operation=WRITE, permissionType=ALLOW)\n\
+                     \n\
+                     Current ACLs for resource `ResourcePattern(resourceType=TOPIC, name=orders, \
+                     patternType=LITERAL)`:\n\
+                     \t(principal=User:a, host=*, operation=READ, permissionType=ALLOW)\n\
+                     \n",
+        },
+        Case {
+            args: &[
+                "--remove",
+                "--force",
+                "--topic",
+                "orders",
+                "--resource-pattern-type",
+                "match",
+            ],
+            replies: BTreeMap::from([deleted(vec![matching("orders", "User:a", READ)])]),
+            requests: vec![delete_all_of("orders", MATCH)],
+            stdout: "",
+        },
+    ];
+    for Case {
+        args,
+        replies,
+        requests,
+        stdout,
+    } in cases
+    {
+        let broker = Broker::start(replies).await;
+        let run = krabka(&broker.address(), args).await;
+        check!(broker.received() == requests, "{args:?}");
+        check!(
+            (run.code, run.stdout.as_str(), run.stderr.as_str()) == (Some(0), stdout, ""),
+            "{args:?}"
+        );
+    }
 }

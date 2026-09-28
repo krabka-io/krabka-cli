@@ -73,7 +73,7 @@ fn every_operation_parses_from_its_kafka_names_and_no_other() {
 }
 
 #[test]
-fn every_operation_the_client_knows_round_trips_through_the_wire_enum() {
+fn every_concrete_operation_round_trips_through_the_wire_enum() {
     let supported = Operation::ALL
         .into_iter()
         .filter_map(|operation| {
@@ -116,26 +116,27 @@ fn every_operation_the_client_knows_round_trips_through_the_wire_enum() {
                     Operation::IdempotentWrite
                 ),
                 (
+                    Operation::CreateTokens,
+                    WireOperation::CreateTokens,
+                    Operation::CreateTokens
+                ),
+                (
+                    Operation::DescribeTokens,
+                    WireOperation::DescribeTokens,
+                    Operation::DescribeTokens
+                ),
+                (
                     Operation::TwoPhaseCommit,
                     WireOperation::TwoPhaseCommit,
                     Operation::TwoPhaseCommit
                 ),
             ]
     );
-    let refused = [
-        Operation::CreateTokens,
-        Operation::DescribeTokens,
-        Operation::Unknown,
-        Operation::Any,
-    ]
-    .map(|operation| operation.to_wire().unwrap_err().to_string());
+    let refused = [Operation::Unknown, Operation::Any]
+        .map(|operation| operation.to_wire().unwrap_err().to_string());
     check!(
         refused
             == [
-                "--operation CreateTokens is not supported by this build: the pinned \
-                 krabka-client-admin has no CREATE_TOKENS ACL value",
-                "--operation DescribeTokens is not supported by this build: the pinned \
-                 krabka-client-admin has no DESCRIBE_TOKENS ACL value",
                 "operation UNKNOWN does not name a concrete operation",
                 "operation ANY does not name a concrete operation",
             ]
@@ -143,28 +144,43 @@ fn every_operation_the_client_knows_round_trips_through_the_wire_enum() {
 }
 
 #[test]
-fn every_resource_type_round_trips_or_names_its_flag() {
-    let outcomes = ResourceType::ALL.map(|kind| {
-        kind.to_wire()
-            .map(|wire| ResourceType::from_wire(wire) == kind)
-            .map_err(|error| error.to_string())
+fn every_resource_type_round_trips_through_the_wire_enum() {
+    let round_trips = ResourceType::ALL.map(|kind| {
+        let wire = kind.to_wire();
+        (kind, wire, ResourceType::from_wire(wire))
     });
     check!(
-        outcomes
+        round_trips
             == [
-                Ok(true),
-                Ok(true),
-                Ok(true),
-                Ok(true),
-                Err(
-                    "--delegation-token is not supported by this build: the pinned \
-                     krabka-client-admin has no DELEGATION_TOKEN ACL value"
-                        .into()
+                (
+                    ResourceType::Topic,
+                    admin::ResourceType::Topic,
+                    ResourceType::Topic
                 ),
-                Err(
-                    "--user-principal is not supported by this build: the pinned \
-                     krabka-client-admin has no USER ACL value"
-                        .into()
+                (
+                    ResourceType::Group,
+                    admin::ResourceType::Group,
+                    ResourceType::Group
+                ),
+                (
+                    ResourceType::Cluster,
+                    admin::ResourceType::Cluster,
+                    ResourceType::Cluster
+                ),
+                (
+                    ResourceType::TransactionalId,
+                    admin::ResourceType::TransactionalId,
+                    ResourceType::TransactionalId
+                ),
+                (
+                    ResourceType::DelegationToken,
+                    admin::ResourceType::DelegationToken,
+                    ResourceType::DelegationToken
+                ),
+                (
+                    ResourceType::User,
+                    admin::ResourceType::User,
+                    ResourceType::User
                 ),
             ]
     );
@@ -181,21 +197,16 @@ fn every_pattern_type_parses_in_any_case_and_maps_to_its_filter() {
             check!(PatternType::parse(&spelling).ok() == Some(pattern));
         }
     }
-    let filters =
-        PatternType::ALL.map(|pattern| pattern.to_wire_filter().map_err(|error| error.to_string()));
     check!(
-        filters
+        PatternType::ALL.map(PatternType::to_wire_filter)
             == [
-                Ok(None),
-                Err(
-                    "--resource-pattern-type match is not supported by this build: the pinned \
-                     krabka-client-admin has no MATCH ACL value"
-                        .into()
-                ),
-                Ok(Some(WirePattern::Literal)),
-                Ok(Some(WirePattern::Prefixed)),
+                None,
+                Some(WirePattern::Match),
+                Some(WirePattern::Literal),
+                Some(WirePattern::Prefixed),
             ]
     );
+    check!(PatternType::from_wire(WirePattern::Match) == PatternType::Match);
     for wire in [WirePattern::Literal, WirePattern::Prefixed] {
         check!(PatternType::from_wire(wire).to_wire().ok() == Some(wire));
     }
@@ -519,7 +530,7 @@ fn remove_flags_resolve_to_the_entries_that_kafka_resolves() {
 
 #[test]
 fn a_command_line_that_kafka_refuses_is_refused_with_kafka_s_message() {
-    let cases: [(&[&str], &str); 19] = [
+    let cases: [(&[&str], &str); 20] = [
         (
             &[],
             "Command must include exactly one action: --list, --add, --remove. ",
@@ -655,6 +666,18 @@ fn a_command_line_that_kafka_refuses_is_refused_with_kafka_s_message() {
             ],
             "ResourceType TOPIC only supports operations [READ, WRITE, CREATE, DESCRIBE, DELETE, \
              ALTER, DESCRIBE_CONFIGS, ALTER_CONFIGS, ALL]",
+        ),
+        (
+            &[
+                "--add",
+                "--allow-principal",
+                "User:a",
+                "--delegation-token",
+                "token-1",
+                "--operation",
+                "CreateTokens",
+            ],
+            "ResourceType DELEGATION_TOKEN only supports operations [DESCRIBE, ALL]",
         ),
         (
             &["--add", "--allow-principal", "a", "--topic", "x"],
@@ -806,7 +829,7 @@ fn remove_and_list_send_the_filters_that_kafka_sends() {
         let Ok(Plan::List { filters, .. }) = plan(argv) else {
             panic!("{argv:?} is not a list");
         };
-        list_requests(&filters).unwrap()
+        list_requests(&filters)
     };
     check!(
         remove(&["--remove", "--topic", "t"])
@@ -836,6 +859,10 @@ fn remove_and_list_send_the_filters_that_kafka_sends() {
             .to_vec()]
     );
     check!(list(&["--list"]) == [AclEntryFilter::default()]);
+    check!(
+        list(&["--list", "--topic", "t", "--resource-pattern-type", "match"])
+            == [topic_filter("t", Some(WirePattern::Match))]
+    );
     check!(
         list(&[
             "--list",
@@ -977,56 +1004,6 @@ async fn a_dry_run_or_a_read_does_not_ask() {
         check!(asked.is_empty(), "{argv:?}");
         // Nothing listens on the bootstrap address, so each fails to connect.
         check!(matches!(outcome, Err(CommandError::Other(_))), "{argv:?}");
-    }
-}
-
-#[tokio::test]
-async fn a_value_the_pinned_client_cannot_send_fails_before_it_connects() {
-    let cases: [(&[&str], &str); 4] = [
-        (
-            &["--list", "--topic", "t", "--resource-pattern-type", "match"],
-            "--resource-pattern-type match is not supported by this build: the pinned \
-             krabka-client-admin has no MATCH ACL value",
-        ),
-        (
-            &["--list", "--delegation-token", "token"],
-            "--delegation-token is not supported by this build: the pinned krabka-client-admin \
-             has no DELEGATION_TOKEN ACL value",
-        ),
-        (
-            &[
-                "--add",
-                "--allow-principal",
-                "User:a",
-                "--user-principal",
-                "User:b",
-                "--operation",
-                "CreateTokens",
-            ],
-            "--user-principal is not supported by this build: the pinned krabka-client-admin \
-             has no USER ACL value",
-        ),
-        (
-            &[
-                "--remove",
-                "--force",
-                "--topic",
-                "t",
-                "--resource-pattern-type",
-                "match",
-            ],
-            "--resource-pattern-type match is not supported by this build: the pinned \
-             krabka-client-admin has no MATCH ACL value",
-        ),
-    ];
-    for (argv, message) in cases {
-        let (outcome, asked) = execute_declining(argv).await;
-        let error = outcome.unwrap_err();
-        check!(
-            (error.exit(), error.to_string(), asked.len())
-                == (Exit::Failure, message.to_owned(), 0),
-            "{argv:?}"
-        );
     }
 }
 

@@ -17,17 +17,17 @@
 //! - `info` reads `meta.properties.json`, the JSON file that `krabka format`
 //!   writes, and not Kafka's Java `meta.properties`. It prints Kafka's report
 //!   layout with Kafka's key names, and it adds one `Found features:` line
-//!   with the feature levels that the bootstrap records finalize. The broker
-//!   takes its configuration from flags and the environment, so `info` takes
-//!   `--log-dir` as well as Kafka's `--config`, and it reads `log.dirs`,
-//!   `log.dir` and `metadata.log.dir` from a `--config` file as
+//!   with the feature levels that the bootstrap records finalize. The file has
+//!   no `node.id`, so `Found metadata:` has none either. A file whose format
+//!   stamp is not [`META_PROPERTIES_VERSION`], or whose ids are not Kafka
+//!   `Uuid`s, is a problem, because the broker and `krabka format` refuse it.
+//!   The broker takes its configuration from flags and the environment, so
+//!   `info` takes `--log-dir` as well as Kafka's `--config`, and it reads
+//!   `log.dirs`, `log.dir` and `metadata.log.dir` from a `--config` file as
 //!   `kafka-storage` does.
 //! - `version-mapping --all` prints every level, and `feature-dependencies`
 //!   without `--feature` prints the whole dependency graph. Both are krabka
 //!   additions. The Kafka forms print what `kafka-storage` prints.
-//! - `random-uuid` fails with "not supported by this build". Kafka prints a
-//!   22-character unpadded base64url `Uuid`, and krabka's encoder for that
-//!   form is not in the pinned `krabka-protocol`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -35,6 +35,8 @@ use std::{
 };
 
 use clap::{ArgGroup, Args, Subcommand};
+use krabka_format::META_PROPERTIES_VERSION;
+use krabka_ids::KafkaUuid;
 use krabka_metadata::{
     MetadataRecord, feature_registry, from_kafka_record, metadata_version::KRAFT_VERSION_FEATURE,
 };
@@ -111,10 +113,7 @@ impl StorageArgs {
             }
             StorageCommand::VersionMapping(args) => args.run(),
             StorageCommand::FeatureDependencies(args) => args.run(Dialect::Storage),
-            StorageCommand::RandomUuid => Err(
-                "random-uuid is not supported by this build: Kafka's base64url Uuid form is not in the pinned krabka-protocol"
-                    .into(),
-            ),
+            StorageCommand::RandomUuid => Ok(random_uuid(KafkaUuid::random())),
             StorageCommand::Format(_) => {
                 Err("krabka storage format runs through krabka-format".into())
             }
@@ -170,12 +169,19 @@ enum LogDir {
     Unreadable(String),
 }
 
+/// `random-uuid`: the id in Kafka's `Uuid.toString` form, 22 unpadded
+/// base64url characters.
+fn random_uuid(id: KafkaUuid) -> CommandResult {
+    let id = id.to_string();
+    CommandResult::success(vec![id.clone()], json!({"uuid": id}))
+}
+
 /// The identity and the bootstrap feature levels of a formatted directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Formatted {
-    cluster_id: String,
-    directory_id: String,
-    version: Value,
+    cluster_id: KafkaUuid,
+    directory_id: KafkaUuid,
+    version: u64,
     /// Every registered feature except `kraft.version`, at the level that the
     /// bootstrap records finalize. A feature that has no record is at level
     /// 0, as Kafka treats an absent feature.
@@ -205,12 +211,27 @@ fn read_formatted(path: &Path) -> Result<LogDir, String> {
     let bytes = std::fs::read(&meta).map_err(|error| loading(&meta, &error))?;
     let properties: Value =
         serde_json::from_slice(&bytes).map_err(|error| loading(&meta, &error))?;
-    let field = |key: &str| {
-        properties
+    let version = properties
+        .get("version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| loading(&meta, &"version is not set"))?;
+    if version != META_PROPERTIES_VERSION {
+        return Err(loading(
+            &meta,
+            &format!(
+                "unsupported meta.properties version {version}; this build writes version \
+                 {META_PROPERTIES_VERSION}"
+            ),
+        ));
+    }
+    let id = |key: &str| {
+        let value = properties
             .get(key)
             .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| loading(&meta, &format!("{key} is not set")))
+            .ok_or_else(|| loading(&meta, &format!("{key} is not set")))?;
+        value
+            .parse::<KafkaUuid>()
+            .map_err(|error| loading(&meta, &error))
     };
     let records_path = path.join(BOOTSTRAP_RECORDS);
     let records = match std::fs::read(&records_path) {
@@ -219,9 +240,9 @@ fn read_formatted(path: &Path) -> Result<LogDir, String> {
         Err(error) => return Err(loading(&records_path, &error)),
     };
     Ok(LogDir::Formatted(Formatted {
-        cluster_id: field("cluster_id")?,
-        directory_id: field("directory_id")?,
-        version: properties.get("version").cloned().unwrap_or(Value::Null),
+        cluster_id: id("cluster_id")?,
+        directory_id: id("directory_id")?,
+        version,
         features: feature_levels(&records),
     }))
 }
@@ -326,7 +347,7 @@ fn info(directories: &[PathBuf]) -> CommandResult {
                 [
                     format!("cluster.id={}", first.cluster_id),
                     format!("directory.id={}", first.directory_id),
-                    format!("version={}", render_version(&first.version)),
+                    format!("version={}", first.version),
                 ]
                 .into_iter()
             )
@@ -355,12 +376,6 @@ fn info(directories: &[PathBuf]) -> CommandResult {
         "problems": problems,
     });
     CommandResult::rows(human, data, !problems.is_empty())
-}
-
-fn render_version(version: &Value) -> String {
-    version
-        .as_str()
-        .map_or_else(|| version.to_string(), str::to_owned)
 }
 
 fn directory_json(path: &Path, directory: &LogDir) -> Value {
