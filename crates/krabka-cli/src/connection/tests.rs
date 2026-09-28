@@ -1,5 +1,5 @@
 use assert2::{assert, check};
-use krabka_client_core::DEFAULT_CLIENT_CONNECT_TIMEOUT;
+use krabka_client_core::DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT;
 
 use super::*;
 
@@ -191,10 +191,15 @@ fn malformed_jaas_is_refused() {
 
 #[test]
 fn a_command_config_maps_onto_whole_connection_options() {
-    let tls = |client_identity: Option<(&str, &str)>, server_name: &str| TlsConnectorConfig {
-        trust_roots_pem: Some(PathBuf::from("/etc/kafka/ca.pem")),
-        server_name: server_name.into(),
-        client_identity: client_identity.map(|(cert, key)| (cert.into(), key.into())),
+    let tls = |key_store: Option<&str>, server_name: &str| {
+        let mut config = TlsConnectorConfig::default();
+        config.trust_store = TrustStore::PemFile(PathBuf::from("/etc/kafka/ca.pem"));
+        config.key_store = key_store.map(|path| KeyStore::PemFile {
+            path: path.into(),
+            key_password: None,
+        });
+        config.server_name = server_name.into();
+        config
     };
     let cases = [
         ("no config", String::new(), base()),
@@ -210,7 +215,7 @@ fn a_command_config_maps_onto_whole_connection_options() {
             ConnectionOptions {
                 client_id: "ops".into(),
                 request_timeout: Time::from_millis(9000),
-                connect_timeout: Time::from_millis(500),
+                socket_connection_setup_timeout: Time::from_millis(500),
                 ..base()
             },
         ),
@@ -229,10 +234,7 @@ fn a_command_config_maps_onto_whole_connection_options() {
             "security.protocol=ssl\nssl.truststore.type=PEM\nssl.truststore.location=/etc/kafka/ca.pem\nssl.keystore.type=PEM\nssl.keystore.location=/etc/kafka/client.pem\nssl.server.name=kafka.internal\nssl.endpoint.identification.algorithm=HTTPS\n".into(),
             with_security(ClientSecurity {
                 protocol: ListenerProtocol::Ssl,
-                tls: Some(tls(
-                    Some(("/etc/kafka/client.pem", "/etc/kafka/client.pem")),
-                    "kafka.internal",
-                )),
+                tls: Some(tls(Some("/etc/kafka/client.pem"), "kafka.internal")),
                 sasl: None,
                 sasl_host: None,
             }),
@@ -260,6 +262,7 @@ fn a_command_config_maps_onto_whole_connection_options() {
                     mechanism: SaslMechanism::ScramSha256,
                     username: "bob".into(),
                     password: "bob-secret".into(),
+                    delegation_token: false,
                 }),
                 sasl_host: None,
             }),
@@ -274,6 +277,22 @@ fn a_command_config_maps_onto_whole_connection_options() {
                     mechanism: SaslMechanism::ScramSha512,
                     username: "carol".into(),
                     password: "carol-secret".into(),
+                    delegation_token: false,
+                }),
+                sasl_host: None,
+            }),
+        ),
+        (
+            "SCRAM with tokenauth=true logs in with a delegation token",
+            "security.protocol=SASL_PLAINTEXT\nsasl.mechanism=SCRAM-SHA-256\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"token-id\" password=\"token-hmac\" tokenauth=\"true\";\n".into(),
+            with_security(ClientSecurity {
+                protocol: ListenerProtocol::SaslPlaintext,
+                tls: None,
+                sasl: Some(SaslCredentials::Scram {
+                    mechanism: SaslMechanism::ScramSha256,
+                    username: "token-id".into(),
+                    password: "token-hmac".into(),
+                    delegation_token: true,
                 }),
                 sasl_host: None,
             }),
@@ -315,7 +334,8 @@ fn a_command_config_maps_onto_whole_connection_options() {
                 protocol: ListenerProtocol::SaslSsl,
                 tls: Some(tls(None, "broker.example")),
                 sasl: Some(SaslCredentials::OAuthBearer {
-                    token_path: "/var/run/secrets/token.jwt".into(),
+                    token: OAuthBearerTokenSource::File("/var/run/secrets/token.jwt".into()),
+                    extensions: BTreeMap::new(),
                 }),
                 sasl_host: None,
             }),
@@ -400,11 +420,6 @@ fn a_config_that_cannot_be_used_names_the_property() {
             Kind::Invalid,
         ),
         (
-            "security.protocol=SASL_PLAINTEXT\nsasl.mechanism=SCRAM-SHA-256\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"a\" password=\"b\" tokenauth=\"true\";\n".into(),
-            "sasl.jaas.config",
-            Kind::Unsupported,
-        ),
-        (
             format!("security.protocol=SASL_PLAINTEXT\n{KRB5}sasl.kerberos.kdc=kdc.example\n"),
             "sasl.kerberos.kdc",
             Kind::Unsupported,
@@ -480,7 +495,7 @@ fn flags_override_the_command_config() {
     let expected = ConnectionOptions {
         client_id: "from-flag".into(),
         request_timeout: Time::from_millis(1234),
-        connect_timeout: DEFAULT_CLIENT_CONNECT_TIMEOUT,
+        socket_connection_setup_timeout: DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT,
         ..base()
     };
     assert!(same(

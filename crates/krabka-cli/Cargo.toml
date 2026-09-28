@@ -35,7 +35,7 @@ crabka-security = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9
 crabka-units = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
 krabka-client-admin = { version = "0.4.0" }
 krabka-client-core = { version = "0.4.0" }
-krabka-format = { version = "0.4.0" }
+krabka-format = { version = "0.6.1" }
 krabka-security = { workspace = true }
 krabka-units = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

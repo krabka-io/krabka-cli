@@ -349,6 +349,7 @@ fn log_dirs_forms(token: &str, capabilities: Capabilities) -> Vec<Element> {
         vec![
             FormField::text("topic", "Topic", ""),
             FormField::number("partition", "Partition", "0"),
+            FormField::number("broker_id", "Broker id", "0"),
             FormField::text("destination_log_dir", "Destination log dir", ""),
         ],
     )]
@@ -650,11 +651,13 @@ fn render_log_dirs_element(state: ReadRouteState<LogDirRow>) -> Element {
 /// partition that stand for "no data".
 fn log_dir_row_text(row: &LogDirRow) -> String {
     let location = if row.partition < 0 {
-        row.log_dir.clone()
+        format!("broker {} {}", row.broker_id, row.log_dir)
+            .trim_end()
+            .to_owned()
     } else {
         format!(
-            "{} {}/{}-{}",
-            row.log_dir, row.topic, row.partition, row.partition_size
+            "broker {} {} {}/{}-{}",
+            row.broker_id, row.log_dir, row.topic, row.partition, row.partition_size
         )
     };
 

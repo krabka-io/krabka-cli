@@ -129,15 +129,17 @@ pub async fn run() -> Exit {
     let output = cli.output.output;
     match cli.command {
         Command::Format(args) => Exit::Passthrough(krabka_format::run(args).await),
-        Command::Topics(args) => run_admin("topics", args.run(), output).await,
-        Command::Configs(args) => run_admin("configs", args.run(), output).await,
-        Command::Acls(args) => run_admin("acls", args.run(), output).await,
-        Command::ConsumerGroups(args) => run_admin("consumer-groups", args.run(), output).await,
-        Command::Features(args) => run_admin("features", args.run(), output).await,
-        Command::ReassignPartitions(args) => {
-            run_admin("reassign-partitions", args.run(), output).await
+        Command::Topics(args) => run_admin("topics", Box::pin(args.run()), output).await,
+        Command::Configs(args) => run_admin("configs", Box::pin(args.run()), output).await,
+        Command::Acls(args) => run_admin("acls", Box::pin(args.run()), output).await,
+        Command::ConsumerGroups(args) => {
+            run_admin("consumer-groups", Box::pin(args.run()), output).await
         }
-        Command::Gres(args) => run_admin("gres", gres_run(args), output).await,
+        Command::Features(args) => run_admin("features", Box::pin(args.run()), output).await,
+        Command::ReassignPartitions(args) => {
+            run_admin("reassign-partitions", Box::pin(args.run()), output).await
+        }
+        Command::Gres(args) => run_admin("gres", Box::pin(gres_run(args)), output).await,
         Command::External(argv) => external::run(&argv).await,
     }
 }

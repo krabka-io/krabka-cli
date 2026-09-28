@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 
 use clap::{ArgGroup, Args};
-use krabka_client_admin::{CreateTopicOutcome, CreateTopicSpec, DeleteTopicOutcome, KafkaError};
+use krabka_client_admin::{
+    CreateTopicOutcome, CreateTopicSpec, DeleteTopicOutcome, KafkaError, TopicMutationOptions,
+};
 use serde_json::json;
 
 use crate::{
@@ -72,6 +74,7 @@ impl TopicsArgs {
                                 name: "TOPIC_ALREADY_EXISTS",
                                 message: Some(format!("Topic '{name}' already exists.")),
                             }),
+                            throttle_time: None,
                         }
                     })
                     .collect::<Vec<_>>();
@@ -86,11 +89,15 @@ impl TopicsArgs {
                         partitions: self.partitions,
                         replicas: self.replication_factor,
                         configs: configs.clone(),
+                        replica_assignments: BTreeMap::new(),
                     })
                     .collect::<Vec<_>>();
                 created(
                     &client
-                        .create_topics(&specs, self.connection.timeout)
+                        .create_topics(
+                            &specs,
+                            TopicMutationOptions::with_timeout(self.connection.timeout),
+                        )
                         .await?,
                 )
             };
@@ -108,6 +115,7 @@ impl TopicsArgs {
                     .map(|topic| DeleteTopicOutcome {
                         name: topic.name,
                         error: topic.error,
+                        throttle_time: None,
                     })
                     .collect::<Vec<_>>();
                 return Ok(deleted(&outcomes).into_dry_run());
@@ -122,7 +130,10 @@ impl TopicsArgs {
             )
             .await?;
             let outcomes = client
-                .delete_topics(&names, self.connection.timeout)
+                .delete_topics(
+                    &names,
+                    TopicMutationOptions::with_timeout(self.connection.timeout),
+                )
                 .await?;
             return Ok(deleted(&outcomes));
         }

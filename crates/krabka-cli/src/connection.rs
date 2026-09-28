@@ -19,8 +19,8 @@ use std::{collections::BTreeMap, fmt, path::PathBuf};
 use clap::Args;
 use krabka_client_admin::{AdminClient, AdminError};
 use krabka_client_core::{
-    ConnectionOptions,
-    security::{ClientSecurity, SaslCredentials, TlsConnectorConfig},
+    ConnectionOptions, OAuthBearerTokenSource,
+    security::{ClientSecurity, KeyStore, SaslCredentials, TlsConnectorConfig, TrustStore},
 };
 use krabka_security::{ListenerProtocol, SaslMechanism};
 use krabka_units::{Time, convert::TimeExt as _};
@@ -635,7 +635,7 @@ fn tls(properties: &Properties, bootstrap_host: &str) -> Result<TlsConnectorConf
             "a PEM trust store has no password",
         ));
     }
-    let client_identity = match properties.get("ssl.keystore.location") {
+    let key_store = match properties.get("ssl.keystore.location") {
         None => None,
         Some(key_store) => {
             require_pem(properties, "ssl.keystore.type")?;
@@ -653,7 +653,10 @@ fn tls(properties: &Properties, bootstrap_host: &str) -> Result<TlsConnectorConf
             }
             // A Kafka PEM key store is one file that holds the private key
             // and the certificate chain. The client reads each from it.
-            Some((PathBuf::from(key_store), PathBuf::from(key_store)))
+            Some(KeyStore::PemFile {
+                path: PathBuf::from(key_store),
+                key_password: None,
+            })
         }
     };
     match properties
@@ -675,14 +678,16 @@ fn tls(properties: &Properties, bootstrap_host: &str) -> Result<TlsConnectorConf
             ));
         }
     }
-    Ok(TlsConnectorConfig {
-        trust_roots_pem: Some(PathBuf::from(trust_store)),
-        server_name: properties
-            .get("ssl.server.name")
-            .unwrap_or(bootstrap_host)
-            .to_owned(),
-        client_identity,
-    })
+    // `TlsConnectorConfig` caches its built rustls config in a private
+    // field, so it is built from its default rather than a struct literal.
+    let mut config = TlsConnectorConfig::default();
+    config.trust_store = TrustStore::PemFile(PathBuf::from(trust_store));
+    config.key_store = key_store;
+    properties
+        .get("ssl.server.name")
+        .unwrap_or(bootstrap_host)
+        .clone_into(&mut config.server_name);
+    Ok(config)
 }
 
 fn sasl(properties: &Properties, kdc_url: Option<&str>) -> Result<SaslCredentials, ConfigError> {
@@ -707,15 +712,11 @@ fn sasl(properties: &Properties, kdc_url: Option<&str>) -> Result<SaslCredential
     match mechanism {
         "PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512" => {
             expect_module(&[PLAIN_LOGIN_MODULE, SCRAM_LOGIN_MODULE])?;
-            if jaas
+            // Kafka's `ScramLoginModule` logs in with a delegation token
+            // (KIP-48) when `tokenauth=true`; `PlainLoginModule` ignores it.
+            let delegation_token = jaas
                 .option("tokenauth")
-                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-            {
-                return Err(ConfigError::unsupported(
-                    SASL_JAAS_CONFIG,
-                    "delegation-token login (tokenauth=true) needs krabka-client-core support",
-                ));
-            }
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"));
             let username = jaas.required("username")?;
             let password = Secret::new(jaas.required("password")?);
             Ok(match mechanism {
@@ -727,11 +728,13 @@ fn sasl(properties: &Properties, kdc_url: Option<&str>) -> Result<SaslCredential
                     mechanism: SaslMechanism::ScramSha256,
                     username,
                     password: password.expose(),
+                    delegation_token,
                 },
                 _ => SaslCredentials::Scram {
                     mechanism: SaslMechanism::ScramSha512,
                     username,
                     password: password.expose(),
+                    delegation_token,
                 },
             })
         }
@@ -752,7 +755,8 @@ fn sasl(properties: &Properties, kdc_url: Option<&str>) -> Result<SaslCredential
                 ));
             }
             Ok(SaslCredentials::OAuthBearer {
-                token_path: oauthbearer_token_file(properties)?,
+                token: OAuthBearerTokenSource::File(oauthbearer_token_file(properties)?),
+                extensions: BTreeMap::new(),
             })
         }
         other => Err(ConfigError::invalid(
@@ -953,7 +957,7 @@ impl ConnectionArgs {
             options.request_timeout = timeout;
         }
         if let Some(timeout) = positive_millis(properties, "socket.connection.setup.timeout.ms")? {
-            options.connect_timeout = timeout;
+            options.socket_connection_setup_timeout = timeout;
         }
         let context = Context {
             bootstrap_host: self.bootstrap_host(),

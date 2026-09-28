@@ -1,7 +1,11 @@
 //! `krabka configs`, the counterpart of `kafka-configs`.
 
+use std::collections::BTreeMap;
+
 use clap::{ArgGroup, Args};
-use krabka_client_admin::IncrementalAlterOp;
+use krabka_client_admin::{
+    AlterConfigOp, ConfigResource, DescribeConfigsOptions, IncrementalAlterConfigsOptions,
+};
 use serde_json::json;
 
 use crate::{
@@ -33,53 +37,55 @@ impl ConfigsArgs {
     pub async fn run(self) -> Result<CommandResult, CommandError> {
         let mut client = self.connection.connect("configs").await?;
         if self.describe {
-            let result = client.describe_configs(&[&self.entity_name]).await?;
-            let values = result
-                .iter()
-                .map(|item| json!({"entity_type": self.entity_type, "entity_name": item.topic, "configs": item.overrides}))
-                .collect::<Vec<_>>();
-            let human = result
-                .iter()
-                .flat_map(|item| {
-                    item.overrides
+            let resource = ConfigResource::topic(&self.entity_name);
+            let result = client
+                .describe_configs(
+                    std::slice::from_ref(&resource),
+                    DescribeConfigsOptions::default(),
+                )
+                .await?;
+            let mut values = Vec::new();
+            let mut human = Vec::new();
+            for (resource, config) in &result {
+                let overrides = config
+                    .as_ref()
+                    .map_err(|error| {
+                        CommandError::from(format!("{} ({})", error.name, error.code))
+                    })?
+                    .dynamic_overrides(resource);
+                human.extend(
+                    overrides
                         .iter()
-                        .map(|(key, value)| format!("{}\t{}={}", item.topic, key, value))
-                })
-                .collect();
+                        .map(|(key, value)| format!("{}\t{}={}", resource.name, key, value)),
+                );
+                values.push(json!({"entity_type": self.entity_type, "entity_name": resource.name, "configs": overrides}));
+            }
             return Ok(CommandResult::success(human, values));
         }
         let mut ops = self
             .add_config
             .into_iter()
-            .map(|(key, value)| IncrementalAlterOp::Set {
-                topic: self.entity_name.clone(),
-                key,
-                value,
-            })
+            .map(|(key, value)| AlterConfigOp::set(key, value))
             .collect::<Vec<_>>();
-        ops.extend(
-            self.delete_config
-                .into_iter()
-                .map(|key| IncrementalAlterOp::Delete {
-                    topic: self.entity_name.clone(),
-                    key,
-                }),
-        );
+        ops.extend(self.delete_config.into_iter().map(AlterConfigOp::delete));
         if ops.is_empty() {
             return Err("--alter requires --add-config or --delete-config".into());
         }
-        let outcomes = client.incremental_alter_configs(&ops).await?;
-        let failed = outcomes.iter().any(|outcome| outcome.error.is_some());
+        let changes = BTreeMap::from([(ConfigResource::topic(&self.entity_name), ops)]);
+        let outcomes = client
+            .incremental_alter_configs(&changes, IncrementalAlterConfigsOptions::default())
+            .await?;
+        let failed = outcomes.values().any(Result::is_err);
         let human = outcomes
             .iter()
-            .map(|outcome| match &outcome.error {
-                Some(err) => format!("{}\tERROR\t{} ({})", outcome.topic, err.name, err.code),
-                None => format!("Completed updating config for topic {}.", outcome.topic),
+            .map(|(resource, outcome)| match outcome {
+                Err(err) => format!("{}\tERROR\t{} ({})", resource.name, err.name, err.code),
+                Ok(()) => format!("Completed updating config for topic {}.", resource.name),
             })
             .collect();
         let values = outcomes
             .iter()
-            .map(|outcome| json!({"topic": outcome.topic, "error": kafka_error(outcome.error.as_ref())}))
+            .map(|(resource, outcome)| json!({"topic": resource.name, "error": kafka_error(outcome.as_ref().err())}))
             .collect::<Vec<_>>();
         Ok(CommandResult::rows(human, values, failed))
     }

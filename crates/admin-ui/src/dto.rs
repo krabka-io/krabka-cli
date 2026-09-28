@@ -231,6 +231,8 @@ impl QuotaDeleteDto {
 pub struct LogDirMoveRequestDto {
     pub topic: String,
     pub partition: i32,
+    /// The broker whose replica moves.
+    pub broker_id: i32,
     pub destination_log_dir: String,
 }
 
@@ -240,6 +242,7 @@ impl LogDirMoveRequestDto {
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("log-dir move topic", &self.topic)?;
         ensure_nonnegative("log-dir move partition", self.partition)?;
+        ensure_nonnegative("log-dir move broker id", self.broker_id)?;
         ensure_not_blank("destination log dir", &self.destination_log_dir)
     }
 }
@@ -422,6 +425,7 @@ pub struct QuotaRow {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogDirRow {
+    pub broker_id: i32,
     pub log_dir: String,
     pub topic: String,
     pub partition: i32,

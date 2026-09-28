@@ -390,7 +390,7 @@ async fn authenticated_post_mutation_routes_call_admin_mutation_seam() {
         ),
         (
             "/log-dirs/move",
-            r#"{"topic":"orders","partition":0,"destination_log_dir":"/var/lib/krabka-1"}"#,
+            r#"{"topic":"orders","partition":0,"broker_id":1,"destination_log_dir":"/var/lib/krabka-1"}"#,
             "orders",
         ),
     ] {
@@ -638,6 +638,7 @@ async fn dynamic_read_routes_match_shared_page_renderer() {
             "/log-dirs",
             render_page_for_operator(
                 &RoutePage::log_dirs(ReadRouteState::Rows(vec![LogDirRow {
+                    broker_id: 1,
                     log_dir: "/var/lib/krabka".to_string(),
                     topic: "orders".to_string(),
                     partition: 0,
@@ -860,6 +861,7 @@ impl AdminReadSeam for RecordingAdminSeamFactory {
         Box::pin(async move {
             self.log_dirs.fetch_add(1, Ordering::SeqCst);
             Ok(vec![LogDirRow {
+                broker_id: 1,
                 log_dir: "/var/lib/krabka".to_string(),
                 topic: "orders".to_string(),
                 partition: 0,
@@ -1116,7 +1118,7 @@ async fn a_rendered_form_post_reaches_the_mutation_seam() {
         (
             "/log-dirs/move",
             format!(
-                "csrf_token={token}&topic=orders&partition=0&destination_log_dir=%2Fvar%2Flib%2Fkrabka-1"
+                "csrf_token={token}&topic=orders&partition=0&broker_id=1&destination_log_dir=%2Fvar%2Flib%2Fkrabka-1"
             ),
             "orders",
         ),
