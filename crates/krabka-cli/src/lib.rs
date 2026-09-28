@@ -14,6 +14,9 @@ use tokio_util::sync::CancellationToken;
 mod acls;
 mod configs;
 pub mod connection;
+mod console;
+mod console_consumer;
+mod console_producer;
 mod consumer_groups;
 mod delegation_tokens;
 mod delete_records;
@@ -109,6 +112,12 @@ enum Command {
     /// Delete the records of partitions below an offset.
     DeleteRecords(delete_records::DeleteRecordsArgs),
 
+    /// Read records from topics and write them to stdout.
+    ConsoleConsumer(console_consumer::ConsoleConsumerArgs),
+
+    /// Read lines from stdin and produce each as a record.
+    ConsoleProducer(console_producer::ConsoleProducerArgs),
+
     /// Anything not built in, delegated to `krabka-<name>` on `PATH`.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -171,6 +180,8 @@ pub async fn run() -> Exit {
         Command::DeleteRecords(args) => {
             run_admin("delete-records", Box::pin(args.run()), output).await
         }
+        Command::ConsoleConsumer(args) => Box::pin(console_consumer::run(args, output)).await,
+        Command::ConsoleProducer(args) => Box::pin(console_producer::run(args, output)).await,
         Command::External(argv) => external::run(&argv).await,
     }
 }

@@ -3559,7 +3559,9 @@ dependencies = [
  "crabka-security",
  "crabka-units",
  "krabka-client-admin",
+ "krabka-client-consumer",
  "krabka-client-core",
+ "krabka-client-producer",
  "krabka-format",
  "krabka-metadata",
  "krabka-protocol",
@@ -3573,6 +3575,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "tracing",
  "tracing-subscriber",
  "uuid",
 ]
@@ -3594,6 +3597,28 @@ dependencies = [
  "ring",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "krabka-client-consumer"
+version = "0.4.0"
+source = "git+https://github.com/krabka-io/krabka-client-rs?rev=638d10fae65a4f21c0b43e204ae8ee039c2d3116#638d10fae65a4f21c0b43e204ae8ee039c2d3116"
+dependencies = [
+ "assert2",
+ "async-trait",
+ "bon",
+ "bytes",
+ "futures-util",
+ "krabka-client-core",
+ "krabka-ids",
+ "krabka-protocol",
+ "krabka-units",
+ "refined_type",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -3634,6 +3659,30 @@ dependencies = [
  "tracing",
  "uuid",
  "x509-cert",
+]
+
+[[package]]
+name = "krabka-client-producer"
+version = "0.4.0"
+source = "git+https://github.com/krabka-io/krabka-client-rs?rev=638d10fae65a4f21c0b43e204ae8ee039c2d3116#638d10fae65a4f21c0b43e204ae8ee039c2d3116"
+dependencies = [
+ "assert2",
+ "async-trait",
+ "bon",
+ "bytes",
+ "dashmap",
+ "futures",
+ "krabka-client-consumer",
+ "krabka-client-core",
+ "krabka-compression",
+ "krabka-protocol",
+ "krabka-units",
+ "refined_type",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -7799,16 +7848,6 @@ source = "git+https://github.com/krabka-io/krabka-broker?rev=33be85bef8d1fdc07c0
 name = "krabka-broker"
 version = "0.6.1"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=33be85bef8d1fdc07c0cd604a6b4089013fa75ce#33be85bef8d1fdc07c0cd604a6b4089013fa75ce"
-
-[[patch.unused]]
-name = "krabka-client-consumer"
-version = "0.4.0"
-source = "git+https://github.com/krabka-io/krabka-client-rs?rev=638d10fae65a4f21c0b43e204ae8ee039c2d3116#638d10fae65a4f21c0b43e204ae8ee039c2d3116"
-
-[[patch.unused]]
-name = "krabka-client-producer"
-version = "0.4.0"
-source = "git+https://github.com/krabka-io/krabka-client-rs?rev=638d10fae65a4f21c0b43e204ae8ee039c2d3116#638d10fae65a4f21c0b43e204ae8ee039c2d3116"
 
 [[patch.unused]]
 name = "krabka-kafka-tap"
