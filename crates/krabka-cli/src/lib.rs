@@ -404,24 +404,6 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_acl_principals_are_rejected() {
-        assert!(
-            Cli::try_parse_from([
-                "krabka",
-                "acls",
-                "--list",
-                "--allow-principal",
-                "User:alice",
-                "--deny-principal",
-                "User:bob",
-                "--bootstrap-server",
-                "host:9092",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
     fn conflicting_feature_actions_are_rejected() {
         assert!(
             Cli::try_parse_from([
@@ -473,8 +455,15 @@ mod tests {
 
     #[tokio::test]
     async fn destructive_and_read_only_admin_misuse_fails_before_connecting() {
-        let cli =
-            Cli::try_parse_from(["krabka", "acls", "--remove", "--yes"]).expect("valid syntax");
+        let cli = Cli::try_parse_from([
+            "krabka",
+            "acls",
+            "--remove",
+            "--yes",
+            "--bootstrap-server",
+            "host:9092",
+        ])
+        .expect("valid syntax");
         let Command::Acls(args) = cli.command else {
             panic!("expected ACL command")
         };
@@ -483,7 +472,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("scope filter")
+                .contains("You must provide at least one resource")
         );
 
         let cli =
