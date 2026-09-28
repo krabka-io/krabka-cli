@@ -34,7 +34,7 @@ use thiserror::Error;
 pub const KDC_URL_ENV: &str = "SSPI_KDC_URL";
 
 /// Connection flags, with the names that the JVM tools use.
-#[derive(Debug, Args, Clone)]
+#[derive(Debug, Args, Clone, PartialEq)]
 pub struct ConnectionArgs {
     /// The brokers to bootstrap from, `host:port`. Comma-separated, and the
     /// flag can repeat.
@@ -65,12 +65,17 @@ pub struct ConnectionArgs {
     /// `request.timeout.ms` in the command config.
     #[arg(long)]
     pub request_timeout_ms: Option<i64>,
-    /// The deadline of the whole command, for example `30s` or `2m`.
+    /// The deadline of the whole command, for example `30s` or `2m`. A bare
+    /// number is milliseconds, as the `--timeout` of `kafka-consumer-groups`
+    /// reads it.
     #[arg(long, env = "KRABKA_TIMEOUT", default_value = "30s", value_parser = parse_time)]
     pub timeout: Time,
 }
 
 fn parse_time(value: &str) -> Result<Time, String> {
+    if let Ok(millis) = value.parse::<i64>() {
+        return Ok(Time::from_millis(millis));
+    }
     if let Ok(time) = value.parse() {
         return Ok(time);
     }
