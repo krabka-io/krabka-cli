@@ -168,18 +168,18 @@ async fn an_injected_timeout_logs_to_stderr_and_ends_with_the_error_envelope() {
 
 #[test]
 fn a_failure_is_one_line_on_stderr_in_either_format() {
-    let args = ["topics", "--delete", "--topic", "orders"];
+    let args = ["topics", "--list", "--dry-run"];
     let human = krabka(&args, "off");
     check!(human.code == Some(1));
     check!(human.stdout.is_empty());
-    check!(human.stderr == "krabka topics: topic deletion requires --yes (or --dry-run)\n");
+    check!(human.stderr == "krabka topics: --dry-run is only valid with --create or --delete\n");
 
     let json = krabka(&[&["--output", "json"][..], &args[..]].concat(), "off");
     check!(json.code == Some(1));
     check!(json.stdout.is_empty());
     check!(
         serde_json::from_str::<Value>(&json.stderr).unwrap()
-            == json!({"error": {"code": 1, "message": "topic deletion requires --yes (or --dry-run)"}})
+            == json!({"error": {"code": 1, "message": "--dry-run is only valid with --create or --delete"}})
     );
     check!(json.stderr.matches('\n').count() == 1);
 }

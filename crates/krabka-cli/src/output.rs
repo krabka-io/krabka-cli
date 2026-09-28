@@ -16,7 +16,7 @@ use krabka_client_admin::{AdminError, KafkaError};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::exit::Exit;
+use crate::{exit::Exit, safety::Refusal};
 
 /// The shape of a command's output.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -140,8 +140,27 @@ pub enum CommandError {
         name: &'static str,
         message: Option<String>,
     },
+    /// The command did not proceed, such as a declined confirmation.
+    Refused(Refusal),
     /// Any other failure, as a message.
     Other(String),
+}
+
+impl CommandError {
+    /// The exit code of the failure.
+    #[must_use]
+    pub const fn exit(&self) -> Exit {
+        match self {
+            Self::Refused(refusal) => refusal.exit(),
+            Self::Broker { .. } | Self::Other(_) => Exit::Failure,
+        }
+    }
+}
+
+impl From<Refusal> for CommandError {
+    fn from(refusal: Refusal) -> Self {
+        Self::Refused(refusal)
+    }
 }
 
 impl From<AdminError> for CommandError {
@@ -193,6 +212,7 @@ impl fmt::Display for CommandError {
                     _ => Ok(()),
                 }
             }
+            Self::Refused(refusal) => f.write_str(refusal.message()),
             Self::Other(message) => f.write_str(message),
         }
     }

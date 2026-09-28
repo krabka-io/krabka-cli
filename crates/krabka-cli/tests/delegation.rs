@@ -250,7 +250,7 @@ fn every_known_external_is_delegated_and_named_in_help() {
     }
 }
 
-/// Waits for the stub to report that its signal trap is installed.
+// Waits for the stub to report that its signal trap is installed.
 fn wait_for(marker: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !marker.exists() {

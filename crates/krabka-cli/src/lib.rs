@@ -22,6 +22,7 @@ mod features;
 mod gres;
 pub mod output;
 mod reassign_partitions;
+pub mod safety;
 mod topics;
 
 use self::{
@@ -190,8 +191,9 @@ async fn run_until_cancelled<E: Into<CommandError>>(
                 }
             }
             Err(error) => {
-                let _ = emit_error(command, &error.into().to_string(), Exit::Failure, format);
-                Exit::Failure
+                let error = error.into();
+                let _ = emit_error(command, &error.to_string(), error.exit(), format);
+                error.exit()
             }
         },
         () = cancel.cancelled() => {

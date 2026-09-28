@@ -19,33 +19,33 @@ use krabka_protocol::{
     },
 };
 
-/// What the broker does with one `(api_key, version)`.
+// What the broker does with one `(api_key, version)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
-    /// Send this response, the header tagged-fields byte included where the
-    /// version needs it.
+    // Send this response, the header tagged-fields byte included where the
+    // version needs it.
     Respond(Vec<u8>),
-    /// Send nothing. The client reaches its request timeout.
+    // Send nothing. The client reaches its request timeout.
     Silent,
 }
 
-/// One request that the broker received.
+// One request that the broker received.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Received {
     pub api_key: i16,
     pub version: i16,
 }
 
-/// A running scripted broker.
+// A running scripted broker.
 pub struct MockBroker {
     inner: krabka_client_core::MockBroker,
     received: Arc<Mutex<Vec<Received>>>,
 }
 
 impl MockBroker {
-    /// Starts a broker that answers `ApiVersions` with `advertised` and every
-    /// other request from `replies`. A request with no row is dropped, which
-    /// the client sees as a timeout.
+    // Starts a broker that answers `ApiVersions` with `advertised` and every
+    // other request from `replies`. A request with no row is dropped, which
+    // the client sees as a timeout.
     pub async fn start(
         advertised: &[(i16, i16, i16)],
         replies: BTreeMap<(i16, i16), Reply>,
@@ -67,24 +67,24 @@ impl MockBroker {
         Self { inner, received }
     }
 
-    /// The `host:port` that the broker listens on.
+    // The `host:port` that the broker listens on.
     pub fn address(&self) -> String {
         self.inner.addr.to_string()
     }
 
-    /// Every request received so far, `ApiVersions` included, in order.
+    // Every request received so far, `ApiVersions` included, in order.
     pub fn received(&self) -> Vec<Received> {
         self.received.lock().unwrap().clone()
     }
 
-    /// Stops the broker.
+    // Stops the broker.
     pub fn stop(self) {
         self.inner.stop();
     }
 }
 
-/// Encodes a response body for `version`, with the response header's
-/// tagged-fields byte when the version is flexible.
+// Encodes a response body for `version`, with the response header's
+// tagged-fields byte when the version is flexible.
 pub fn respond<T: Encode>(message: &T, version: i16, flexible_min: i16) -> Reply {
     let mut body = Vec::new();
     if version >= flexible_min {

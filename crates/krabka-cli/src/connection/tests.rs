@@ -36,13 +36,13 @@ fn map(text: &str) -> Result<ConnectionOptions, ConfigError> {
     )
 }
 
-/// `ConnectionOptions` and the security types derive `Debug` and not
-/// `PartialEq`, so the whole value is compared through its `Debug` render.
+// `ConnectionOptions` and the security types derive `Debug` and not
+// `PartialEq`, so the whole value is compared through its `Debug` render.
 fn same(actual: &ConnectionOptions, expected: &ConnectionOptions) -> bool {
     format!("{actual:?}") == format!("{expected:?}")
 }
 
-/// The key-value pairs that a table row expects.
+// The key-value pairs that a table row expects.
 type Pairs = &'static [(&'static str, &'static str)];
 
 fn properties(pairs: &[(&str, &str)]) -> Properties {
