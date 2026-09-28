@@ -37,10 +37,6 @@ assert2 = "0.4"
 # tokio, plus the `json` and `query` extractors it names itself.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 clap = { version = "4", features = ["derive"] }
-# Derive boilerplate for domain newtypes (Display/From/Into/Deref/AsRef/
-# Constructor/FromStr and numeric ops) so wrappers over wire/domain primitives
-# stay one-liners. See docs/style_guides/code_style_guide.md#newtypes-for-domain-values.
-derive_more = { version = "2", features = ["display", "from", "into", "deref", "as_ref", "constructor", "from_str", "add", "add_assign", "mul", "sum"] }
 # The admin UI's component framework. Pinned exactly: dioxus ships the macro,
 # the renderer and the server integration as one version set, and a patch
 # release of any of them against a different one of the others does not
@@ -56,9 +52,9 @@ parking_lot = "0.12"
 # Drives a real browser for the admin UI's `e2e` suite. Optional, behind that
 # feature: the tests need installed Playwright browsers and a running UI.
 playwright-rs = "0.15.0"
-ring = "0.17"
+# Sends a signal to a child process without `unsafe`.
+rustix = { version = "1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
-serde-wincode = "=0.1.2"
 serde_json = "1"
 # Decodes the `application/x-www-form-urlencoded` bodies that the admin UI's
 # rendered mutation forms post. axum already carries this crate for its own
@@ -68,13 +64,12 @@ serde_urlencoded = "0.7"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", default-features = false }
+# `CancellationToken`, which ties Ctrl-C to a running command.
+tokio-util = { version = "0.7", default-features = false }
 tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-# wincode + serde-wincode replace bincode for serde-derived wire shapes.
-# Keep these paired so `SerdeCompat` implements this wincode's traits.
-wincode = "=0.6"
 
 # First-party crates inherited by more than one member.
 krabka-security = "0.4.0"

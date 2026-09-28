@@ -14,6 +14,10 @@ readme = "README.md"
 keywords = ["kafka", "cli", "operator", "krabka"]
 categories = ["command-line-utilities"]
 
+[lib]
+name = "krabka_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "krabka"
 path = "src/main.rs"
@@ -22,32 +26,45 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-assert2 = { workspace = true }
 clap = { workspace = true, features = ["env"] }
-krabka-security = { workspace = true }
-krabka-client-core = { version = "0.4.0" }
-krabka-client-admin = { version = "0.4.0" }
 crabka-client-admin = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
 crabka-client-core = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
 crabka-gres-balancer = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
 crabka-gres-control = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
 crabka-security = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
 crabka-units = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
+krabka-client-admin = { version = "0.4.0" }
+krabka-client-core = { version = "0.4.0" }
+krabka-format = { version = "0.4.0" }
+krabka-security = { workspace = true }
 krabka-units = { workspace = true }
-krabka-metadata = { version = "0.4.0" }
-krabka-raft = { version = "0.4.0" }
-derive_more = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "signal"] }
-serde-wincode = { workspace = true }
-wincode = { workspace = true }
-ring = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tracing = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "signal"] }
+tokio-util = { workspace = true }
 tracing-subscriber = { workspace = true }
-uuid = { workspace = true }
+
+# Forwards SIGTERM to a delegated plugin through a safe wrapper; the crate
+# forbids `unsafe`.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
-krabka-broker = { version = "0.4.0" }
+assert2 = { workspace = true }
+# `mock` builds `MockBroker`, which tests/support/mod.rs wraps.
+krabka-client-core = { version = "0.4.0", features = ["mock"] }
+# The canned responses that the mock broker sends, and the errors that the
+# tests match.
+krabka-client-admin = { version = "0.4.0" }
+krabka-protocol = { version = "0.4.0" }
+krabka-units = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
+# Names each qualification run in tests/candidate_broker.rs.
+uuid = { workspace = true }
+
+# tests/delegation.rs and tests/cancel.rs signal `krabka` and the plugin it
+# runs.
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { workspace = true, features = ["process"] }
