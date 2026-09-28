@@ -73,7 +73,7 @@ enum Command {
     /// Create, delete, list and describe topics.
     Topics(topics::TopicsArgs),
 
-    /// Describe and alter topic configuration.
+    /// Describe and alter entity configs, quotas and SCRAM credentials.
     Configs(configs::ConfigsArgs),
 
     /// List, add and remove access-control entries.

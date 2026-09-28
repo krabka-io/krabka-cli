@@ -234,6 +234,13 @@ impl Properties {
         self.0.get(key).map(|value| value.trim())
     }
 
+    /// Every key and its value as the file wrote it, untrimmed, in key order.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
     fn contains(&self, key: &str) -> bool {
         self.0.contains_key(key)
     }
