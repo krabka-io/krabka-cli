@@ -34,7 +34,7 @@ use thiserror::Error;
 pub const KDC_URL_ENV: &str = "SSPI_KDC_URL";
 
 /// Connection flags, with the names that the JVM tools use.
-#[derive(Debug, Args, Clone)]
+#[derive(Debug, Args, Clone, PartialEq)]
 pub struct ConnectionArgs {
     /// The brokers to bootstrap from, `host:port`. Comma-separated, and the
     /// flag can repeat.

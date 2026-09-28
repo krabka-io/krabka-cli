@@ -3564,6 +3564,7 @@ dependencies = [
  "krabka-protocol",
  "krabka-security",
  "krabka-units",
+ "regex",
  "rustix",
  "serde",
  "serde_json",

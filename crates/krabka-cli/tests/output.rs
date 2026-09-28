@@ -109,11 +109,10 @@ async fn a_failed_row_is_printed_with_the_others_and_the_command_exits_1() {
         krabka(
             &[
                 "topics",
-                "--describe",
+                "--delete",
                 "--topic",
-                "orders",
-                "--topic",
-                "missing",
+                "orders|missing",
+                "--dry-run",
                 "--bootstrap-server",
                 &address,
             ],
@@ -125,7 +124,7 @@ async fn a_failed_row_is_printed_with_the_others_and_the_command_exits_1() {
     check!(out.code == Some(1));
     check!(
         out.stdout
-            == "Topic: orders\tPartitionCount: 0\tReplicationFactor: 0\nmissing\tERROR\tUNKNOWN_TOPIC_OR_PARTITION (3)\n"
+            == "DRY RUN: no change was made.\nmissing\norders\nError while executing topic command : This server does not host this topic-partition.\n"
     );
     check!(out.stderr.is_empty());
     broker.stop();
