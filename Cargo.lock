@@ -3502,6 +3502,7 @@ dependencies = [
  "krabka-client-admin",
  "krabka-client-core",
  "krabka-format",
+ "krabka-metadata",
  "krabka-protocol",
  "krabka-security",
  "krabka-units",
