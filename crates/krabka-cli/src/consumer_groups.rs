@@ -9,23 +9,24 @@
 //! - `--delete` and `--delete-offsets` ask for confirmation, or `--yes`, and
 //!   honour `--dry-run`, which the JVM tool ignores for them.
 //! - A failure exits 1, where the JVM tool prints `Error: ...` and exits 0.
-//!
-//! The pinned `krabka-client-rs` revision lacks several `AdminClient` calls
-//! that the JVM tool relies on: `describe_consumer_groups`, `list_offsets`,
-//! `delete_consumer_groups`, `delete_consumer_group_offsets`, and a
-//! `list_groups` that reports group state and type. Each is behind a seam
-//! here, [`Groups`] and [`OffsetLookup`], whose implementation for this build
-//! answers with a "not supported by this build" error. `--describe` still
-//! prints the committed offsets it can read and says on stderr which columns
-//! it could not fill.
+//! - `--describe` of several groups prints every group it could describe
+//!   and names each failed group on stderr, where the JVM tool stops at the
+//!   first failure.
 
 mod render;
 mod reset;
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use clap::{ArgGroup, Args};
-use krabka_client_admin::groups::{GroupListing, ListGroupsError, ListGroupsOptions};
+use krabka_client_admin::{
+    AdminClient, ConsumerGroupDescription, DescribeGroupsOptions, DescribeTopicsOptions,
+    KafkaError, OffsetSpec,
+    groups::{GroupListing, GroupState, GroupType, ListGroupsError, ListGroupsOptions},
+};
 use regex::Regex;
 use serde_json::{Value, json};
 
@@ -38,11 +39,11 @@ use self::{
     reset::{Partition, Plan, Scenario},
 };
 use crate::{
-    compat::{KafkaException, not_supported},
+    compat::KafkaException,
     connection::ConnectionArgs,
     fan_out,
-    get_offsets::{OffsetLookup, Unavailable},
-    jvm::{Table, hash_order, string_hash},
+    get_offsets::{ListOffsets, OffsetLookup},
+    jvm::{Table, hash_order, hash_set_order, string_hash, topic_partition_hash},
     output::{CommandError, CommandResult, kafka_error},
     safety::{ConfirmArgs, Impact, confirm},
 };
@@ -53,6 +54,12 @@ pub const GROUP_FAN_OUT: usize = 8;
 
 /// `GROUP_ID_NOT_FOUND`.
 const GROUP_ID_NOT_FOUND: i16 = 69;
+
+/// `NON_EMPTY_GROUP`.
+const NON_EMPTY_GROUP: i16 = 68;
+
+/// `UNKNOWN_SERVER_ERROR`.
+const UNKNOWN_SERVER_ERROR: i16 = -1;
 
 /// The states that `--list --state` accepts for consumer groups, in the order
 /// the JVM tool names them.
@@ -232,13 +239,47 @@ pub struct GroupDescription {
     pub target_assignment_epoch: Option<i32>,
 }
 
-/// The group calls that the pinned `AdminClient` lacks.
-///
-/// This is the seam for `list_groups` with states and types,
-/// `describe_consumer_groups`, `delete_consumer_groups` and
-/// `delete_consumer_group_offsets`. [`Unavailable`] implements it for this
-/// build. Each method is called only after its guardrails pass, and a deleter
-/// reports whether it can run before the command asks for confirmation.
+/// A described group, from the admin client's `ConsumerGroupDescription`.
+fn group_description(description: ConsumerGroupDescription) -> GroupDescription {
+    GroupDescription {
+        state: description.group_state.as_str().to_owned(),
+        coordinator: (
+            description.coordinator.host,
+            description.coordinator.port,
+            description.coordinator.id,
+        ),
+        partition_assignor: description.partition_assignor,
+        members: description
+            .members
+            .into_iter()
+            .map(|member| Member {
+                consumer_id: member.member_id,
+                group_instance_id: member.group_instance_id,
+                client_id: member.client_id,
+                host: member.host,
+                assignment: member.assignment.into_iter().collect(),
+                target_assignment: member
+                    .target_assignment
+                    .map(|target| target.into_iter().collect()),
+                epoch: member.member_epoch,
+                upgraded: member.upgraded,
+            })
+            .collect(),
+        group_epoch: description.group_epoch,
+        target_assignment_epoch: description.target_assignment_epoch,
+    }
+}
+
+/// `Throwable.toString()` of the exception of a per-group or per-partition
+/// error: its class, and its message or the default message of its code.
+fn exception_text(error: &KafkaError) -> String {
+    let exception = KafkaException::for_code(error.code);
+    match error.message.as_deref() {
+        Some(message) if !message.is_empty() => format!("{}: {message}", exception.class()),
+        _ => exception.to_java_string(),
+    }
+}
+
 /// The listings in the order of the `HashMap<String, GroupListing>` that
 /// Kafka's `ListGroupsResults` collects them in.
 fn listing_order(listed: Vec<GroupListing>) -> Vec<GroupListing> {
@@ -262,77 +303,8 @@ fn list_failure(failure: &ListGroupsError) -> CommandError {
     })
 }
 
-pub trait Groups {
-    /// `listGroups` for consumer groups with the given state and type
-    /// filters, each empty for no filter.
-    async fn list(&self, states: &[&str], types: &[&str])
-    -> Result<Vec<ListedGroup>, CommandError>;
-
-    /// `describeConsumerGroups` for one group.
-    async fn describe(&self, group: &str) -> Result<GroupDescription, CommandError>;
-
-    /// Whether [`Groups::delete`] and [`Groups::delete_offsets`] can run, or
-    /// why not.
-    fn can_delete(&self, what: &str) -> Result<(), CommandError>;
-
-    /// `deleteConsumerGroups` for one group: its error code, or `None`.
-    async fn delete(&self, group: &str) -> Result<Option<i16>, CommandError>;
-
-    /// `deleteConsumerGroupOffsets`: the top-level error code, and the error
-    /// code of each partition.
-    async fn delete_offsets(&self, group: &str, partitions: &[Partition]) -> DeleteOffsetsAnswer;
-}
-
-/// The answer of [`Groups::delete_offsets`]: the top-level error code, and the
-/// error code of each partition.
-type DeleteOffsetsAnswer = Result<(Option<i16>, BTreeMap<Partition, Option<i16>>), CommandError>;
-
-impl Groups for Unavailable {
-    fn list(
-        &self,
-        _states: &[&str],
-        _types: &[&str],
-    ) -> impl Future<Output = Result<Vec<ListedGroup>, CommandError>> {
-        std::future::ready(Err(not_supported(
-            "--list with --state or --type",
-            "list_groups with ListGroupsOptions (group state and type)",
-        )))
-    }
-
-    fn describe(
-        &self,
-        _group: &str,
-    ) -> impl Future<Output = Result<GroupDescription, CommandError>> {
-        std::future::ready(Err(not_supported(
-            "describing a consumer group",
-            "describe_consumer_groups",
-        )))
-    }
-
-    fn can_delete(&self, what: &str) -> Result<(), CommandError> {
-        let method = if what == "--delete" {
-            "delete_consumer_groups"
-        } else {
-            "delete_consumer_group_offsets"
-        };
-        Err(not_supported(what, method))
-    }
-
-    fn delete(&self, _group: &str) -> impl Future<Output = Result<Option<i16>, CommandError>> {
-        std::future::ready(self.can_delete("--delete").map(|()| None))
-    }
-
-    fn delete_offsets(
-        &self,
-        _group: &str,
-        _partitions: &[Partition],
-    ) -> impl Future<Output = DeleteOffsetsAnswer> {
-        std::future::ready(
-            self.can_delete("--delete-offsets")
-                .map(|()| (None, BTreeMap::new())),
-        )
-    }
-}
+/// One group and its description, or why it could not be described.
+type Described = (String, Result<GroupDescription, CommandError>);
 
 /// The lines of a rendered table, for [`CommandResult::human`], which writes
 /// each with a newline.
@@ -356,30 +328,21 @@ impl ConsumerGroupsArgs {
     /// Runs the command. `verbose` is `--verbose`, which the CLI's global
     /// flag of the same name carries to this command.
     pub async fn run(self, verbose: bool) -> Result<CommandResult, CommandError> {
-        Box::pin(self.run_with(verbose, &Unavailable, &Unavailable)).await
-    }
-
-    /// Runs the command against the given seams.
-    pub async fn run_with(
-        self,
-        verbose: bool,
-        groups: &impl Groups,
-        offsets: &impl OffsetLookup,
-    ) -> Result<CommandResult, CommandError> {
         self.check_args(verbose)?;
         if let Some(regex) = &self.validate_regex {
             return Ok(validate_regex(regex));
         }
+        let mut client = self.connection.connect("consumer-groups").await?;
         if self.list.is_some() {
-            self.list_groups(groups).await
+            self.list_groups(&client).await
         } else if self.describe.is_some() {
-            self.describe_groups(verbose, groups).await
+            Box::pin(self.describe_groups(verbose, &client)).await
         } else if self.delete.is_some() {
-            self.delete_groups(groups).await
+            self.delete_groups(&client).await
         } else if self.reset_offsets.is_some() {
-            self.reset(offsets).await
+            Box::pin(self.reset(&mut client)).await
         } else {
-            self.delete_group_offsets(groups).await
+            self.delete_group_offsets(&mut client).await
         }
     }
 
@@ -466,8 +429,7 @@ impl ConsumerGroupsArgs {
     /// the admin client asks every broker, and the groups come in the order
     /// of the admin client's `HashMap` of listings. A broker that fails fails
     /// the listing, as `ListGroupsResult.all()` does.
-    async fn all_groups(&self) -> Result<Vec<String>, CommandError> {
-        let client = self.connection.connect("consumer-groups").await?;
+    async fn all_groups(client: &AdminClient) -> Result<Vec<String>, CommandError> {
         let listed = client
             .list_groups(&ListGroupsOptions::for_consumer_groups())
             .await?;
@@ -480,16 +442,19 @@ impl ConsumerGroupsArgs {
     }
 
     /// The groups that the command acts on: `--group`, or every group under
-    /// `--all-groups`.
-    async fn target_groups(&self) -> Result<Vec<String>, CommandError> {
-        if self.all_groups.is_some() {
-            self.all_groups().await
+    /// `--all-groups`, each once.
+    async fn target_groups(&self, client: &AdminClient) -> Result<Vec<String>, CommandError> {
+        let mut groups = if self.all_groups.is_some() {
+            Self::all_groups(client).await?
         } else {
-            Ok(self.group.clone())
-        }
+            self.group.clone()
+        };
+        let mut seen = BTreeSet::new();
+        groups.retain(|group| seen.insert(group.clone()));
+        Ok(groups)
     }
 
-    async fn list_groups(&self, source: &impl Groups) -> Result<CommandResult, CommandError> {
+    async fn list_groups(&self, client: &AdminClient) -> Result<CommandResult, CommandError> {
         let include_state = self.state.is_some();
         let include_type = self.group_type.is_some();
         if include_state || include_type {
@@ -501,7 +466,34 @@ impl ConsumerGroupsArgs {
                 Some(types) => group_types(types)?,
                 None => Vec::new(),
             };
-            let listed = source.list(&states, &types).await?;
+            // `forConsumerGroups().inGroupStates(states).withTypes(types)`:
+            // an empty type set replaces the consumer types, and the
+            // protocol types stay.
+            let options = ListGroupsOptions {
+                group_states: states
+                    .iter()
+                    .map(|state| GroupState::parse(state))
+                    .collect(),
+                types: types.iter().map(|kind| GroupType::parse(kind)).collect(),
+                ..ListGroupsOptions::for_consumer_groups()
+            };
+            let listed = client.list_groups(&options).await?;
+            let listed = listing_order(listed.all().map_err(|failure| list_failure(&failure))?)
+                .into_iter()
+                .map(|listing| ListedGroup {
+                    group_id: listing.group_id,
+                    group_type: listing
+                        .group_type
+                        .unwrap_or(GroupType::Unknown)
+                        .as_str()
+                        .to_owned(),
+                    state: listing
+                        .group_state
+                        .unwrap_or(GroupState::Unknown)
+                        .as_str()
+                        .to_owned(),
+                })
+                .collect::<Vec<_>>();
             let data = listed
                 .iter()
                 .map(|group| json!({"group": group.group_id, "type": group.group_type, "state": group.state}))
@@ -509,7 +501,7 @@ impl ConsumerGroupsArgs {
             let table = list_table(&listed, include_type, include_state);
             return Ok(CommandResult::success(lines(&table), data));
         }
-        let groups = self.all_groups().await?;
+        let groups = Self::all_groups(client).await?;
         let data = groups
             .iter()
             .map(|group| json!({"group": group, "type": null, "state": null}))
@@ -520,40 +512,83 @@ impl ConsumerGroupsArgs {
     async fn describe_groups(
         &self,
         verbose: bool,
-        described: &impl Groups,
+        client: &AdminClient,
     ) -> Result<CommandResult, CommandError> {
-        let groups = self.target_groups().await?;
+        let mut groups = self.target_groups(client).await?;
+        groups.sort();
+        let described = describe(client, &groups).await;
         if self.members.is_some() || self.state.is_some() {
-            return describe_members_or_state(&groups, self.members.is_some(), verbose, described)
-                .await;
+            return Ok(members_or_state_report(
+                described,
+                self.members.is_some(),
+                verbose,
+            ));
         }
-        let answers = fan_out::bounded(groups.clone(), GROUP_FAN_OUT, |group| async move {
-            let mut client = self.connection.connect("consumer-groups").await?;
-            Ok::<_, CommandError>(client.list_consumer_group_offsets(&group).await?)
-        })
+        let answers = fan_out::bounded(
+            described,
+            GROUP_FAN_OUT,
+            |(group, description)| async move {
+                let answer = match description {
+                    Ok(description) => self
+                        .group_offsets(client, &group, &description)
+                        .await
+                        .map(|rows| (description.state, rows)),
+                    Err(error) => Err(error),
+                };
+                (group, answer)
+            },
+        )
         .await;
-        Ok(offsets_report(
-            groups.into_iter().zip(answers).collect(),
-            verbose,
+        Ok(offsets_report(answers, verbose))
+    }
+
+    /// The `--describe --offsets` rows of one described group: its committed
+    /// offsets, read on a connection of its own, and the log-end offset of
+    /// each partition that a member holds or that has a committed offset.
+    async fn group_offsets(
+        &self,
+        client: &AdminClient,
+        group: &str,
+        description: &GroupDescription,
+    ) -> Result<Vec<OffsetRow>, CommandError> {
+        let mut connection = self.connection.connect("consumer-groups").await?;
+        let committed = connection.list_consumer_group_offsets(group).await?;
+        let mut partitions = committed.keys().cloned().collect::<BTreeSet<_>>();
+        for member in &description.members {
+            partitions.extend(member.assignment.iter().cloned());
+        }
+        let partitions = partitions.into_iter().collect::<Vec<_>>();
+        let log_end = log_end_offsets(client, &partitions).await?;
+        Ok(offset_rows(
+            group,
+            &description.members,
+            &committed,
+            &log_end,
         ))
     }
 
-    async fn delete_groups(&self, deleter: &impl Groups) -> Result<CommandResult, CommandError> {
-        let groups = self.target_groups().await?;
+    async fn delete_groups(&self, client: &AdminClient) -> Result<CommandResult, CommandError> {
+        let groups = self.target_groups(client).await?;
+        let names = groups.iter().map(String::as_str).collect::<Vec<_>>();
         if self.confirm.dry_run {
-            let existing = self.all_groups().await?;
+            let mut described = describe_raw(client, &names).await;
             let results = groups
                 .iter()
                 .map(|group| {
-                    let error = (!existing.contains(group)).then_some(GROUP_ID_NOT_FOUND);
+                    let error = match described.remove(group) {
+                        Some(Ok(description)) => match description.group_state {
+                            GroupState::Dead => Some(error_of(GROUP_ID_NOT_FOUND)),
+                            GroupState::Empty => None,
+                            _ => Some(error_of(NON_EMPTY_GROUP)),
+                        },
+                        Some(Err(error)) => Some(error),
+                        None => None,
+                    };
                     (group.clone(), error)
                 })
                 .collect::<Vec<_>>();
-            return Ok(delete_report(&results)
-                .with_notices(vec![DELETE_DRY_RUN_CAVEAT.to_owned()])
-                .into_kafka_dry_run());
+            return Ok(delete_report(&results).into_kafka_dry_run());
         }
-        deleter.can_delete("--delete")?;
         confirm(
             self.confirm.yes,
             "krabka consumer-groups",
@@ -563,17 +598,36 @@ impl ConsumerGroupsArgs {
             },
         )
         .await?;
-        let mut results = Vec::new();
-        for group in &groups {
-            results.push((group.clone(), deleter.delete(group).await?));
-        }
+        let mut deleted = if names.is_empty() {
+            BTreeMap::new()
+        } else {
+            client.delete_consumer_groups(&names).await
+        };
+        let results = groups
+            .iter()
+            .map(|group| {
+                let error = match deleted.remove(group) {
+                    Some(Ok(())) => None,
+                    Some(Err(error)) => Some(error),
+                    None => Some(KafkaError {
+                        code: UNKNOWN_SERVER_ERROR,
+                        name: KafkaException::for_code(UNKNOWN_SERVER_ERROR).name(),
+                        message: Some(format!("Group {group} was not included in the response")),
+                    }),
+                };
+                (group.clone(), error)
+            })
+            .collect::<Vec<_>>();
         Ok(delete_report(&results))
     }
 
     /// The partitions of `--delete-offsets`: the named ones, and every
     /// partition of each topic named without partitions, or its describe
     /// error.
-    async fn delete_offsets_scope(&self) -> Result<Vec<DeleteOffsetRow>, CommandError> {
+    async fn delete_offsets_scope(
+        &self,
+        client: &AdminClient,
+    ) -> Result<Vec<DeleteOffsetRow>, CommandError> {
         let mut rows = Vec::<DeleteOffsetRow>::new();
         let mut whole = Vec::new();
         for topic in &self.topic {
@@ -586,26 +640,15 @@ impl ConsumerGroupsArgs {
                 (name, None) => whole.push(name),
             }
         }
-        if !whole.is_empty() {
-            let names = whole.iter().map(String::as_str).collect::<Vec<_>>();
-            let mut client = self.connection.connect("consumer-groups").await?;
-            let metadata = client.metadata(&names).await?;
-            let assignments = client.describe_partition_assignments(&names).await?;
-            for topic in metadata.topics {
-                match topic.error {
-                    Some(error) => rows.push((
-                        (topic.name, None),
-                        Some(KafkaException::for_code(error.code).to_java_string()),
-                    )),
-                    None => rows.extend(
-                        assignments
-                            .iter()
-                            .filter(|assignment| assignment.topic == topic.name)
-                            .map(|assignment| {
-                                ((assignment.topic.clone(), Some(assignment.partition)), None)
-                            }),
-                    ),
-                }
+        let names = whole.iter().map(String::as_str).collect::<Vec<_>>();
+        for (topic, layout) in topic_layout(client, &names).await {
+            match layout {
+                Err(error) => rows.push(((topic, None), Some(exception_text(&error)))),
+                Ok(partitions) => rows.extend(
+                    partitions
+                        .into_iter()
+                        .map(|(partition, _)| ((topic.clone(), Some(partition)), None)),
+                ),
             }
         }
         rows.sort();
@@ -615,16 +658,24 @@ impl ConsumerGroupsArgs {
 
     async fn delete_group_offsets(
         &self,
-        deleter: &impl Groups,
+        client: &mut AdminClient,
     ) -> Result<CommandResult, CommandError> {
-        let group = &self.group[0];
-        let mut rows = self.delete_offsets_scope().await?;
+        let group = self.group[0].clone();
+        let mut rows = self.delete_offsets_scope(client).await?;
         if self.confirm.dry_run {
-            return Ok(delete_offsets_report(group, None, &rows)
-                .with_notices(vec![DELETE_OFFSETS_DRY_RUN_CAVEAT.to_owned()])
+            let (top_level, notices) = match describe_raw(client, &[&group]).await.remove(&group) {
+                Some(Ok(description)) => match description.group_state {
+                    GroupState::Dead => (Some(GROUP_ID_NOT_FOUND), Vec::new()),
+                    GroupState::Empty => (None, Vec::new()),
+                    _ => (None, vec![DELETE_OFFSETS_DRY_RUN_CAVEAT.to_owned()]),
+                },
+                Some(Err(error)) => (Some(error.code), Vec::new()),
+                None => (None, Vec::new()),
+            };
+            return Ok(delete_offsets_report(&group, top_level, &rows)
+                .with_notices(notices)
                 .into_kafka_dry_run());
         }
-        deleter.can_delete("--delete-offsets")?;
         let partitions = rows
             .iter()
             .filter_map(|((topic, partition), _)| {
@@ -646,15 +697,23 @@ impl ConsumerGroupsArgs {
             },
         )
         .await?;
-        let (top_level, errors) = deleter.delete_offsets(group, &partitions).await?;
-        for ((topic, partition), error) in &mut rows {
-            if let Some(partition) = partition
-                && let Some(Some(code)) = errors.get(&(topic.clone(), *partition))
-            {
-                *error = Some(KafkaException::for_code(*code).to_java_string());
+        let top_level = match client
+            .delete_consumer_group_offsets(&group, &partitions)
+            .await
+        {
+            Ok(outcomes) => apply_offset_deletions(&mut rows, &partitions, &outcomes),
+            Err(krabka_client_admin::AdminError::Broker { code, .. }) => {
+                let text = KafkaException::for_code(code).to_java_string();
+                for ((_, partition), error) in &mut rows {
+                    if partition.is_some() {
+                        *error = Some(text.clone());
+                    }
+                }
+                Some(code)
             }
-        }
-        Ok(delete_offsets_report(group, top_level, &rows))
+            Err(other) => return Err(other.into()),
+        };
+        Ok(delete_offsets_report(&group, top_level, &rows))
     }
 
     /// The scenario of one group.
@@ -687,8 +746,8 @@ impl ConsumerGroupsArgs {
         })
     }
 
-    async fn reset(&self, lookup: &impl OffsetLookup) -> Result<CommandResult, CommandError> {
-        let groups = self.target_groups().await?;
+    async fn reset(&self, client: &mut AdminClient) -> Result<CommandResult, CommandError> {
+        let groups = self.target_groups(client).await?;
         let file = match &self.from_file {
             Some(path) => {
                 let csv = tokio::fs::read_to_string(path).await.map_err(|_| {
@@ -706,17 +765,38 @@ impl ConsumerGroupsArgs {
                 "One of the reset scopes should be defined: --all-topics, --topic.",
             ));
         }
-        let mut client = self.connection.connect("consumer-groups").await?;
+        let names = groups.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut described = describe_raw(client, &names).await;
         let mut stdout = Vec::new();
         let mut notices = Vec::new();
         let mut plans = Vec::<(String, Plan)>::new();
-        let mut failures = Vec::new();
-        for group in &groups {
-            let scenario = self.scenario(group, file.as_ref())?;
+        let mut failure = None;
+        for group in hash_order(groups.clone(), Table::Default, |group| string_hash(group)) {
+            match described.remove(&group) {
+                Some(Ok(description))
+                    if !matches!(
+                        description.group_state,
+                        GroupState::Empty | GroupState::Dead
+                    ) =>
+                {
+                    stdout.push(String::new());
+                    stdout.push(format!(
+                        "Error: Assignments can only be reset if the group '{group}' is inactive, but the current state is {}.",
+                        description.group_state
+                    ));
+                    plans.push((group, Vec::new()));
+                    continue;
+                }
+                Some(Err(error)) if error.code != GROUP_ID_NOT_FOUND => {
+                    return Err(exception_text(&error).into());
+                }
+                _ => {}
+            }
+            let scenario = self.scenario(&group, file.as_ref())?;
             let committed = if self.all_topics.is_some()
                 || matches!(scenario, Scenario::ShiftBy(_) | Scenario::ToCurrent)
             {
-                client.list_consumer_group_offsets(group).await?
+                client.list_consumer_group_offsets(&group).await?
             } else {
                 BTreeMap::new()
             };
@@ -725,26 +805,34 @@ impl ConsumerGroupsArgs {
             } else if self.topic.is_empty() {
                 Vec::new()
             } else {
-                topic_partitions(&self.topic, &mut client).await?
+                topic_partitions(&self.topic, client).await?
             };
-            let planned = reset::plan(&scenario, group, &partitions, &committed, lookup).await?;
+            check_partitions_valid(client, &partitions).await?;
+            let planned = reset::plan(
+                &scenario,
+                &group,
+                &partitions,
+                &committed,
+                &ListOffsets::new(client),
+            )
+            .await?;
             stdout.extend(planned.stdout);
             notices.extend(planned.notices);
             if self.execute.is_some() && !planned.plan.is_empty() {
                 let offsets = planned.plan.iter().cloned().collect::<BTreeMap<_, _>>();
-                let outcomes = client.alter_consumer_group_offsets(group, &offsets).await?;
-                failures.extend(outcomes.into_iter().filter_map(|outcome| {
-                    outcome
-                        .error
-                        .map(|error| (group.clone(), (outcome.topic, outcome.partition), error))
-                }));
+                let outcomes = client
+                    .alter_consumer_group_offsets(&group, &offsets)
+                    .await?;
+                failure = outcomes.into_iter().find_map(|outcome| outcome.error);
+                if failure.is_some() {
+                    break;
+                }
             }
-            plans.push((group.clone(), planned.plan));
+            plans.push((group, planned.plan));
         }
-        notices.push(RESET_ACTIVE_GROUP_CAVEAT.to_owned());
         let result = reset_report(
             plans,
-            &failures,
+            failure.as_ref(),
             stdout,
             self.export.is_some(),
             self.group.len() == 1,
@@ -758,56 +846,296 @@ impl ConsumerGroupsArgs {
     }
 }
 
-/// What a `--delete --dry-run` cannot know in this build.
-const DELETE_DRY_RUN_CAVEAT: &str = "WARN: this build cannot tell whether a group has members, for which DeleteGroups answers NON_EMPTY_GROUP: that needs AdminClient::describe_consumer_groups";
+/// What a `--delete-offsets --dry-run` cannot know.
+const DELETE_OFFSETS_DRY_RUN_CAVEAT: &str = "WARN: the group has members, and a dry run does not check whether it is subscribed to these topics, for which OffsetDelete answers GROUP_SUBSCRIBED_TO_TOPIC";
 
-/// What a `--delete-offsets --dry-run` cannot know in this build.
-const DELETE_OFFSETS_DRY_RUN_CAVEAT: &str = "WARN: this build cannot tell whether the group is subscribed to these topics, for which OffsetDelete answers GROUP_SUBSCRIBED_TO_TOPIC: that needs AdminClient::describe_consumer_groups";
+/// An error of `code` with its default message.
+fn error_of(code: i16) -> KafkaError {
+    KafkaError {
+        code,
+        name: KafkaException::for_code(code).name(),
+        message: None,
+    }
+}
 
-/// What a `--reset-offsets` cannot check in this build.
-const RESET_ACTIVE_GROUP_CAVEAT: &str = "WARN: this build does not check that the groups are inactive, as Kafka does before a reset: that needs AdminClient::describe_consumer_groups";
+/// `describeConsumerGroups` for `groups`, or nothing for no group.
+async fn describe_raw(
+    client: &AdminClient,
+    groups: &[&str],
+) -> BTreeMap<String, Result<ConsumerGroupDescription, KafkaError>> {
+    if groups.is_empty() {
+        return BTreeMap::new();
+    }
+    client
+        .describe_consumer_groups(groups, DescribeGroupsOptions::default())
+        .await
+}
 
-/// `--describe --members` or `--describe --state`: each group's description
-/// is the whole report, so the first failure ends the command, as it does in
-/// the JVM tool.
-async fn describe_members_or_state(
-    groups: &[String],
+/// Each of `groups` and its description, or why it could not be described,
+/// in the order of `groups`.
+async fn describe(client: &AdminClient, groups: &[String]) -> Vec<Described> {
+    let names = groups.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut described = describe_raw(client, &names).await;
+    groups
+        .iter()
+        .map(|group| {
+            let answer = match described.remove(group) {
+                Some(Ok(description)) => Ok(group_description(description)),
+                Some(Err(error)) => Err(CommandError::Other(exception_text(&error))),
+                None => Err(CommandError::Other(format!(
+                    "the coordinator did not describe group {group}"
+                ))),
+            };
+            (group.clone(), answer)
+        })
+        .collect()
+}
+
+/// The partitions of each of `topics` and whether each has a leader, or the
+/// error of the topic, as `describeTopics` reports them.
+type TopicLayout = BTreeMap<String, Result<Vec<(i32, bool)>, KafkaError>>;
+
+async fn topic_layout(client: &AdminClient, topics: &[&str]) -> TopicLayout {
+    if topics.is_empty() {
+        return BTreeMap::new();
+    }
+    client
+        .describe_topics(topics, DescribeTopicsOptions::default())
+        .await
+        .into_iter()
+        .map(|(topic, description)| {
+            let layout = description.map(|description| {
+                description
+                    .partitions
+                    .iter()
+                    .map(|partition| (partition.partition, partition.leader.is_some()))
+                    .collect()
+            });
+            (topic, layout)
+        })
+        .collect()
+}
+
+/// The distinct topics of `partitions`.
+fn topics_of(partitions: &[Partition]) -> Vec<&str> {
+    let mut topics = partitions
+        .iter()
+        .map(|(topic, _)| topic.as_str())
+        .collect::<Vec<_>>();
+    topics.sort_unstable();
+    topics.dedup();
+    topics
+}
+
+/// The log-end offset of each of `partitions`, as `describePartitions` reads
+/// them: a partition without a leader has none, and a topic that cannot be
+/// described or a failed lookup fails the group, as
+/// `filterNoneLeaderPartitions` and `getLogEndOffsets` do.
+async fn log_end_offsets(
+    client: &AdminClient,
+    partitions: &[Partition],
+) -> Result<BTreeMap<Partition, i64>, CommandError> {
+    if partitions.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let layout = topic_layout(client, &topics_of(partitions)).await;
+    if let Some(error) = layout.values().find_map(|layout| layout.as_ref().err()) {
+        return Err(exception_text(error).into());
+    }
+    let led = partitions
+        .iter()
+        .filter(|(topic, partition)| {
+            layout.get(topic).is_some_and(|layout| {
+                layout
+                    .as_ref()
+                    .is_ok_and(|partitions| partitions.contains(&(*partition, true)))
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if led.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    ListOffsets::new(client)
+        .offsets(&led, OffsetSpec::Latest)
+        .await?
+        .into_iter()
+        .map(|(partition, answer)| {
+            answer
+                .map(|offset| (partition, offset))
+                .map_err(|code| KafkaException::for_code(code).to_java_string().into())
+        })
+        .collect()
+}
+
+/// `checkAllTopicPartitionsValid`: every partition exists and has a leader.
+async fn check_partitions_valid(
+    client: &AdminClient,
+    partitions: &[Partition],
+) -> Result<(), CommandError> {
+    if partitions.is_empty() {
+        return Ok(());
+    }
+    let layout = topic_layout(client, &topics_of(partitions)).await;
+    let find = |(topic, partition): &Partition| {
+        layout
+            .get(topic)
+            .and_then(|layout| layout.as_ref().ok())
+            .and_then(|partitions| partitions.iter().find(|(id, _)| id == partition))
+            .map(|(_, leader)| *leader)
+    };
+    let names = |wanted: &dyn Fn(Option<bool>) -> bool| {
+        partitions
+            .iter()
+            .filter(|partition| wanted(find(partition)))
+            .map(|(topic, partition)| format!("{topic}-{partition}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let missing = names(&|found| found.is_none());
+    if !missing.is_empty() {
+        return Err(format!("The partitions \"{missing}\" do not exist").into());
+    }
+    let leaderless = names(&|found| found == Some(false));
+    if !leaderless.is_empty() {
+        return Err(format!("The partitions \"{leaderless}\" have no leader").into());
+    }
+    Ok(())
+}
+
+/// Sets the status of each partition row from an `OffsetDelete` answer, and
+/// returns the top-level error that `DeleteConsumerGroupOffsetsResult.all()`
+/// fails with: the error of the first failed partition in the order of the
+/// request's `HashSet`, or `UNKNOWN_SERVER_ERROR` for a partition the answer
+/// leaves out.
+fn apply_offset_deletions(
+    rows: &mut [DeleteOffsetRow],
+    partitions: &[Partition],
+    outcomes: &[krabka_client_admin::ConsumerGroupOffsetOutcome],
+) -> Option<i16> {
+    let answered = outcomes
+        .iter()
+        .map(|outcome| {
+            (
+                (outcome.topic.clone(), outcome.partition),
+                outcome.error.as_ref().map(|error| error.code),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let failure = |partition: &Partition| match answered.get(partition) {
+        None => Some((
+            UNKNOWN_SERVER_ERROR,
+            format!(
+                "java.lang.IllegalArgumentException: Offset deletion result for partition \"{}-{}\" was not included in the response",
+                partition.0, partition.1
+            ),
+        )),
+        Some(None) => None,
+        Some(Some(code)) => Some((*code, KafkaException::for_code(*code).to_java_string())),
+    };
+    for ((topic, partition), error) in rows.iter_mut() {
+        if let Some(partition) = partition
+            && let Some((_, text)) = failure(&(topic.clone(), *partition))
+        {
+            *error = Some(text);
+        }
+    }
+    hash_set_order(partitions.to_vec(), |(topic, partition)| {
+        topic_partition_hash(topic, *partition)
+    })
+    .iter()
+    .find_map(|partition| failure(partition).map(|(code, _)| code))
+}
+
+/// What `shouldPrintMemberState` prints for a group in `state` with `rows`
+/// data rows: text for stdout, lines for stderr, and whether the group's
+/// table follows. A state that a consumer group cannot be in fails the group,
+/// as the JVM tool's `KafkaException` does.
+fn member_state(
+    group: &str,
+    state: &str,
+    rows: usize,
+) -> Result<(String, Vec<String>, bool), CommandError> {
+    Ok(match state {
+        "Dead" => (
+            format!("\nError: Consumer group '{group}' does not exist.\n"),
+            Vec::new(),
+            false,
+        ),
+        "Empty" => (
+            String::new(),
+            vec![
+                String::new(),
+                format!("Consumer group '{group}' has no active members."),
+            ],
+            rows > 0,
+        ),
+        "PreparingRebalance" | "CompletingRebalance" | "Assigning" | "Reconciling" => (
+            String::new(),
+            vec![
+                String::new(),
+                format!("Warning: Consumer group '{group}' is rebalancing."),
+            ],
+            rows > 0,
+        ),
+        "Stable" => (String::new(), Vec::new(), rows > 0),
+        other => {
+            return Err(CommandError::Other(format!(
+                "org.apache.kafka.common.KafkaException: Expected a valid consumer group state, but found '{other}'."
+            )));
+        }
+    })
+}
+
+/// The notice of a group that could not be described.
+fn group_failure(group: &str, error: &CommandError) -> String {
+    format!("Error: Executing consumer group command failed for group '{group}' due to {error}")
+}
+
+/// `--describe --members` or `--describe --state` of each described group,
+/// in group order. A group that could not be described is a notice and a
+/// failure, and the other groups still print.
+fn members_or_state_report(
+    described: Vec<Described>,
     members: bool,
     verbose: bool,
-    described: &impl Groups,
-) -> Result<CommandResult, CommandError> {
-    let what = if members {
-        "--describe --members"
-    } else {
-        "--describe --state"
-    };
-    let mut sorted = groups.to_vec();
-    sorted.sort();
-    sorted.dedup();
+) -> CommandResult {
     let mut text = String::new();
     let mut data = Vec::new();
     let mut notices = Vec::new();
-    for group in &sorted {
-        let description = described
-            .describe(group)
-            .await
-            .map_err(|error| match error {
-                CommandError::Unsupported(_) => not_supported(what, "describe_consumer_groups"),
-                other => other,
-            })?;
-        if let Some(notice) = state_notice(group, &description.state) {
-            notices.push(notice);
-        }
-        if description.state == "Dead" {
-            continue;
-        }
+    let mut failed = false;
+    for (group, answer) in described {
+        let rows = |description: &GroupDescription| {
+            if members {
+                description.members.len()
+            } else {
+                1
+            }
+        };
+        let answer = answer.and_then(|description| {
+            member_state(&group, &description.state, rows(&description))
+                .map(|state| (description, state))
+        });
+        let (description, (stdout, stderr, print)) = match answer {
+            Ok(answer) => answer,
+            Err(error) => {
+                failed = true;
+                notices.push(group_failure(&group, &error));
+                data.push(json!({"group": group, "error": error.to_string()}));
+                continue;
+            }
+        };
+        text.push_str(&stdout);
+        notices.extend(stderr);
         if members {
-            let rows = member_rows(group, &description);
+            let rows = member_rows(&group, &description);
             text.push_str(&members_table(&rows, verbose));
             data.push(json!({"group": group, "state": description.state, "members": rows.iter().map(member_row_json).collect::<Vec<_>>()}));
         } else {
-            let row = state_row(group, &description);
-            text.push_str(&state_table(&row, verbose));
+            let row = state_row(&group, &description);
+            if print {
+                text.push_str(&state_table(&row, verbose));
+            }
             data.push(json!({
                 "group": group,
                 "coordinator": row.coordinator,
@@ -817,123 +1145,77 @@ async fn describe_members_or_state(
             }));
         }
     }
-    Ok(CommandResult::success(lines(&text), data).with_notices(notices))
+    CommandResult::rows(lines(&text), data, failed).with_notices(notices)
 }
 
-/// What `shouldPrintMemberState` writes for a group in `state`.
-fn state_notice(group: &str, state: &str) -> Option<String> {
-    match state {
-        "Dead" => Some(format!("Error: Consumer group '{group}' does not exist.")),
-        "Empty" => Some(format!("Consumer group '{group}' has no active members.")),
-        "PreparingRebalance" | "CompletingRebalance" | "Assigning" | "Reconciling" => {
-            Some(format!("Warning: Consumer group '{group}' is rebalancing."))
-        }
-        _ => None,
-    }
-}
+/// One group and its state and `--describe --offsets` rows, or why they
+/// could not be read.
+type GroupOffsets = (String, Result<(String, Vec<OffsetRow>), CommandError>);
 
-/// The `--describe --offsets` report from each group's committed offsets, in
-/// group order. A group whose offsets could not be read is a notice and a
-/// failure, and the other groups still print.
-/// One group and its committed offsets, or why they could not be read.
-type GroupOffsets = (String, Result<BTreeMap<Partition, i64>, CommandError>);
-
-fn offsets_report(mut answers: Vec<GroupOffsets>, verbose: bool) -> CommandResult {
-    answers.sort_by(|(left, _), (right, _)| left.cmp(right));
-    answers.dedup_by(|(left, _), (right, _)| left == right);
+/// The `--describe --offsets` report of each group, in group order. A group
+/// whose offsets could not be read is a notice and a failure, and the other
+/// groups still print.
+fn offsets_report(answers: Vec<GroupOffsets>, verbose: bool) -> CommandResult {
     let mut text = String::new();
     let mut data = Vec::new();
     let mut notices = Vec::new();
     let mut failed = false;
     for (group, answer) in answers {
+        let answer = answer.and_then(|(state, rows)| {
+            member_state(&group, &state, rows.len()).map(|printed| (rows, printed))
+        });
         match answer {
-            Ok(committed) => {
-                let rows = offset_rows(&group, &[], &committed, &BTreeMap::new());
-                if rows.is_empty() {
-                    notices.push(format!(
-                        "Consumer group '{group}' has no committed offsets."
-                    ));
-                } else {
+            Ok((rows, (stdout, stderr, print))) => {
+                text.push_str(&stdout);
+                notices.extend(stderr);
+                if print {
                     text.push_str(&offsets_table(&rows, verbose));
                 }
                 data.extend(rows.iter().map(offset_row_json));
             }
             Err(error) => {
                 failed = true;
-                notices.push(format!(
-                    "Error: Executing consumer group command failed for group '{group}' due to {error}"
-                ));
+                notices.push(group_failure(&group, &error));
                 data.push(json!({"group": group, "error": error.to_string()}));
             }
         }
     }
-    notices.push(
-        not_supported(
-            "LOG-END-OFFSET and LAG (they need AdminClient::list_offsets) and CONSUMER-ID, HOST and CLIENT-ID",
-            "describe_consumer_groups",
-        )
-        .to_string(),
-    );
     CommandResult::rows(lines(&text), data, failed).with_notices(notices)
 }
 
 /// The partitions of `--topic` for `--reset-offsets`, as
-/// `parseTopicPartitionsToReset` resolves them, checked to exist as
-/// `checkAllTopicPartitionsValid` checks them.
+/// `parseTopicPartitionsToReset` resolves them: the named partitions, then
+/// every partition of each topic named without partitions.
 async fn topic_partitions(
     topics: &[String],
-    client: &mut krabka_client_admin::AdminClient,
+    client: &AdminClient,
 ) -> Result<Vec<Partition>, CommandError> {
-    let mut named = Vec::new();
+    let mut partitions = Vec::new();
     let mut whole = Vec::new();
     for topic in topics {
         match reset::topic_arg(topic)? {
-            (name, Some(partitions)) => {
-                named.extend(
-                    partitions
-                        .into_iter()
-                        .map(|partition| (name.clone(), partition)),
-                );
+            (name, Some(named)) => {
+                partitions.extend(named.into_iter().map(|partition| (name.clone(), partition)));
             }
             (name, None) => whole.push(name),
         }
     }
-    let mut topic_names = named
-        .iter()
-        .map(|(topic, _)| topic.as_str())
-        .chain(whole.iter().map(String::as_str))
-        .collect::<Vec<_>>();
-    topic_names.sort_unstable();
-    topic_names.dedup();
-    let metadata = client.metadata(&topic_names).await?;
-    if let Some(error) = metadata
-        .topics
-        .iter()
-        .filter(|topic| whole.contains(&topic.name))
-        .find_map(|topic| topic.error.as_ref())
-    {
-        return Err(KafkaException::for_code(error.code).message().into());
+    let names = whole.iter().map(String::as_str).collect::<Vec<_>>();
+    for (topic, layout) in topic_layout(client, &names).await {
+        match layout {
+            Ok(layout) => partitions.extend(
+                layout
+                    .into_iter()
+                    .map(|(partition, _)| (topic.clone(), partition)),
+            ),
+            Err(error) => {
+                return Err(error
+                    .message
+                    .unwrap_or_else(|| KafkaException::for_code(error.code).message().to_owned())
+                    .into());
+            }
+        }
     }
-    let existing = client
-        .describe_partition_assignments(&topic_names)
-        .await?
-        .into_iter()
-        .map(|assignment| (assignment.topic, assignment.partition))
-        .collect::<Vec<_>>();
-    let missing = named
-        .iter()
-        .filter(|partition| !existing.contains(partition))
-        .map(|(topic, partition)| format!("{topic}-{partition}"))
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        return Err(format!("The partitions \"{}\" do not exist", missing.join(",")).into());
-    }
-    let mut partitions = named;
-    partitions.extend(
-        existing
-            .into_iter()
-            .filter(|(topic, _)| whole.contains(topic)),
-    );
     Ok(partitions)
 }
 
@@ -941,7 +1223,7 @@ async fn topic_partitions(
 /// every group's plan, in the order of the JVM tool's `HashMap`.
 fn reset_report(
     plans: Vec<(String, Plan)>,
-    failures: &[(String, Partition, krabka_client_admin::KafkaError)],
+    failure: Option<&KafkaError>,
     stdout: Vec<String>,
     export: bool,
     single_group: bool,
@@ -951,24 +1233,23 @@ fn reset_report(
         .iter()
         .flat_map(|(group, plan)| {
             plan.iter().map(move |(partition, offset)| {
-                let error = failures
-                    .iter()
-                    .find(|(failed_group, failed, _)| failed_group == group && failed == partition)
-                    .map(|(.., error)| error);
                 json!({
                     "group": group,
                     "topic": partition.0,
                     "partition": partition.1,
                     "new_offset": offset,
-                    "error": kafka_error(error),
                 })
             })
         })
         .collect::<Vec<_>>();
-    let text = if let Some((.., error)) = failures.first() {
+    let text = if let Some(error) = failure {
         format!(
             "\nError: Executing consumer group command failed due to {}\n",
-            KafkaException::for_code(error.code).to_java_string()
+            error
+                .message
+                .as_deref()
+                .filter(|message| !message.is_empty())
+                .unwrap_or(KafkaException::for_code(error.code).message())
         )
     } else if export {
         export_csv(&plans, single_group)
@@ -977,7 +1258,11 @@ fn reset_report(
     };
     let mut human = stdout;
     human.extend(lines(&text));
-    CommandResult::rows(human, data, !failures.is_empty())
+    CommandResult::rows(
+        human,
+        json!({"plans": data, "error": kafka_error(failure)}),
+        failure.is_some(),
+    )
 }
 
 /// `groupStatesFromString`: the states of `--list --state`, which must be
@@ -1163,10 +1448,10 @@ pub fn state_row(group: &str, description: &GroupDescription) -> StateRow {
     }
 }
 
-/// The `--delete` report of `deleteGroups`: each group and its error code, or
+/// The `--delete` report of `deleteGroups`: each group and its error, or
 /// `None` for a deleted group.
-fn delete_report(results: &[(String, Option<i16>)]) -> CommandResult {
-    let quoted = |groups: &[&(String, Option<i16>)]| {
+fn delete_report(results: &[(String, Option<KafkaError>)]) -> CommandResult {
+    let quoted = |groups: &[&(String, Option<KafkaError>)]| {
         groups
             .iter()
             .map(|(group, _)| format!("'{group}'"))
@@ -1191,11 +1476,12 @@ fn delete_report(results: &[(String, Option<i16>)]) -> CommandResult {
         human.push(String::new());
         human.push("Error: Deletion of some consumer groups failed:".to_owned());
         for (group, error) in &failed {
-            let exception = KafkaException::for_code(error.unwrap_or_default());
-            human.push(format!(
-                "* Group '{group}' could not be deleted due to: {}",
-                exception.to_java_string()
-            ));
+            if let Some(error) = error {
+                human.push(format!(
+                    "* Group '{group}' could not be deleted due to: {}",
+                    exception_text(error)
+                ));
+            }
         }
         if !succeeded.is_empty() {
             human.push(String::new());
@@ -1210,9 +1496,9 @@ fn delete_report(results: &[(String, Option<i16>)]) -> CommandResult {
         .map(|(group, error)| {
             json!({
                 "group": group,
-                "error": error.map(|code| {
-                    let exception = KafkaException::for_code(code);
-                    json!({"code": code, "name": exception.name(), "message": exception.message()})
+                "error": error.as_ref().map(|error| {
+                    let exception = KafkaException::for_code(error.code);
+                    json!({"code": error.code, "name": exception.name(), "message": error.message.as_deref().unwrap_or(exception.message())})
                 }),
             })
         })

@@ -500,103 +500,68 @@ fn offset_rows_order_members_by_size_then_unassigned_and_compute_lag() {
     );
 }
 
+fn offset_row(
+    group: &str,
+    partition: Partition,
+    offset: Option<i64>,
+    end: Option<i64>,
+) -> OffsetRow {
+    OffsetRow {
+        group: group.into(),
+        topic: Some(partition.0),
+        partition: Some(partition.1),
+        leader_epoch: None,
+        offset,
+        log_end_offset: end,
+        lag: render::lag(offset, end),
+        consumer_id: Some("-".into()),
+        host: Some("-".into()),
+        client_id: Some("-".into()),
+    }
+}
+
 #[test]
-fn the_offsets_report_prints_every_group_and_fails_for_a_failed_one() {
+fn the_offsets_report_follows_each_group_state_and_fails_for_a_failed_one() {
     let answers = vec![
-        ("zeta".to_owned(), Ok(BTreeMap::from([(p("orders", 0), 4)]))),
         (
             "alpha".to_owned(),
             Err(CommandError::Other(
-                "OffsetFetch failed: GROUP_AUTHORIZATION_FAILED (30)".into(),
+                "org.apache.kafka.common.errors.GroupAuthorizationException: denied".into(),
             )),
         ),
-        ("empty".to_owned(), Ok(BTreeMap::new())),
+        ("dead".to_owned(), Ok(("Dead".to_owned(), Vec::new()))),
+        ("empty".to_owned(), Ok(("Empty".to_owned(), Vec::new()))),
+        (
+            "zeta".to_owned(),
+            Ok((
+                "Empty".to_owned(),
+                vec![offset_row("zeta", p("orders", 0), Some(4), Some(10))],
+            )),
+        ),
     ];
     let report = offsets_report(answers, false);
-    check!(
-        report.human
-            == [
-                "",
-                "GROUP           TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG             CONSUMER-ID     HOST            CLIENT-ID",
-                "zeta            orders          0          4               -               -               -               -               -",
-            ]
-    );
-    check!(report.failed);
-    check!(
-        report.notices[..2]
-            == [
-                "Error: Executing consumer group command failed for group 'alpha' due to OffsetFetch failed: GROUP_AUTHORIZATION_FAILED (30)",
-                "Consumer group 'empty' has no committed offsets.",
-            ]
-    );
-    check!(report.notices[2].contains("AdminClient::describe_consumer_groups"));
-    let clean = offsets_report(
-        vec![("g".to_owned(), Ok(BTreeMap::from([(p("t", 0), 1)])))],
+    let expected = CommandResult::rows(
+        vec![
+            String::new(),
+            "Error: Consumer group 'dead' does not exist.".to_owned(),
+            String::new(),
+            "GROUP           TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG             CONSUMER-ID     HOST            CLIENT-ID".to_owned(),
+            "zeta            orders          0          4               10              6               -               -               -".to_owned(),
+        ],
+        report.data.clone(),
         true,
-    );
-    check!(!clean.failed);
+    )
+    .with_notices(vec![
+        "Error: Executing consumer group command failed for group 'alpha' due to org.apache.kafka.common.errors.GroupAuthorizationException: denied".to_owned(),
+        String::new(),
+        "Consumer group 'empty' has no active members.".to_owned(),
+        String::new(),
+        "Consumer group 'zeta' has no active members.".to_owned(),
+    ]);
+    check!(report == expected);
 }
 
-/// A describer that knows fixed groups.
-struct Known(BTreeMap<String, GroupDescription>);
-
-impl Groups for Known {
-    fn list(
-        &self,
-        states: &[&str],
-        _types: &[&str],
-    ) -> impl Future<Output = Result<Vec<ListedGroup>, CommandError>> {
-        std::future::ready(Ok(self
-            .0
-            .iter()
-            .filter(|(_, description)| {
-                states.is_empty() || states.contains(&description.state.as_str())
-            })
-            .map(|(group, description)| ListedGroup {
-                group_id: group.clone(),
-                group_type: "Classic".into(),
-                state: description.state.clone(),
-            })
-            .collect()))
-    }
-
-    fn describe(
-        &self,
-        group: &str,
-    ) -> impl Future<Output = Result<GroupDescription, CommandError>> {
-        std::future::ready(self.0.get(group).cloned().ok_or_else(|| {
-            format!(
-                "org.apache.kafka.common.errors.GroupIdNotFoundException: Group {group} not found."
-            )
-            .into()
-        }))
-    }
-
-    fn can_delete(&self, _what: &str) -> Result<(), CommandError> {
-        Ok(())
-    }
-
-    fn delete(&self, group: &str) -> impl Future<Output = Result<Option<i16>, CommandError>> {
-        std::future::ready(Ok(
-            (!self.0.contains_key(group)).then_some(GROUP_ID_NOT_FOUND)
-        ))
-    }
-
-    fn delete_offsets(
-        &self,
-        _group: &str,
-        partitions: &[Partition],
-    ) -> impl Future<Output = DeleteOffsetsAnswer> {
-        std::future::ready(Ok((
-            None,
-            partitions
-                .iter()
-                .map(|partition| (partition.clone(), None))
-                .collect(),
-        )))
-    }
-}
-
+/// A group described as the admin client describes it.
 fn description(state: &str, members: Vec<Member>) -> GroupDescription {
     GroupDescription {
         state: state.into(),
@@ -608,71 +573,75 @@ fn description(state: &str, members: Vec<Member>) -> GroupDescription {
     }
 }
 
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(future)
-}
-
 #[test]
-fn members_and_state_describe_through_the_seam() {
-    let known = Known(BTreeMap::from([
-        (
-            "active1".to_owned(),
-            description(
-                "Stable",
-                vec![member("m1", &[("events", 1), ("events", 0)])],
+fn members_and_state_reports_print_each_described_group() {
+    let described = || {
+        vec![
+            (
+                "active1".to_owned(),
+                Ok(description(
+                    "Stable",
+                    vec![member("m1", &[("events", 1), ("events", 0)])],
+                )),
             ),
-        ),
-        ("g1".to_owned(), description("Empty", vec![])),
-    ]));
-    let both = groups(&["g1", "active1"]);
-    let members = block_on(describe_members_or_state(&both, true, false, &known)).unwrap();
-    check!(
-        members.human
-            == [
+            ("g1".to_owned(), Ok(description("Empty", vec![]))),
+            (
+                "nope".to_owned(),
+                Err(CommandError::Other(
+                    "org.apache.kafka.common.errors.GroupIdNotFoundException: Group nope not found."
+                        .into(),
+                )),
+            ),
+        ]
+    };
+    let notices = |empty: &str| {
+        vec![
+            String::new(),
+            empty.to_owned(),
+            "Error: Executing consumer group command failed for group 'nope' due to org.apache.kafka.common.errors.GroupIdNotFoundException: Group nope not found.".to_owned(),
+        ]
+    };
+    let cases = [
+        (
+            true,
+            vec![
                 "",
                 "GROUP           CONSUMER-ID     HOST            CLIENT-ID       #PARTITIONS     ",
                 "active1         m1              /10.0.0.1       client-m1       2               ",
                 "",
                 "GROUP           CONSUMER-ID     HOST            CLIENT-ID       #PARTITIONS     ",
-            ]
-    );
-    check!(members.notices == ["Consumer group 'g1' has no active members."]);
-    let state = block_on(describe_members_or_state(&both, false, false, &known)).unwrap();
-    check!(
-        state.human
-            == [
+            ],
+        ),
+        (
+            false,
+            vec![
                 "",
                 "GROUP           COORDINATOR (ID)          ASSIGNMENT-STRATEGY  STATE                #MEMBERS",
                 "active1         localhost:9092  (1)       range                Stable               1",
                 "",
                 "GROUP           COORDINATOR (ID)          ASSIGNMENT-STRATEGY  STATE                #MEMBERS",
                 "g1              localhost:9092  (1)       range                Empty                0",
-            ]
-    );
-    let missing = block_on(describe_members_or_state(
-        &groups(&["nope"]),
-        false,
-        false,
-        &known,
-    ));
-    check!(
-        missing.unwrap_err().to_string()
-            == "org.apache.kafka.common.errors.GroupIdNotFoundException: Group nope not found."
-    );
-    let unsupported = block_on(describe_members_or_state(
-        &groups(&["g1"]),
-        true,
-        false,
-        &Unavailable,
-    ));
-    check!(
-        unsupported.unwrap_err().to_string()
-            == "--describe --members is not supported by this build: it needs AdminClient::describe_consumer_groups, which the pinned krabka-client-rs revision does not have"
-    );
+            ],
+        ),
+    ];
+    for (members, human) in cases {
+        let report = members_or_state_report(described(), members, false);
+        let expected = CommandResult::rows(
+            human.into_iter().map(ToOwned::to_owned).collect(),
+            report.data.clone(),
+            true,
+        )
+        .with_notices(notices("Consumer group 'g1' has no active members."));
+        check!(report == expected, "members: {members}");
+    }
+}
+
+fn error(code: i16) -> KafkaError {
+    KafkaError {
+        code,
+        name: KafkaException::for_code(code).name(),
+        message: None,
+    }
 }
 
 #[test]
@@ -685,15 +654,15 @@ fn the_delete_report_matches_kafka() {
         ),
         (
             vec![
-                ("nope".to_owned(), Some(69)),
+                ("nope".to_owned(), Some(error(69))),
                 ("g1".to_owned(), None),
-                ("nope2".to_owned(), Some(69)),
+                ("busy".to_owned(), Some(error(68))),
             ],
             vec![
                 "",
                 "Error: Deletion of some consumer groups failed:",
                 "* Group 'nope' could not be deleted due to: org.apache.kafka.common.errors.GroupIdNotFoundException: The group id does not exist.",
-                "* Group 'nope2' could not be deleted due to: org.apache.kafka.common.errors.GroupIdNotFoundException: The group id does not exist.",
+                "* Group 'busy' could not be deleted due to: org.apache.kafka.common.errors.GroupNotEmptyException: The group is not empty.",
                 "",
                 "These consumer groups were deleted successfully: 'g1'",
             ],
@@ -702,8 +671,10 @@ fn the_delete_report_matches_kafka() {
     ];
     for (results, human, failed) in cases {
         let report = delete_report(&results);
-        check!(report.human == human);
-        check!(report.failed == failed);
+        check!(
+            (report.human.clone(), report.failed)
+                == (human.into_iter().map(ToOwned::to_owned).collect(), failed)
+        );
     }
 }
 
@@ -721,30 +692,97 @@ fn the_delete_offsets_report_picks_kafkas_verdict() {
         (
             None,
             &rows,
-            "Request succeeded for deleting offsets from group g.",
+            vec!["Request succeeded for deleting offsets from group g."],
             false,
         ),
-        (None, &failed_rows, "", true),
-        (Some(69), &failed_rows, "", true),
-        (Some(86), &rows, "", true),
-        (Some(7), &rows, "", true),
+        (
+            None,
+            &failed_rows,
+            vec![
+                "",
+                "Error: Encountered some partition-level error, see the follow-up details.",
+            ],
+            true,
+        ),
+        (
+            Some(69),
+            &failed_rows,
+            vec!["", "Error: The group id does not exist."],
+            true,
+        ),
+        (
+            Some(86),
+            &rows,
+            vec![
+                "",
+                "Error: Encountered some partition-level error, see the follow-up details.",
+            ],
+            true,
+        ),
+        (
+            Some(7),
+            &rows,
+            vec![
+                "",
+                "Error: Encountered some unknown error: REQUEST_TIMED_OUT",
+            ],
+            true,
+        ),
     ];
-    let verdicts = [
-        "Request succeeded for deleting offsets from group g.",
-        "Error: Encountered some partition-level error, see the follow-up details.",
-        "Error: The group id does not exist.",
-        "Error: Encountered some partition-level error, see the follow-up details.",
-        "Error: Encountered some unknown error: REQUEST_TIMED_OUT",
-    ];
-    for ((top_level, rows, first, failed), verdict) in cases.into_iter().zip(verdicts) {
+    for (top_level, rows, head, failed) in cases {
         let report = delete_offsets_report("g", top_level, rows);
-        let head = if first.is_empty() {
-            vec!["", verdict]
-        } else {
-            vec![first]
-        };
         check!(report.human[..head.len()] == head[..], "{top_level:?}");
         check!(report.failed == failed);
+    }
+}
+
+#[test]
+fn offset_deletions_mark_each_partition_and_name_the_first_failure() {
+    use krabka_client_admin::ConsumerGroupOffsetOutcome;
+    let outcome = |partition: i32, code: Option<i16>| ConsumerGroupOffsetOutcome {
+        topic: "orders".into(),
+        partition,
+        error: code.map(error),
+    };
+    let partitions = [p("orders", 0), p("orders", 1), p("orders", 2)];
+    let fresh = || -> Vec<DeleteOffsetRow> {
+        vec![
+            (("nosuch".to_owned(), None), Some("gone".to_owned())),
+            (("orders".to_owned(), Some(0)), None),
+            (("orders".to_owned(), Some(1)), None),
+            (("orders".to_owned(), Some(2)), None),
+        ]
+    };
+    let subscribed = "org.apache.kafka.common.errors.GroupSubscribedToTopicException: Deleting offsets of a topic is forbidden while the consumer group is actively subscribed to it.";
+    let cases = [
+        (
+            vec![outcome(0, None), outcome(1, None), outcome(2, None)],
+            None,
+            vec![None, None, None],
+        ),
+        (
+            vec![outcome(0, None), outcome(1, Some(86)), outcome(2, None)],
+            Some(86),
+            vec![None, Some(subscribed.to_owned()), None],
+        ),
+        (
+            vec![outcome(0, None), outcome(1, None)],
+            Some(-1),
+            vec![
+                None,
+                None,
+                Some("java.lang.IllegalArgumentException: Offset deletion result for partition \"orders-2\" was not included in the response".to_owned()),
+            ],
+        ),
+    ];
+    for (outcomes, top_level, statuses) in cases {
+        let mut rows = fresh();
+        let actual = apply_offset_deletions(&mut rows, &partitions, &outcomes);
+        let mut expected = fresh();
+        for (row, status) in expected[1..].iter_mut().zip(statuses) {
+            row.1 = status;
+        }
+        check!((actual, rows) == (top_level, expected));
     }
 }
 
@@ -757,7 +795,7 @@ fn the_reset_report_orders_groups_as_kafka_and_exports() {
             vec![(p("orders", 0), 0), (p("orders", 1), 0)],
         ),
     ];
-    let table = reset_report(plans.clone(), &[], vec![], false, false);
+    let table = reset_report(plans.clone(), None, vec![], false, false);
     check!(
         table.human
             == [
@@ -768,16 +806,16 @@ fn the_reset_report_orders_groups_as_kafka_and_exports() {
                 "g2              orders          0          0",
             ]
     );
-    let export = reset_report(plans, &[], vec![], true, false);
+    let export = reset_report(plans, None, vec![], true, false);
     check!(export.human == ["g1,orders,0,0", "g1,orders,1,0", "g2,orders,0,0", ""]);
-    let failure = krabka_client_admin::KafkaError {
+    let failure = KafkaError {
         code: 25,
         name: "UNKNOWN_MEMBER_ID",
         message: None,
     };
     let failed = reset_report(
         vec![("g".to_owned(), vec![(p("orders", 0), 3)])],
-        &[("g".to_owned(), p("orders", 0), failure)],
+        Some(&failure),
         vec![],
         false,
         true,
@@ -787,97 +825,15 @@ fn the_reset_report_orders_groups_as_kafka_and_exports() {
         failed.human
             == [
                 "",
-                "Error: Executing consumer group command failed due to org.apache.kafka.common.errors.UnknownMemberIdException: The coordinator is not aware of this member.",
+                "Error: Executing consumer group command failed due to The coordinator is not aware of this member.",
             ]
     );
 }
 
 #[test]
-fn destructive_actions_without_support_refuse_before_confirming() {
-    // No broker is listening on this address: the command must refuse on the
-    // missing AdminClient call before it connects, prompts or deletes.
-    let connection = ConnectionArgs {
-        bootstrap_server: vec!["127.0.0.1:1".into()],
-        request_timeout_ms: Some(200),
-        ..base().connection
-    };
-    let delete = ConsumerGroupsArgs {
-        delete: Some(true),
-        group: groups(&["g1"]),
-        connection: connection.clone(),
-        ..base()
-    };
+fn a_state_no_consumer_group_has_fails_the_group() {
     check!(
-        block_on(delete.run(false)).unwrap_err().to_string()
-            == "--delete is not supported by this build: it needs AdminClient::delete_consumer_groups, which the pinned krabka-client-rs revision does not have"
-    );
-    let list_state = ConsumerGroupsArgs {
-        list: Some(true),
-        state: Some("stable".into()),
-        connection,
-        ..base()
-    };
-    let error = block_on(list_state.run(false)).unwrap_err();
-    check!(matches!(error, CommandError::Unsupported(_)));
-    check!(error.exit() == crate::exit::Exit::Failure);
-}
-
-#[test]
-fn delete_with_support_asks_for_confirmation_first() {
-    let known = Known(BTreeMap::new());
-    let delete = ConsumerGroupsArgs {
-        delete: Some(true),
-        group: groups(&["g1"]),
-        ..base()
-    };
-    // stdin is not a terminal under the test runner and --yes is absent.
-    let error = block_on(delete.delete_groups(&known)).unwrap_err();
-    check!(matches!(
-        error,
-        CommandError::Refused(crate::safety::Refusal::NonInteractive)
-    ));
-    let yes = ConsumerGroupsArgs {
-        delete: Some(true),
-        group: groups(&["g1"]),
-        confirm: ConfirmArgs {
-            dry_run: false,
-            yes: true,
-        },
-        ..base()
-    };
-    let report = block_on(yes.delete_groups(&known)).unwrap();
-    check!(report.failed);
-    check!(report.human[1] == "Error: Deletion of some consumer groups failed:");
-}
-
-#[test]
-fn list_with_state_renders_the_listing_of_the_seam() {
-    let known = Known(BTreeMap::from([
-        ("active1".to_owned(), description("Stable", vec![])),
-        ("g1".to_owned(), description("Empty", vec![])),
-    ]));
-    let list = ConsumerGroupsArgs {
-        list: Some(true),
-        state: Some("empty".into()),
-        ..base()
-    };
-    let report = block_on(list.list_groups(&known)).unwrap();
-    check!(
-        report.human
-            == [
-                "GROUP                     STATE               ",
-                "g1                        Empty               ",
-            ]
-    );
-    let bad = ConsumerGroupsArgs {
-        list: Some(true),
-        state: Some("bogus".into()),
-        ..base()
-    };
-    check!(
-        block_on(bad.list_groups(&known))
-            .unwrap_err()
-            .to_string()
-            .starts_with("Invalid state list 'bogus'.")
+        member_state("g", "Unknown", 1).unwrap_err().to_string()
+            == "org.apache.kafka.common.KafkaException: Expected a valid consumer group state, but found 'Unknown'."
     );
 }

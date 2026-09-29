@@ -2,16 +2,15 @@
 //!
 //! [`plan`] turns a scenario, the partitions in scope and the group's committed
 //! offsets into the new offset of each partition. Log offsets come through
-//! [`OffsetLookup`], the seam where `AdminClient::list_offsets` goes once the
-//! pinned `krabka-client-rs` has it. Until then every lookup fails with a
-//! "not supported by this build" error, and the scenarios that cannot do
-//! without one fail with that error.
+//! [`OffsetLookup`], which the command backs with `AdminClient::list_offsets`.
 
 use std::collections::BTreeMap;
 
+use krabka_client_admin::OffsetSpec;
+
 use crate::{
     compat::KafkaException,
-    get_offsets::{OffsetLookup, OffsetSpec, PartitionOffset},
+    get_offsets::{OffsetLookup, PartitionOffset},
     jvm::{Table, hash_order, topic_partition_hash},
     output::CommandError,
 };
@@ -98,38 +97,14 @@ async fn required(
 
 /// `checkOffsetsRange`: each requested offset clamped into the partition's
 /// log, with a warning for each clamp.
-///
-/// Without a working lookup the requested offsets pass through unchecked,
-/// with one warning that says so, and a negative request is refused, because
-/// only the log start offset can say what it means.
 async fn clamped(
     lookup: &impl OffsetLookup,
     requested: BTreeMap<Partition, i64>,
     planned: &mut Planned,
 ) -> Result<Plan, CommandError> {
     let partitions = requested.keys().cloned().collect::<Vec<_>>();
-    let bounds = match lookup.offsets(&partitions, OffsetSpec::Earliest).await {
-        Ok(starts) => Some((
-            known(starts)?,
-            known(lookup.offsets(&partitions, OffsetSpec::Latest).await?)?,
-        )),
-        Err(CommandError::Unsupported(reason)) => {
-            if let Some((partition, offset)) = requested.iter().find(|(_, offset)| **offset < 0) {
-                return Err(CommandError::Unsupported(format!(
-                    "New offset ({offset}) for topic partition {} is negative, and {reason}",
-                    name(partition)
-                )));
-            }
-            planned.notices.push(format!(
-                "WARN New offsets are not checked against the log start and end offsets: {reason}"
-            ));
-            None
-        }
-        Err(error) => return Err(error),
-    };
-    let Some((starts, ends)) = bounds else {
-        return Ok(ordered(requested));
-    };
+    let starts = known(lookup.offsets(&partitions, OffsetSpec::Earliest).await?)?;
+    let ends = known(lookup.offsets(&partitions, OffsetSpec::Latest).await?)?;
     let mut plan = Vec::new();
     for (partition, offset) in requested {
         let end = ends.get(&partition).copied().ok_or_else(|| {
@@ -171,7 +146,7 @@ async fn by_timestamp(
     let found = required(
         lookup,
         partitions,
-        OffsetSpec::Timestamp(timestamp),
+        OffsetSpec::ForTimestamp(timestamp),
         "Error getting offset by timestamp of topic partition: ",
     )
     .await?;
@@ -735,81 +710,6 @@ mod tests {
                 "{:?}",
                 case.scenario
             );
-        }
-    }
-
-    #[test]
-    fn without_list_offsets_only_lookup_free_scenarios_proceed() {
-        let unsupported = |what: &str| {
-            format!(
-                "{what} is not supported by this build: it needs AdminClient::list_offsets, which the pinned krabka-client-rs revision does not have"
-            )
-        };
-        let unchecked = format!(
-            "WARN New offsets are not checked against the log start and end offsets: {}",
-            unsupported("reading log offsets (ListOffsets timestamp -2)")
-        );
-        let cases = [
-            (
-                Scenario::ToCurrent,
-                vec![(p("orders", 0), 7), (p("orders", 1), 1)],
-                Ok((vec![(p("orders", 0), 7), (p("orders", 1), 1)], vec![])),
-            ),
-            (
-                Scenario::ToOffset(42),
-                vec![],
-                Ok((
-                    vec![(p("orders", 0), 42), (p("orders", 1), 42)],
-                    vec![unchecked.clone()],
-                )),
-            ),
-            (
-                Scenario::ShiftBy(2),
-                vec![(p("orders", 0), 7), (p("orders", 1), 1)],
-                Ok((
-                    vec![(p("orders", 0), 9), (p("orders", 1), 3)],
-                    vec![unchecked],
-                )),
-            ),
-            (
-                Scenario::ToOffset(-1),
-                vec![],
-                Err(format!(
-                    "New offset (-1) for topic partition orders-0 is negative, and {}",
-                    unsupported("reading log offsets (ListOffsets timestamp -2)")
-                )),
-            ),
-            (
-                Scenario::ToEarliest,
-                vec![],
-                Err(unsupported(
-                    "reading log offsets (ListOffsets timestamp -2)",
-                )),
-            ),
-            (
-                Scenario::ToLatest,
-                vec![],
-                Err(unsupported(
-                    "reading log offsets (ListOffsets timestamp -1)",
-                )),
-            ),
-            (
-                Scenario::ToCurrent,
-                vec![(p("orders", 0), 7)],
-                Err(unsupported(
-                    "reading log offsets (ListOffsets timestamp -1)",
-                )),
-            ),
-            (
-                Scenario::ByDuration(5),
-                vec![],
-                Err(unsupported("reading log offsets (ListOffsets timestamp 5)")),
-            ),
-        ];
-        for (scenario, committed, expected) in cases {
-            let actual = run(&scenario, &committed, &crate::get_offsets::Unavailable)
-                .map(|planned| (planned.plan, planned.notices));
-            check!(actual == expected, "{scenario:?}");
         }
     }
 

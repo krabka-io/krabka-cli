@@ -3,8 +3,6 @@
 //! `Throwable.toString()`. Operators grep those lines, so krabka prints the
 //! same text rather than renaming.
 
-use crate::output::CommandError;
-
 /// Every Kafka error code with its `Errors` name, the fully qualified class
 /// name of its exception and its default message, as `org.apache.kafka.common.protocol.Errors` has
 /// them at Kafka 4.3.1. `NONE` is not an error and is absent.
@@ -873,19 +871,6 @@ impl KafkaException {
     pub fn to_java_string(self) -> String {
         format!("{}: {}", self.class, self.message)
     }
-}
-
-/// The failure of a command whose Kafka counterpart needs an `AdminClient`
-/// call that the pinned `krabka-client-rs` revision does not have.
-///
-/// `what` names the part of the command, and `method` the `AdminClient`
-/// method that it waits on.
-#[must_use]
-pub fn not_supported(what: &str, method: &str) -> CommandError {
-    CommandError::Unsupported(format!(
-        "{what} is not supported by this build: it needs AdminClient::{method}, \
-         which the pinned krabka-client-rs revision does not have"
-    ))
 }
 
 #[cfg(test)]
