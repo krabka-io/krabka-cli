@@ -219,10 +219,6 @@ pub enum CommandError {
     /// a combination of flags that the JVM tool refuses. Exits
     /// [`Exit::Usage`].
     Usage(String),
-    /// The command needs an `AdminClient` call that the pinned
-    /// `krabka-client-rs` revision does not have. See
-    /// [`crate::compat::not_supported`].
-    Unsupported(String),
     /// Any other failure, as a message.
     Other(String),
 }
@@ -234,7 +230,7 @@ impl CommandError {
         match self {
             Self::Refused(refusal) => refusal.exit(),
             Self::Usage(_) => Exit::Usage,
-            Self::Broker { .. } | Self::Unsupported(_) | Self::Other(_) => Exit::Failure,
+            Self::Broker { .. } | Self::Other(_) => Exit::Failure,
         }
     }
 }
@@ -301,9 +297,7 @@ impl fmt::Display for CommandError {
                 }
             }
             Self::Refused(refusal) => f.write_str(refusal.message()),
-            Self::Usage(message) | Self::Unsupported(message) | Self::Other(message) => {
-                f.write_str(message)
-            }
+            Self::Usage(message) | Self::Other(message) => f.write_str(message),
         }
     }
 }
