@@ -305,6 +305,8 @@ fn settings_follow_the_console_producer_defaults() {
                 metadata_max_age_ms: 300_000,
                 metadata_max_idle_ms: 300_000,
                 enable_metrics_push: true,
+                send_buffer: Some(102_400),
+                receive_buffer: Some(32_768),
             })
     );
 }
@@ -401,7 +403,7 @@ fn acks_and_compression_map_to_the_client_values() {
 
 #[test]
 fn unusable_producer_properties_are_refused() {
-    let cases: [(&[(&str, &str)], &str); 11] = [
+    let cases: [(&[(&str, &str)], &str); 12] = [
         (
             &[("acks", "2")],
             "Invalid value 2 for configuration acks: String must be one of: all, -1, 0, 1",
@@ -443,14 +445,77 @@ fn unusable_producer_properties_are_refused() {
             "To use the idempotent producer, max.in.flight.requests.per.connection must be set to at most 5. Current value is 6.",
         ),
         (
-            &[("send.buffer.bytes", "65536")],
-            "send.buffer.bytes=65536 is not supported by this build: the producer needs a send_buffer parameter on krabka-client-producer's Producer::builder()",
+            &[("send.buffer.bytes", "-2")],
+            "Invalid value -2 for configuration send.buffer.bytes: Value must be at least -1",
+        ),
+        (
+            &[("receive.buffer.bytes", "small")],
+            "Invalid value small for configuration receive.buffer.bytes: Not a number of type INT",
         ),
     ];
     for (pairs, expected) in cases {
         assert!(
             Settings::from_properties(&properties(pairs)) == Err(expected.to_owned()),
             "{pairs:?}"
+        );
+    }
+}
+
+/// The send and receive socket buffer sizes, `None` for -1.
+type SocketBuffers = (Option<u64>, Option<u64>);
+
+/// `--socket-buffer-size` and the `send.buffer.bytes` and
+/// `receive.buffer.bytes` properties reach the producer's socket buffers,
+/// with -1 keeping the operating system's buffer as Kafka's `-1` does.
+#[test]
+fn socket_buffer_sizes_reach_the_producer_settings() {
+    let cases: [(&str, &[&str], SocketBuffers); 5] = [
+        (
+            "console-producer defaults",
+            &[],
+            (Some(102_400), Some(32_768)),
+        ),
+        (
+            "--socket-buffer-size",
+            &["--socket-buffer-size", "65536"],
+            (Some(65_536), Some(32_768)),
+        ),
+        (
+            "--socket-buffer-size -1",
+            &["--socket-buffer-size", "-1"],
+            (None, Some(32_768)),
+        ),
+        (
+            "producer properties",
+            &[
+                "--command-property",
+                "send.buffer.bytes=262144",
+                "--command-property",
+                "receive.buffer.bytes=8192",
+            ],
+            (Some(262_144), Some(8_192)),
+        ),
+        (
+            "both -1",
+            &[
+                "--command-property",
+                "send.buffer.bytes=-1",
+                "--command-property",
+                "receive.buffer.bytes=-1",
+            ],
+            (None, None),
+        ),
+    ];
+    for (case, flags, expected) in cases {
+        let argv = ["--bootstrap-server", "h:1", "--topic", "t"]
+            .iter()
+            .chain(flags)
+            .copied()
+            .collect::<Vec<_>>();
+        let settings = Settings::from_properties(&parse(&argv).plan().unwrap().properties).unwrap();
+        assert!(
+            (settings.send_buffer, settings.receive_buffer) == expected,
+            "{case}"
         );
     }
 }

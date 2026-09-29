@@ -6,8 +6,7 @@ use assert2::{assert, check};
 use krabka_metadata::{
     feature_registry,
     metadata_version::{
-        self, KRAFT_VERSION_FEATURE, METADATA_VERSION_FEATURE, METADATA_VERSION_MAX,
-        METADATA_VERSION_MIN,
+        self, KRAFT_VERSION_FEATURE, METADATA_VERSION_FEATURE, METADATA_VERSION_MIN,
     },
 };
 use serde_json::{Value, json};
@@ -54,54 +53,69 @@ fn production_features() -> Vec<&'static str> {
     names
 }
 
+/// Kafka 4.3.1's `MetadataVersion.latestTesting()`, `4.4-IV0`: the last
+/// level that `kafka-storage` lists.
+const KAFKA_LATEST_TESTING: i16 = 31;
+
+/// The levels of `production_features()` that Kafka 4.3.1 maps a release
+/// to: `kraft.version` is 1 from `3.9-IV0`, and every other feature takes
+/// the registry's default.
 fn mapping_lines(level: i16, release: &str) -> Vec<String> {
     std::iter::once(format!("metadata.version={level} ({release})"))
         .chain(production_features().into_iter().map(|name| {
-            let feature = krabka_metadata::feature(name).unwrap();
-            format!("{name}={}", feature.default_level(level))
+            let default = if name == KRAFT_VERSION_FEATURE {
+                i16::from(level >= 21)
+            } else {
+                krabka_metadata::feature(name).unwrap().default_level(level)
+            };
+            format!("{name}={default}")
         }))
         .collect()
 }
 
+/// The stdout of `kafka-storage version-mapping` in the apache/kafka:4.3.1
+/// image.
 #[test]
-fn version_mapping_prints_each_feature_default_at_the_release() {
-    // With no --release-version, kafka-storage maps MetadataVersion.LATEST_PRODUCTION.
-    let latest =
-        metadata_version::from_feature_level(krabka_format::LATEST_PRODUCTION_METADATA_VERSION)
-            .unwrap();
+fn version_mapping_prints_what_kafka_4_3_1_prints() {
+    let lines = |metadata: &str, levels: [i16; 6]| {
+        std::iter::once(metadata.to_owned())
+            .chain(
+                production_features()
+                    .into_iter()
+                    .zip(levels)
+                    .map(|(name, level)| format!("{name}={level}")),
+            )
+            .map(|line| line + "\n")
+            .collect::<String>()
+    };
     let cases = [
-        (vec!["--release-version", "4.0"], "4.0"),
-        (vec!["-r", "3.8.1"], "3.8.1"),
-        (Vec::new(), latest.ivn()),
+        (
+            vec!["--release-version", "4.0"],
+            lines("metadata.version=25 (4.0)", [1, 2, 1, 0, 0, 0]),
+        ),
+        (
+            vec!["-r", "3.8.1"],
+            lines("metadata.version=20 (3.8.1)", [0, 0, 0, 0, 0, 0]),
+        ),
+        (
+            Vec::new(),
+            lines("metadata.version=30 (4.3-IV0)", [1, 2, 1, 1, 1, 1]),
+        ),
     ];
-    for (flags, release) in cases {
-        let level = if flags.is_empty() {
-            krabka_format::LATEST_PRODUCTION_METADATA_VERSION
-        } else {
-            let key = release.split('.').take(2).collect::<Vec<_>>().join(".");
-            metadata_version::from_version_string(&key)
-                .unwrap()
-                .feature_level()
-        };
+    for (flags, expected) in cases {
         let argv = ["storage", "version-mapping"]
             .into_iter()
             .chain(flags.iter().copied())
             .collect::<Vec<_>>();
         let run = krabka(&argv);
-        check!(
-            (
-                run.code,
-                run.stdout.lines().map(str::to_owned).collect::<Vec<_>>()
-            ) == (Some(0), mapping_lines(level, release)),
-            "{flags:?}"
-        );
+        check!((run.code, run.stdout) == (Some(0), expected), "{flags:?}");
     }
 }
 
 #[test]
 fn version_mapping_all_prints_one_row_per_level() {
     let run = krabka(&["storage", "version-mapping", "--all"]);
-    let expected = (METADATA_VERSION_MIN..=METADATA_VERSION_MAX)
+    let expected = (METADATA_VERSION_MIN..=KAFKA_LATEST_TESTING)
         .filter_map(metadata_version::from_feature_level)
         .map(|version| mapping_lines(version.feature_level(), version.ivn()).join(" "))
         .collect::<Vec<_>>();
@@ -113,15 +127,19 @@ fn version_mapping_all_prints_one_row_per_level() {
 fn an_unknown_release_fails_with_kafka_message() {
     let run = krabka(&["storage", "version-mapping", "--release-version", "2.8"]);
     check!(run.code == Some(1));
-    check!(run.stderr.starts_with(
-        "krabka storage: Unknown metadata.version '2.8'. Supported metadata.version are: 3.3-IV3, "
-    ));
+    check!(
+        run.stderr
+            == "krabka storage: Unknown metadata.version '2.8'. Supported metadata.version are: \
+                3.3-IV3, 3.4-IV0, 3.5-IV0, 3.5-IV1, 3.5-IV2, 3.6-IV0, 3.6-IV1, 3.6-IV2, 3.7-IV0, \
+                3.7-IV1, 3.7-IV2, 3.7-IV3, 3.7-IV4, 3.8-IV0, 3.9-IV0, 4.0-IV0, 4.0-IV1, 4.0-IV2, \
+                4.0-IV3, 4.1-IV0, 4.1-IV1, 4.2-IV0, 4.2-IV1, 4.3-IV0, 4.4-IV0\n"
+    );
 }
 
 #[test]
 fn feature_dependencies_renders_the_whole_graph() {
     let run = krabka(&["storage", "feature-dependencies"]);
-    let mut expected = (METADATA_VERSION_MIN..=METADATA_VERSION_MAX)
+    let mut expected = (METADATA_VERSION_MIN..=KAFKA_LATEST_TESTING)
         .filter_map(metadata_version::from_feature_level)
         .map(|version| {
             format!(

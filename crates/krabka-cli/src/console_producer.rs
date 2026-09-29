@@ -25,6 +25,7 @@ use clap::Args;
 use krabka_client_producer::{
     Acks, Compression, Producer, ProducerError, ProducerRecord, RecordSizeLimit,
 };
+use krabka_units::{ByteSize, convert::ByteSizeExt as _};
 use serde_json::json;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -42,7 +43,6 @@ use crate::{
 };
 
 const COMMAND: &str = "krabka console-producer";
-const NOT_SUPPORTED: &str = "not supported by this build";
 const LINE_READER: &str = "org.apache.kafka.tools.LineMessageReader";
 
 /// The flags of `kafka-console-producer`.
@@ -179,6 +179,10 @@ struct Settings {
     metadata_max_age_ms: u64,
     metadata_max_idle_ms: u64,
     enable_metrics_push: bool,
+    /// `send.buffer.bytes`; `None` for -1.
+    send_buffer: Option<u64>,
+    /// `receive.buffer.bytes`; `None` for -1.
+    receive_buffer: Option<u64>,
 }
 
 /// The command line, checked and resolved.
@@ -193,11 +197,6 @@ struct Plan {
     /// The deprecation warnings that the JVM tool prints.
     warnings: Vec<String>,
 }
-
-/// `send.buffer.bytes` as `ConsoleProducerOptions` defaults it. The
-/// producer's client keeps the operating system's socket send buffer, and
-/// `Producer::builder()` has no parameter to set another one.
-const SEND_BUFFER_BYTES: i64 = 102_400;
 
 impl ConsoleProducerArgs {
     /// Checks the command line as `ConsoleProducerOptions.checkArgs` does.
@@ -421,13 +420,6 @@ fn has_port(address: &str) -> bool {
 impl Settings {
     /// Reads and validates the settings, as `new KafkaProducer` does.
     fn from_properties(properties: &Properties) -> Result<Self, String> {
-        let send_buffer =
-            number_property(properties, "send.buffer.bytes", "INT", SEND_BUFFER_BYTES)?;
-        if send_buffer != SEND_BUFFER_BYTES {
-            return Err(format!(
-                "send.buffer.bytes={send_buffer} is {NOT_SUPPORTED}: the producer needs a send_buffer parameter on krabka-client-producer's Producer::builder()"
-            ));
-        }
         if properties.get("transactional.id").is_some() {
             return Err(
                 "Cannot perform a 'send' before completing a call to initTransactions when transactions are enabled."
@@ -468,6 +460,21 @@ impl Settings {
                 Ok(u64::try_from(value).unwrap_or(0))
             }
         };
+        // `send.buffer.bytes` and `receive.buffer.bytes` are at least -1, and
+        // -1 keeps the operating system's socket buffer.
+        let socket_buffer = |name: &str, default: i64| -> Result<Option<u64>, String> {
+            let value = int(name, default)?;
+            if value < -1 {
+                return Err(config_error(
+                    name,
+                    &value.to_string(),
+                    "Value must be at least -1",
+                ));
+            }
+            Ok(u64::try_from(value).ok())
+        };
+        let send_buffer = socket_buffer("send.buffer.bytes", 131_072)?;
+        let receive_buffer = socket_buffer("receive.buffer.bytes", 32_768)?;
         let retries = int("retries", i64::from(i32::MAX))?;
         let retries = i32::try_from(at_least("retries", retries, 0)?).unwrap_or(i32::MAX);
         let enable_idempotence = idempotence(properties, acks, retries)?;
@@ -530,6 +537,8 @@ impl Settings {
             metadata_max_age_ms,
             metadata_max_idle_ms,
             enable_metrics_push: bool_property(properties, "enable.metrics.push", true)?,
+            send_buffer,
+            receive_buffer,
         })
     }
 }
@@ -634,6 +643,8 @@ async fn produce(
         .metadata_max_age(millis(settings.metadata_max_age_ms))
         .metadata_max_idle(millis(settings.metadata_max_idle_ms))
         .enable_metrics_push(settings.enable_metrics_push)
+        .send_buffer(settings.send_buffer.map(ByteSize::from_bytes))
+        .receive_buffer(settings.receive_buffer.map(ByteSize::from_bytes))
         .maybe_security(options.security.clone().map(|security| *security))
         .build();
     let producer = tokio::select! {

@@ -31,12 +31,12 @@ fn plan_of(command_line: &[&str]) -> Result<Plan, String> {
             args.metadata.as_deref(),
             args.release_version.as_deref(),
             &args.feature,
-            UpgradeType::downgrade(args.unsafe_downgrade),
+            downgrade_type(args.unsafe_downgrade),
             args.dry_run,
         ),
         FeaturesCommand::Disable(args) => Plan::disable(
             &args.feature,
-            UpgradeType::downgrade(args.unsafe_downgrade),
+            downgrade_type(args.unsafe_downgrade),
             args.dry_run,
         ),
         other => panic!("not an update: {other:?}"),
@@ -44,42 +44,14 @@ fn plan_of(command_line: &[&str]) -> Result<Plan, String> {
     .and_then(|plan| plan.validate().map(|()| plan))
 }
 
-fn updates(rows: &[(&str, i16, UpgradeType)]) -> BTreeMap<String, Update> {
-    rows.iter()
-        .map(|(name, level, upgrade_type)| {
-            (
-                (*name).to_owned(),
-                Update {
-                    level: *level,
-                    upgrade_type: *upgrade_type,
-                },
-            )
-        })
-        .collect()
+fn update(level: i16, upgrade_type: UpgradeType) -> FeatureUpdate {
+    FeatureUpdate::new(level, upgrade_type).unwrap()
 }
 
-fn release_updates(release: &str, upgrade_type: UpgradeType) -> BTreeMap<String, Update> {
-    let level = resolve_release(release).unwrap().feature_level();
-    std::iter::once((
-        METADATA_VERSION_FEATURE.to_owned(),
-        Update {
-            level,
-            upgrade_type,
-        },
-    ))
-    .chain(production_features().into_iter().filter_map(|feature| {
-        let default = feature.default_level(level);
-        (upgrade_type != UpgradeType::Upgrade || default > 0).then(|| {
-            (
-                feature.name().to_owned(),
-                Update {
-                    level: default,
-                    upgrade_type,
-                },
-            )
-        })
-    }))
-    .collect()
+fn updates(rows: &[(&str, i16, UpgradeType)]) -> BTreeMap<String, FeatureUpdate> {
+    rows.iter()
+        .map(|(name, level, upgrade_type)| ((*name).to_owned(), update(*level, *upgrade_type)))
+        .collect()
 }
 
 const UP: UpgradeType = UpgradeType::Upgrade;
@@ -113,12 +85,39 @@ fn flags_map_to_the_updates_kafka_features_sends() {
         (
             "upgrade --release-version skips level-0 features",
             vec!["upgrade", "--release-version", "4.0", "--dry-run"],
-            plan(Op::Upgrade, &[], release_updates("4.0", UP), true),
+            // `kafka-features version-mapping --release-version 4.0` at
+            // Kafka 4.3.1, less its level-0 features.
+            plan(
+                Op::Upgrade,
+                &[],
+                updates(&[
+                    ("metadata.version", 25, UP),
+                    ("kraft.version", 1, UP),
+                    ("transaction.version", 2, UP),
+                    ("group.version", 1, UP),
+                ]),
+                true,
+            ),
         ),
         (
             "downgrade --release-version keeps level-0 features",
             vec!["downgrade", "--release-version", "3.7"],
-            plan(Op::Downgrade, &[], release_updates("3.7", SAFE), false),
+            // `kafka-features version-mapping --release-version 3.7` at
+            // Kafka 4.3.1.
+            plan(
+                Op::Downgrade,
+                &[],
+                updates(&[
+                    ("metadata.version", 19, SAFE),
+                    ("kraft.version", 0, SAFE),
+                    ("transaction.version", 0, SAFE),
+                    ("group.version", 0, SAFE),
+                    ("eligible.leader.replicas.version", 0, SAFE),
+                    ("share.version", 0, SAFE),
+                    ("streams.version", 0, SAFE),
+                ]),
+                false,
+            ),
         ),
         (
             "upgrade --metadata prints the deprecation notice",
@@ -139,6 +138,11 @@ fn flags_map_to_the_updates_kafka_features_sends() {
             "downgrade --unsafe",
             vec!["downgrade", "--unsafe", "--feature", "group.version=0"],
             plan(Op::Downgrade, &[], updates(&[("group.version", 0, UNSAFE)]), false),
+        ),
+        (
+            "disable --unsafe",
+            vec!["disable", "--unsafe", "--feature", "group.version"],
+            plan(Op::Disable, &[], updates(&[("group.version", 0, UNSAFE)]), false),
         ),
         (
             "disable is level 0",
@@ -288,7 +292,7 @@ fn the_command_line_is_kafka_features_command_line() {
 fn metadata(
     supported: &[(&str, i16, i16)],
     finalized: &[(&str, i16)],
-    epoch: i64,
+    epoch: Option<i64>,
 ) -> FeatureMetadata {
     FeatureMetadata {
         supported: supported
@@ -320,7 +324,7 @@ fn describe_prints_kafka_features_layout() {
             ("share.version", 0, 1),
         ],
         &[("metadata.version", 25), ("transaction.version", 2)],
-        320,
+        Some(320),
     );
     let result = render_describe(&cluster);
     check!(
@@ -346,7 +350,7 @@ fn describe_prints_kafka_features_layout() {
 
 #[test]
 fn describe_without_an_epoch_prints_a_dash() {
-    let result = render_describe(&metadata(&[("group.version", 0, 1)], &[], -1));
+    let result = render_describe(&metadata(&[("group.version", 0, 1)], &[], None));
     check!(
         result.human
             == vec![
@@ -356,119 +360,11 @@ fn describe_without_an_epoch_prints_a_dash() {
     check!(result.data["finalized_features_epoch"] == Value::Null);
 }
 
-fn dependencies_for_tests(name: &str, level: i16) -> &'static [(&'static str, i16)] {
-    match (name, level) {
-        ("group.version", 1) => &[("transaction.version", 2)],
-        _ => &[],
-    }
-}
-
-#[test]
-fn a_dry_run_predicts_the_controller_verdict() {
-    let cluster = metadata(
-        &[
-            ("metadata.version", 7, 25),
-            ("group.version", 0, 1),
-            ("transaction.version", 0, 2),
-            ("kraft.version", 0, 1),
-            ("streams.version", 0, 0),
-        ],
-        &[
-            ("metadata.version", 20),
-            ("group.version", 1),
-            ("kraft.version", 1),
-        ],
-        5,
-    );
-    let failed = |feature: &str, level: i16, message: &str| {
-        Some(format!(
-            "The update failed for all features since the following feature had an error: Invalid update version {level} for feature {feature}. {message}"
-        ))
-    };
-    let cases = [
-        (
-            "an upgrade inside the range",
-            updates(&[("transaction.version", 2, UP), ("metadata.version", 25, UP)]),
-            None,
-        ),
-        (
-            "a level the cluster does not support",
-            updates(&[("transaction.version", 3, UP)]),
-            failed(
-                "transaction.version",
-                3,
-                "Broker only supports versions 0-2",
-            ),
-        ),
-        (
-            "a feature the cluster disables",
-            updates(&[("streams.version", 1, UP)]),
-            failed(
-                "streams.version",
-                1,
-                "Broker does not support this feature.",
-            ),
-        ),
-        (
-            "a feature the cluster does not know",
-            updates(&[("share.version", 1, UP)]),
-            failed("share.version", 1, "Broker does not support this feature."),
-        ),
-        (
-            "an upgrade to a lower level",
-            updates(&[("metadata.version", 19, UP)]),
-            failed(
-                "metadata.version",
-                19,
-                "Can't downgrade the version of this feature without setting the upgrade type to either safe or unsafe downgrade.",
-            ),
-        ),
-        (
-            "a downgrade to a higher level",
-            updates(&[("metadata.version", 21, SAFE)]),
-            failed(
-                "metadata.version",
-                21,
-                "Can't downgrade to a newer version.",
-            ),
-        ),
-        (
-            "a kraft.version downgrade",
-            updates(&[("kraft.version", 0, SAFE)]),
-            failed(
-                "kraft.version",
-                0,
-                "Can't downgrade the version of this feature.",
-            ),
-        ),
-        (
-            "an unmet dependency",
-            updates(&[("group.version", 1, UP), ("transaction.version", 1, UP)]),
-            failed(
-                "group.version",
-                1,
-                "group.version could not be set to 1 because it depends on transaction.version level 2",
-            ),
-        ),
-        (
-            "a dependency met by the same request",
-            updates(&[("group.version", 1, UP), ("transaction.version", 2, UP)]),
-            None,
-        ),
-    ];
-    for (case, requested, expected) in cases {
-        check!(
-            predict_failure(&requested, &cluster, dependencies_for_tests) == expected,
-            "{case}"
-        );
-    }
-}
-
 #[test]
 fn the_report_uses_kafka_features_wording() {
     let row_error = |message: &str| RowError {
-        code: Some(89),
-        name: Some("INVALID_UPDATE_VERSION"),
+        code: 95,
+        name: "INVALID_UPDATE_VERSION",
         message: message.to_owned(),
     };
     let requested = updates(&[("group.version", 1, UP), ("transaction.version", 2, UP)]);
@@ -537,13 +433,16 @@ fn the_report_uses_kafka_features_wording() {
         };
         let result = plan.report(|_| error.map(row_error));
         check!(
-            (result.human.clone(), result.failed)
+            (result.human.clone(), result.failed, result.notices.clone())
                 == (
                     expected
                         .iter()
                         .map(|line| (*line).to_owned())
                         .collect::<Vec<_>>(),
-                    error.is_some()
+                    error.is_some(),
+                    error
+                        .map(|_| vec!["2 out of 2 operation(s) failed.".to_owned()])
+                        .unwrap_or_default(),
                 ),
             "{op:?} dry_run={dry_run}"
         );
@@ -560,8 +459,8 @@ fn the_report_json_names_each_update_and_its_error() {
     };
     let result = plan.report(|name| {
         (name == "share.version").then(|| RowError {
-            code: Some(89),
-            name: Some("INVALID_UPDATE_VERSION"),
+            code: 95,
+            name: "INVALID_UPDATE_VERSION",
             message: "bad".into(),
         })
     });
@@ -577,23 +476,19 @@ fn the_report_json_names_each_update_and_its_error() {
                     "operation": "downgrade",
                     "updates": [
                         {"feature": "group.version", "level": 0, "upgrade_type": "SAFE_DOWNGRADE", "error": null},
-                        {"feature": "share.version", "level": 0, "upgrade_type": "SAFE_DOWNGRADE", "error": {"code": 89, "name": "INVALID_UPDATE_VERSION", "message": "bad"}},
+                        {"feature": "share.version", "level": 0, "upgrade_type": "SAFE_DOWNGRADE", "error": {"code": 95, "name": "INVALID_UPDATE_VERSION", "message": "bad"}},
                     ],
                     "failures": 1,
                 }),
                 true,
             )
+            .with_notices(vec!["1 out of 2 operation(s) failed.".to_owned()])
     );
 }
 
 #[test]
-fn response_errors_reach_each_feature_as_the_admin_client_reports_them() {
+fn results_reach_each_feature_as_feature_command_reads_them() {
     let requested = updates(&[("group.version", 1, UP), ("transaction.version", 2, UP)]);
-    let invalid = |message: Option<&str>| KafkaError {
-        code: 89,
-        name: "INVALID_UPDATE_VERSION",
-        message: message.map(str::to_owned),
-    };
     let row = |code, name, message: &str| {
         Some(RowError {
             code,
@@ -603,67 +498,93 @@ fn response_errors_reach_each_feature_as_the_admin_client_reports_them() {
     };
     let cases = [
         (
-            "a v2 success has no rows",
-            Ok(Vec::new()),
+            "every feature succeeds",
+            Ok(BTreeMap::from([
+                ("group.version".to_owned(), Ok(())),
+                ("transaction.version".to_owned(), Ok(())),
+            ])),
             BTreeMap::from([
                 ("group.version".to_owned(), None),
                 ("transaction.version".to_owned(), None),
             ]),
         ),
         (
-            "per-feature rows",
-            Ok(vec![
-                FeatureUpdateOutcome {
-                    name: "group.version".into(),
-                    error: None,
-                },
-                FeatureUpdateOutcome {
-                    name: "transaction.version".into(),
-                    error: Some(invalid(Some("nope"))),
-                },
-            ]),
+            "one feature fails with the controller's message",
+            Ok(BTreeMap::from([
+                ("group.version".to_owned(), Ok(())),
+                (
+                    "transaction.version".to_owned(),
+                    Err(KafkaError {
+                        code: 95,
+                        name: "UNKNOWN",
+                        message: Some("nope".into()),
+                    }),
+                ),
+            ])),
             BTreeMap::from([
                 ("group.version".to_owned(), None),
                 (
                     "transaction.version".to_owned(),
-                    row(Some(89), Some("INVALID_UPDATE_VERSION"), "nope"),
+                    row(95, "INVALID_UPDATE_VERSION", "nope"),
                 ),
             ]),
         ),
         (
-            "a missing row",
-            Ok(vec![FeatureUpdateOutcome {
-                name: "group.version".into(),
-                error: None,
-            }]),
+            "an error with no message takes Kafka's default message",
+            Ok(BTreeMap::from([
+                ("group.version".to_owned(), Ok(())),
+                (
+                    "transaction.version".to_owned(),
+                    Err(KafkaError {
+                        code: 95,
+                        name: "UNKNOWN",
+                        message: None,
+                    }),
+                ),
+            ])),
             BTreeMap::from([
                 ("group.version".to_owned(), None),
                 (
                     "transaction.version".to_owned(),
                     row(
-                        None,
-                        None,
+                        95,
+                        "INVALID_UPDATE_VERSION",
+                        KafkaException::for_code(95).message(),
+                    ),
+                ),
+            ]),
+        ),
+        (
+            "a feature with no result",
+            Ok(BTreeMap::from([("group.version".to_owned(), Ok(()))])),
+            BTreeMap::from([
+                ("group.version".to_owned(), None),
+                (
+                    "transaction.version".to_owned(),
+                    row(
+                        -1,
+                        "UNKNOWN_SERVER_ERROR",
                         "The controller response did not contain a result for feature transaction.version",
                     ),
                 ),
             ]),
         ),
         (
-            "a top-level error fails every feature",
+            "a failed call fails every feature",
             Err(AdminError::Broker {
                 api: "UpdateFeatures",
-                code: 89,
-                name: "INVALID_UPDATE_VERSION",
-                message: Some("all bad".into()),
+                code: 7,
+                name: "REQUEST_TIMED_OUT",
+                message: Some("timed out".into()),
             }),
             BTreeMap::from([
                 (
                     "group.version".to_owned(),
-                    row(Some(89), Some("INVALID_UPDATE_VERSION"), "all bad"),
+                    row(7, "REQUEST_TIMED_OUT", "timed out"),
                 ),
                 (
                     "transaction.version".to_owned(),
-                    row(Some(89), Some("INVALID_UPDATE_VERSION"), "all bad"),
+                    row(7, "REQUEST_TIMED_OUT", "timed out"),
                 ),
             ]),
         ),
@@ -678,30 +599,18 @@ fn response_errors_reach_each_feature_as_the_admin_client_reports_them() {
 }
 
 #[tokio::test]
-async fn sub_features_the_client_cannot_send_fail_before_connecting() {
-    let cases: &[(&[&str], &str)] = &[
-        (&["describe", "--node-id", "1"], NODE_ID_UNSUPPORTED),
-        (
-            &["describe", "--node-id", "-1"],
-            "Invalid node id -1: must be non-negative.",
-        ),
-        (
-            &["downgrade", "--unsafe", "--feature", "group.version=0"],
-            UNSAFE_UNSUPPORTED,
-        ),
-        (
-            &["disable", "--unsafe", "--feature", "group.version"],
-            UNSAFE_UNSUPPORTED,
-        ),
-    ];
-    for (argv, expected) in cases {
-        // An address nothing listens on: reaching it would fail differently.
-        let argv = ["--bootstrap-server", "127.0.0.1:1"]
-            .iter()
-            .chain(argv.iter())
-            .copied()
-            .collect::<Vec<_>>();
-        let error = parse(&argv).unwrap().run().await.unwrap_err();
-        check!(error.to_string() == *expected, "{argv:?}");
-    }
+async fn a_negative_node_id_fails_before_connecting() {
+    // An address nothing listens on: reaching it would fail differently.
+    let error = parse(&[
+        "--bootstrap-server",
+        "127.0.0.1:1",
+        "describe",
+        "--node-id",
+        "-1",
+    ])
+    .unwrap()
+    .run()
+    .await
+    .unwrap_err();
+    check!(error.to_string() == "Invalid node id -1: must be non-negative.");
 }

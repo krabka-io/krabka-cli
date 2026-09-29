@@ -8,14 +8,17 @@
 //! their errors differently, and [`Dialect`] selects the wording.
 //!
 //! Every value comes from `krabka_metadata::feature_registry()` and the
-//! `metadata.version` table. A feature or a level that krabka does not
-//! register is not printed, even where Kafka 4.3.1 knows it.
+//! `metadata.version` table, bounded to what Kafka 4.3.1 knows. A feature or
+//! a level that krabka does not register is not printed, even where Kafka
+//! 4.3.1 knows it. The table's trunk levels past Kafka 4.3.1's `4.4-IV0` are
+//! not printed or accepted either.
 
 use clap::Args;
 use krabka_metadata::{
     Feature, feature, feature_registry,
     metadata_version::{
-        self, METADATA_VERSION_FEATURE, METADATA_VERSION_MAX, METADATA_VERSION_MIN, MetadataVersion,
+        self, KRAFT_VERSION_FEATURE, METADATA_VERSION_FEATURE, METADATA_VERSION_MIN,
+        MetadataVersion,
     },
 };
 use serde_json::{Value, json};
@@ -33,6 +36,15 @@ const KAFKA_FEATURE_ORDER: &[&str] = &[
     "share.version",
     "streams.version",
 ];
+
+/// Kafka 4.3.1's `MetadataVersion.latestTesting()`, `4.4-IV0`: the highest
+/// level that both tools accept by its `X.Y-IVn` name and list as supported.
+/// They resolve a release with unstable versions enabled.
+const KAFKA_LATEST_TESTING_METADATA_VERSION: i16 = 31;
+
+/// The `metadata.version` level at which Kafka's `KRaftVersion.KRAFT_VERSION_1`
+/// becomes the default, `3.9-IV0`.
+const KRAFT_VERSION_1_METADATA_VERSION: i16 = 21;
 
 /// Which tool's error wording to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,9 +129,29 @@ fn kafka_rank(name: &str) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-/// Every `metadata.version` in the table, lowest level first.
+/// `Feature.defaultLevel`: the level of `feature` that a cluster formatted at
+/// `metadata_level` finalizes. `kraft.version` follows Kafka's
+/// `KRaftVersion`, 1 from `3.9-IV0`, where the registry's default is the
+/// level that `krabka format` writes as a feature record, always 0.
+#[must_use]
+pub fn default_level(feature: &dyn Feature, metadata_level: i16) -> i16 {
+    if feature.name() == KRAFT_VERSION_FEATURE {
+        return i16::from(metadata_level >= KRAFT_VERSION_1_METADATA_VERSION);
+    }
+    feature.default_level(metadata_level)
+}
+
+/// Every `metadata.version` that Kafka 4.3.1 knows, lowest level first:
+/// `MetadataVersion.VERSIONS`, up to `latestTesting()`.
 fn metadata_versions() -> impl Iterator<Item = MetadataVersion> {
-    (METADATA_VERSION_MIN..=METADATA_VERSION_MAX).filter_map(metadata_version::from_feature_level)
+    (METADATA_VERSION_MIN..=KAFKA_LATEST_TESTING_METADATA_VERSION)
+        .filter_map(metadata_version::from_feature_level)
+}
+
+/// `MetadataVersion.fromFeatureLevel` at Kafka 4.3.1: the version of
+/// `level`, or `None` past `latestTesting()`.
+fn known_metadata_version(level: i16) -> Option<MetadataVersion> {
+    metadata_versions().find(|version| version.feature_level() == level)
 }
 
 /// `MetadataVersion.LATEST_PRODUCTION`, which both tools use when no release
@@ -132,12 +164,12 @@ pub fn latest_production_metadata_version() -> MetadataVersion {
 
 /// The name of `level` as `FeatureCommand.levelToString` prints it: the
 /// `X.Y-IVn` name for `metadata.version`, `UNKNOWN <level>` for a
-/// `metadata.version` level that the table does not hold, and the number for
+/// `metadata.version` level that Kafka 4.3.1 does not know, and the number for
 /// any other feature.
 #[must_use]
 pub fn level_to_string(feature: &str, level: i16) -> String {
     if feature == METADATA_VERSION_FEATURE {
-        return metadata_version::from_feature_level(level).map_or_else(
+        return known_metadata_version(level).map_or_else(
             || format!("UNKNOWN {level}"),
             |version| version.ivn().to_owned(),
         );
@@ -145,13 +177,15 @@ pub fn level_to_string(feature: &str, level: i16) -> String {
     level.to_string()
 }
 
-/// Resolves a release string as `MetadataVersion.fromVersionString` does. Only
-/// the first two dot-separated segments count, so `3.8.1` is `3.8`, and a
-/// release without an `-IVn` suffix is the highest level of that release.
+/// Resolves a release string as `MetadataVersion.fromVersionString(release,
+/// true)` does at Kafka 4.3.1. Only the first two dot-separated segments
+/// count, so `3.8.1` is `3.8`. A release without an `-IVn` suffix is the
+/// highest production level of that release, so `4.4` is unknown. An `X.Y-IVn`
+/// name resolves up to `latestTesting()`, `4.4-IV0`.
 ///
 /// # Errors
-/// Returns Kafka's message, which lists every known version, when the table
-/// does not hold the release.
+/// Returns Kafka's message, which lists every known version, when Kafka 4.3.1
+/// does not know the release.
 pub fn resolve_release(release: &str) -> Result<MetadataVersion, String> {
     let segments = release.split('.').collect::<Vec<_>>();
     let key = if segments.len() <= 2 {
@@ -159,15 +193,25 @@ pub fn resolve_release(release: &str) -> Result<MetadataVersion, String> {
     } else {
         segments[..2].join(".")
     };
-    metadata_version::from_version_string(&key).ok_or_else(|| {
-        format!(
-            "Unknown metadata.version '{release}'. Supported metadata.version are: {}",
-            metadata_versions()
-                .map(MetadataVersion::ivn)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    })
+    let production = krabka_format::LATEST_PRODUCTION_METADATA_VERSION;
+    let resolved = metadata_versions().filter(|version| {
+        if key.contains('-') {
+            version.ivn() == key
+        } else {
+            version.short() == key && version.feature_level() <= production
+        }
+    });
+    resolved
+        .max_by_key(|version| version.feature_level())
+        .ok_or_else(|| {
+            format!(
+                "Unknown metadata.version '{release}'. Supported metadata.version are: {}",
+                metadata_versions()
+                    .map(MetadataVersion::ivn)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
 }
 
 /// The feature levels that one release implies.
@@ -189,7 +233,7 @@ impl VersionMapping {
             metadata_version,
             features: production_features()
                 .into_iter()
-                .map(|feature| (feature.name(), feature.default_level(level)))
+                .map(|feature| (feature.name(), default_level(feature, level)))
                 .collect(),
         }
     }
@@ -368,7 +412,7 @@ pub fn feature_dependencies(
     dialect: Dialect,
 ) -> Result<FeatureDependencies, String> {
     if name == METADATA_VERSION_FEATURE {
-        if metadata_version::from_feature_level(level).is_none() {
+        if known_metadata_version(level).is_none() {
             return Err(format!("Unknown metadata.version {level}"));
         }
         return Ok(FeatureDependencies {
