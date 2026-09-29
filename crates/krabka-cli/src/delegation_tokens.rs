@@ -160,7 +160,9 @@ impl DelegationTokensArgs {
                     ),
                 ],
                 json!({"expiry_timestamp_ms": expiry}),
-            ));
+            )
+            // Kafka prints the last line with `printf` and no `%n`.
+            .without_final_newline());
         }
         let period = self.expiry_time_period.unwrap_or(BROKER_DEFAULT);
         let calling = format!(
@@ -207,7 +209,9 @@ impl DelegationTokensArgs {
                 ),
             ],
             json!({"expiry_timestamp_ms": expiry}),
-        ))
+        )
+        // Kafka prints the last line with `printf` and no `%n`.
+        .without_final_newline())
     }
 
     /// Kafka's checks of the flags, in Kafka's order and with Kafka's
@@ -312,10 +316,12 @@ impl DelegationTokensArgs {
     }
 }
 
-/// A time-period flag as the admin options take it: Kafka's `-1`, and any
-/// other negative value, is `None`, which sends `-1`.
+/// A time-period flag as the admin options take it. Kafka's options send the
+/// value as given, so only `-1` maps to `None`, which the client sends as
+/// `-1`; any other value, negative ones included, reaches the broker as
+/// written.
 fn time_period(millis: i64) -> Option<Time> {
-    (millis >= 0).then(|| Time::from_millis(millis))
+    (millis != BROKER_DEFAULT).then(|| Time::from_millis(millis))
 }
 
 async fn create(
@@ -357,9 +363,10 @@ async fn describe(
     owners: &[KafkaPrincipal],
 ) -> Result<CommandResult, CommandError> {
     // Kafka's command passes the parsed owner list, empty when no
-    // --owner-principal is given, to `DescribeDelegationTokenOptions.owners`.
+    // --owner-principal is given, to `DescribeDelegationTokenOptions.owners`,
+    // so the request carries an empty owner list rather than a null one.
     let options = DescribeDelegationTokenOptions {
-        owners: (!owners.is_empty()).then(|| owners.to_vec()),
+        owners: Some(owners.to_vec()),
     };
     let tokens = client
         .describe_delegation_token(&options)

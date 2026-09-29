@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use assert2::{assert, check};
 use clap::Parser;
@@ -266,103 +266,6 @@ fn abort_identifies_the_transaction_as_kafka_does() {
     }
 }
 
-#[tokio::test]
-async fn subcommands_the_pinned_client_cannot_serve_fail_before_connecting() {
-    let cases: [(&[&str], &str); 8] = [
-        (
-            &["list"],
-            "Failed to list transactions: not supported by this build; it needs \
-             AdminClient::list_transactions from a newer krabka-client-rs",
-        ),
-        (
-            &[
-                "list",
-                "--duration-filter",
-                "-1",
-                "--transactional-id-pattern",
-                "pay.*",
-            ],
-            "Failed to list transactions with --duration-filter -1 --transactional-id-pattern \
-             pay.*: not supported by this build; it needs AdminClient::list_transactions from a \
-             newer krabka-client-rs",
-        ),
-        (
-            &[
-                "describe-producers",
-                "--topic",
-                "t",
-                "--partition",
-                "0",
-                "--broker-id",
-                "2",
-            ],
-            "Failed to describe producers for partition t-0 on broker 2: not supported by this \
-             build; it needs AdminClient::describe_producers from a newer krabka-client-rs",
-        ),
-        (
-            &[
-                "abort",
-                "--topic",
-                "t",
-                "--partition",
-                "1",
-                "--start-offset",
-                "9",
-            ],
-            "Failed to validate producer state for partition t-1: not supported by this build; \
-             it needs AdminClient::describe_producers and AdminClient::abort_transaction from a \
-             newer krabka-client-rs",
-        ),
-        (
-            &[
-                "abort",
-                "--topic",
-                "t",
-                "--partition",
-                "1",
-                "--producer-id",
-                "5",
-                "--producer-epoch",
-                "2",
-                "--coordinator-epoch",
-                "3",
-            ],
-            "Failed to abort transaction AbortTransactionSpec(topicPartition=t-1, producerId=5, \
-             producerEpoch=2, coordinatorEpoch=3): not supported by this build; it needs \
-             AdminClient::abort_transaction from a newer krabka-client-rs",
-        ),
-        (
-            &[
-                "abort",
-                "--topic",
-                "t",
-                "--partition",
-                "1",
-                "--producer-id",
-                "5",
-            ],
-            "Missing required argument --producer-epoch",
-        ),
-        (
-            &["find-hanging", "--topic", "t"],
-            "Failed to find hanging transactions older than 15 minutes: not supported by this \
-             build; it needs AdminClient::describe_topics and AdminClient::describe_producers and \
-             AdminClient::list_transactions from a newer krabka-client-rs",
-        ),
-        (
-            &["find-hanging", "--partition", "0", "--broker-id", "1"],
-            "The --partition argument requires --topic to be provided",
-        ),
-    ];
-    for (argv, expected) in cases {
-        // An address that cannot resolve: any attempt to connect fails with a
-        // different message.
-        let argv = [&["--bootstrap-server", "unreachable.invalid:1"][..], argv].concat();
-        let error = parse(&argv).unwrap().run().await.unwrap_err();
-        check!(error.to_string() == expected, "{argv:?}");
-    }
-}
-
 #[test]
 fn find_hanging_needs_a_topic_or_a_broker() {
     let args = FindHangingArgs {
@@ -379,4 +282,260 @@ fn find_hanging_needs_a_topic_or_a_broker() {
                     .into()
             )
     );
+}
+
+fn producer(producer_id: i64, start: Option<i64>, last_timestamp_ms: i64) -> ProducerStateInfo {
+    ProducerStateInfo {
+        producer_id,
+        producer_epoch: 3,
+        last_sequence: 9,
+        last_timestamp_ms,
+        coordinator_epoch: 2,
+        current_txn_start_offset: start,
+    }
+}
+
+#[test]
+fn list_sends_kafkas_filters() {
+    let request = |extra: &[&str]| {
+        let command_line = [&["--bootstrap-server", "h:1", "list"][..], extra].concat();
+        let TransactionsCommand::List(args) = parse(&command_line).unwrap().command else {
+            panic!("expected list");
+        };
+        args.request()
+    };
+    let cases: [(&[&str], ListTransactionsRequest); 3] = [
+        (
+            &[],
+            ListTransactionsRequest {
+                duration_filter: -1,
+                ..Default::default()
+            },
+        ),
+        (
+            &[
+                "--duration-filter",
+                "60000",
+                "--transactional-id-pattern",
+                "pay.*",
+            ],
+            ListTransactionsRequest {
+                duration_filter: 60_000,
+                transactional_id_pattern: Some("pay.*".into()),
+                ..Default::default()
+            },
+        ),
+        // Kafka sends no pattern for an empty one.
+        (
+            &["--transactional-id-pattern", ""],
+            ListTransactionsRequest {
+                duration_filter: -1,
+                ..Default::default()
+            },
+        ),
+    ];
+    for (extra, expected) in cases {
+        check!(request(extra) == expected, "{extra:?}");
+    }
+}
+
+#[test]
+fn list_prints_the_coordinator_of_each_transaction_in_hash_map_order() {
+    let listing = |id: &str, producer_id, state: &str| TransactionListing {
+        transactional_id: id.into(),
+        producer_id,
+        state: state.into(),
+    };
+    let result = listed(vec![
+        (2, vec![listing("b", 7, "Ongoing")]),
+        (
+            1,
+            vec![listing("a", 5, "CompleteCommit"), listing("c", 6, "Dead")],
+        ),
+    ]);
+    check!(
+        result.human
+            == [
+                "TransactionalId\tCoordinator\tProducerId\tTransactionState\t",
+                "a              \t1          \t5         \tCompleteCommit  \t",
+                "c              \t1          \t6         \tUnknown         \t",
+                "b              \t2          \t7         \tOngoing         \t",
+            ]
+    );
+    check!(
+        result.data[2]
+            == json!({"transactional_id": "b", "coordinator": 2, "producer_id": 7, "transaction_state": "Ongoing"})
+    );
+}
+
+#[test]
+fn describe_producers_prints_kafkas_table() {
+    let result = producers_table(&[
+        producer(12, Some(40), 1_700_000_000_000),
+        ProducerStateInfo {
+            coordinator_epoch: -1,
+            ..producer(13, None, 5)
+        },
+    ]);
+    check!(
+        result.human
+            == [
+                "ProducerId\tProducerEpoch\tLatestCoordinatorEpoch\tLastSequence\tLastTimestamp\t\
+                 CurrentTransactionStartOffset\t",
+                "12        \t3            \t2                     \t9           \t1700000000000\t\
+                 40                           \t",
+                "13        \t3            \t-1                    \t9           \t5            \t\
+                 None                         \t",
+            ]
+    );
+}
+
+#[test]
+fn a_producer_state_reads_negative_values_as_kafka_does() {
+    let cases = [
+        (
+            ProducerStateInfo {
+                coordinator_epoch: -7,
+                current_txn_start_offset: Some(-3),
+                ..producer(1, None, 0)
+            },
+            ProducerStateInfo {
+                coordinator_epoch: -1,
+                ..producer(1, None, 0)
+            },
+        ),
+        (producer(1, Some(0), 0), producer(1, Some(0), 0)),
+    ];
+    for (state, expected) in cases {
+        check!(normalized(&state) == expected, "{state:?}");
+    }
+}
+
+#[test]
+fn an_abort_spec_prints_as_kafkas_to_string() {
+    let spec = AbortTransactionSpec {
+        topic: "t".into(),
+        partition: 1,
+        producer_id: 5,
+        producer_epoch: 2,
+        coordinator_epoch: 3,
+    };
+    check!(
+        spec_string(&spec)
+            == "AbortTransactionSpec(topicPartition=t-1, producerId=5, producerEpoch=2, \
+                coordinatorEpoch=3)"
+    );
+}
+
+#[test]
+fn java_casts_and_hashes_match_the_jvm() {
+    check!([java_short(7), java_short(65_535), java_short(32_768)] == [7, -1, -32_768]);
+    check!(
+        [
+            long_hash(0),
+            long_hash(42),
+            long_hash(-1),
+            long_hash(1 << 32)
+        ] == [0, 42, 0, 1]
+    );
+    check!(
+        [java_optional(Some(3)), java_optional(None)]
+            == ["Optional[3]".to_owned(), "Optional.empty".to_owned()]
+    );
+}
+
+#[test]
+fn find_hanging_keeps_only_open_transactions_older_than_the_timeout() {
+    let now = 10_000_000;
+    let states = vec![
+        (
+            ("t".to_owned(), 0),
+            vec![
+                producer(1, Some(5), now - 900_001),
+                producer(2, None, 0),
+                producer(3, Some(9), now - 900_000),
+            ],
+        ),
+        (("t".to_owned(), 1), vec![producer(4, Some(1), 0)]),
+    ];
+    let candidates = open_candidates(states, 2, now, 900_000);
+    check!(
+        candidates
+            // `new HashMap<>(2)` of t-0 (hash 1077) and t-1 (hash 1108)
+            // yields t-1 first.
+            == [
+                OpenTransaction {
+                    partition: ("t".into(), 1),
+                    state: producer(4, Some(1), 0),
+                },
+                OpenTransaction {
+                    partition: ("t".into(), 0),
+                    state: producer(1, Some(5), now - 900_001),
+                },
+            ]
+    );
+}
+
+#[test]
+fn find_hanging_filters_as_kafka_does() {
+    let open = |producer_id, partition| OpenTransaction {
+        partition: ("t".into(), partition),
+        state: producer(producer_id, Some(1), 0),
+    };
+    let by_producer = group_by_producer(vec![
+        open(1, 0),
+        open(2, 0),
+        open(3, 0),
+        open(3, 1),
+        open(4, 0),
+    ]);
+    check!(by_producer.iter().map(|(id, _)| *id).collect::<Vec<_>>() == [1, 2, 3, 4]);
+    let transactional_ids = BTreeMap::from([
+        (2, "gone".to_owned()),
+        (3, "live".to_owned()),
+        (4, "done".to_owned()),
+    ]);
+    let descriptions = BTreeMap::from([
+        ("gone".to_owned(), None),
+        (
+            "live".to_owned(),
+            Some(TransactionDescription {
+                topic_partitions: BTreeSet::from([("t".to_owned(), 1)]),
+                ..description("Ongoing", Some(0))
+            }),
+        ),
+        (
+            "done".to_owned(),
+            Some(TransactionDescription {
+                topic_partitions: BTreeSet::from([("t".to_owned(), 0)]),
+                ..description("PrepareCommit", Some(0))
+            }),
+        ),
+    ]);
+    check!(
+        hanging_transactions(by_producer, &transactional_ids, &descriptions)
+            == [open(1, 0), open(2, 0), open(3, 0)]
+    );
+}
+
+#[test]
+fn find_hanging_prints_kafkas_table() {
+    let hanging = [OpenTransaction {
+        partition: ("orders".into(), 2),
+        state: ProducerStateInfo {
+            coordinator_epoch: -1,
+            ..producer(77, Some(120), 1_000)
+        },
+    }];
+    let result = hanging_table(&hanging, 1_000 + 20 * 60_000 + 59_999);
+    check!(
+        result.human
+            == [
+                "Topic \tPartition\tProducerId\tProducerEpoch\tCoordinatorEpoch\tStartOffset\t\
+                 LastTimestamp\tDuration(min)\t",
+                "orders\t2        \t77        \t3            \t-1              \t120        \t\
+                 1000         \t20           \t",
+            ]
+    );
+    check!(hanging_table(&[], 0).human.len() == 1);
 }
