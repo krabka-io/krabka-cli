@@ -6,28 +6,25 @@
 //! `feature-dependencies`, with the same flags, the same stdout lines and the
 //! same error messages.
 //!
-//! krabka adds two things. First, it rejects an update that the local feature
-//! registry already refuses before it sends the request: an unknown feature
-//! name, a level outside the feature's supported range, and a KIP-1022
-//! dependency that the proposed levels do not meet. Second, `--dry-run` sends
-//! no `UpdateFeatures` request at all. `kafka-features` sends one with
-//! `validateOnly` set, and `AdminClient::update_features` in the pinned
-//! `krabka-client-admin` takes no options, so it cannot set that flag. The dry
-//! run instead reads the cluster's supported and finalized levels and applies
-//! the controller's checks to them. The report has the shape of Kafka's
-//! dry-run report.
+//! `--dry-run` sends the same `UpdateFeatures` request with `validateOnly`
+//! set, and the controller's answer for each feature decides its "can be" or
+//! "Can not" line, as in `kafka-features`. `--unsafe` sends
+//! `UNSAFE_DOWNGRADE`, and `describe --node-id` asks that one node.
 //!
-//! Two `kafka-features` invocations fail with a "not supported by this build"
-//! error that names the missing client call. `downgrade` or `disable` with
-//! `--unsafe` fails, because the client's `FeatureUpdate` has only a
-//! `safe_downgrade` flag and so cannot carry `UNSAFE_DOWNGRADE`. `describe
-//! --node-id` fails, because `AdminClient::describe_features` takes no
-//! `DescribeFeaturesOptions.nodeId`.
+//! krabka adds one thing: it rejects an update that the local feature
+//! registry already refuses before it sends the request. That covers an
+//! unknown feature name and a level outside the feature's supported range
+//! and, except in a dry run, a KIP-1022 dependency that the proposed levels
+//! do not meet. A dry run leaves the dependency check to the controller, whose
+//! validate-only answer is the report.
 
 use std::collections::BTreeMap;
 
 use clap::{Args, Subcommand};
-use krabka_client_admin::{AdminError, FeatureMetadata, FeatureUpdate, FeatureUpdateOutcome};
+use krabka_client_admin::{
+    AdminError, DescribeFeaturesOptions, FeatureMetadata, FeatureUpdate, KafkaError,
+    UpdateFeaturesOptions, UpdateFeaturesResults, UpgradeType,
+};
 use krabka_metadata::{
     feature, feature_registry,
     metadata_version::{KRAFT_VERSION_FEATURE, METADATA_VERSION_FEATURE},
@@ -35,23 +32,14 @@ use krabka_metadata::{
 use serde_json::{Value, json};
 
 use crate::{
+    compat::KafkaException,
     connection::ConnectionArgs,
     feature_catalog::{
-        Dialect, FeatureDependenciesArgs, VersionMappingArgs, level_to_string,
+        Dialect, FeatureDependenciesArgs, VersionMappingArgs, default_level, level_to_string,
         parse_name_and_level, production_features, resolve_release,
     },
     output::{CommandError, CommandResult},
 };
-
-/// The refusal of `--unsafe`, which the pinned client cannot send.
-const UNSAFE_UNSUPPORTED: &str = "--unsafe is not supported by this build: \
-    krabka-client-admin's FeatureUpdate has no UNSAFE_DOWNGRADE upgrade type, only \
-    safe_downgrade, so AdminClient::update_features cannot send an unsafe downgrade";
-
-/// The refusal of `describe --node-id`, which the pinned client cannot send.
-const NODE_ID_UNSUPPORTED: &str = "describe --node-id is not supported by this build: \
-    AdminClient::describe_features in krabka-client-admin takes no node id \
-    (Kafka's DescribeFeaturesOptions.nodeId), so it cannot send DescribeFeatures to one node";
 
 /// The printed notice of `kafka-features upgrade --metadata`, leading space
 /// included.
@@ -152,29 +140,22 @@ struct DisableArgs {
     dry_run: bool,
 }
 
-/// `FeatureUpdate.UpgradeType`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpgradeType {
-    Upgrade,
-    SafeDowngrade,
-    UnsafeDowngrade,
+/// `FeatureCommand.downgradeType`: `UNSAFE_DOWNGRADE` with `--unsafe`, else
+/// `SAFE_DOWNGRADE`.
+const fn downgrade_type(unsafe_downgrade: bool) -> UpgradeType {
+    if unsafe_downgrade {
+        UpgradeType::UnsafeDowngrade
+    } else {
+        UpgradeType::SafeDowngrade
+    }
 }
 
-impl UpgradeType {
-    const fn downgrade(unsafe_downgrade: bool) -> Self {
-        if unsafe_downgrade {
-            Self::UnsafeDowngrade
-        } else {
-            Self::SafeDowngrade
-        }
-    }
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Upgrade => "UPGRADE",
-            Self::SafeDowngrade => "SAFE_DOWNGRADE",
-            Self::UnsafeDowngrade => "UNSAFE_DOWNGRADE",
-        }
+/// The name of the `FeatureUpdate.UpgradeType` constant.
+const fn upgrade_type_name(upgrade_type: UpgradeType) -> &'static str {
+    match upgrade_type {
+        UpgradeType::Upgrade => "UPGRADE",
+        UpgradeType::SafeDowngrade => "SAFE_DOWNGRADE",
+        UpgradeType::UnsafeDowngrade => "UNSAFE_DOWNGRADE",
     }
 }
 
@@ -197,13 +178,6 @@ impl Op {
     }
 }
 
-/// One requested update: `FeatureUpdate(maxVersionLevel, upgradeType)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Update {
-    level: i16,
-    upgrade_type: UpgradeType,
-}
-
 /// What an `upgrade`, `downgrade` or `disable` asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Plan {
@@ -212,15 +186,15 @@ struct Plan {
     /// prints its notice.
     notices: Vec<String>,
     /// The updates, by feature name.
-    updates: BTreeMap<String, Update>,
+    updates: BTreeMap<String, FeatureUpdate>,
     dry_run: bool,
 }
 
 /// Why one feature update failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RowError {
-    code: Option<i16>,
-    name: Option<&'static str>,
+    code: i16,
+    name: &'static str,
     message: String,
 }
 
@@ -243,40 +217,24 @@ impl FeaturesArgs {
                 args.metadata.as_deref(),
                 args.release_version.as_deref(),
                 &args.feature,
-                UpgradeType::downgrade(args.unsafe_downgrade),
+                downgrade_type(args.unsafe_downgrade),
                 args.dry_run,
             )?,
             FeaturesCommand::Disable(args) => Plan::disable(
                 &args.feature,
-                UpgradeType::downgrade(args.unsafe_downgrade),
+                downgrade_type(args.unsafe_downgrade),
                 args.dry_run,
             )?,
         };
         plan.validate()?;
-        if !plan.dry_run
-            && plan
-                .updates
-                .values()
-                .any(|update| update.upgrade_type == UpgradeType::UnsafeDowngrade)
-        {
-            return Err(UNSAFE_UNSUPPORTED.into());
-        }
         let mut client = self.connection.connect("features").await?;
-        if plan.dry_run {
-            let metadata = client.describe_features().await?;
-            let error = predict_failure(&plan.updates, &metadata, registry_dependencies);
-            return Ok(plan
-                .report(|_| {
-                    error.clone().map(|message| RowError {
-                        code: None,
-                        name: None,
-                        message,
-                    })
+        if !plan.dry_run && plan.needs_current_levels() {
+            let metadata = client
+                .describe_features(DescribeFeaturesOptions {
+                    timeout: Some(self.connection.timeout),
+                    node_id: None,
                 })
-                .into_dry_run());
-        }
-        if plan.needs_current_levels() {
-            let metadata = client.describe_features().await?;
+                .await?;
             let proposed = proposed_levels(&plan.updates, &metadata);
             if let Some((name, level, message)) =
                 unmet_dependency(&plan.updates, &proposed, registry_dependencies)
@@ -287,20 +245,22 @@ impl FeaturesArgs {
                 .into());
             }
         }
-        let requests = plan
-            .updates
-            .iter()
-            .map(|(name, update)| FeatureUpdate {
-                name: name.clone(),
-                max_version_level: update.level,
-                safe_downgrade: update.upgrade_type != UpgradeType::Upgrade,
-            })
-            .collect::<Vec<_>>();
         let outcome = client
-            .update_features(&requests, self.connection.timeout)
+            .update_features(
+                &plan.updates,
+                UpdateFeaturesOptions {
+                    timeout: Some(self.connection.timeout),
+                    validate_only: plan.dry_run,
+                },
+            )
             .await;
         let errors = outcome_errors(&plan.updates, outcome)?;
-        Ok(plan.report(|name| errors.get(name).cloned().flatten()))
+        let report = plan.report(|name| errors.get(name).cloned().flatten());
+        Ok(if plan.dry_run {
+            report.into_kafka_dry_run()
+        } else {
+            report
+        })
     }
 }
 
@@ -327,7 +287,7 @@ impl Plan {
                 new_update(level, upgrade_type)?,
             );
             for feature in production_features() {
-                let default = feature.default_level(level);
+                let default = default_level(feature, level);
                 // Kafka does not send an upgrade of a feature to level 0.
                 if upgrade_type != UpgradeType::Upgrade || default > 0 {
                     updates.insert(
@@ -370,13 +330,7 @@ impl Plan {
         let mut updates = BTreeMap::new();
         for name in features {
             if updates
-                .insert(
-                    name.clone(),
-                    Update {
-                        level: 0,
-                        upgrade_type,
-                    },
-                )
+                .insert(name.clone(), new_update(0, upgrade_type)?)
                 .is_some()
             {
                 return Err(format!("Feature {name} was specified more than once."));
@@ -415,10 +369,10 @@ impl Plan {
                 ));
             };
             let (min, max) = registered.supported_range();
-            if !(min..=max).contains(&update.level) {
+            if !(min..=max).contains(&update.max_version_level()) {
                 return Err(format!(
                     "feature {name}={} is outside the supported range {min}..={max}",
-                    update.level
+                    update.max_version_level()
                 ));
             }
         }
@@ -428,9 +382,9 @@ impl Plan {
     /// Whether an update declares a KIP-1022 dependency, which needs the
     /// cluster's current levels to check.
     fn needs_current_levels(&self) -> bool {
-        self.updates
-            .iter()
-            .any(|(name, update)| !registry_dependencies(name, update.level).is_empty())
+        self.updates.iter().any(|(name, update)| {
+            !registry_dependencies(name, update.max_version_level()).is_empty()
+        })
     }
 
     /// The report of `FeatureCommand.update`, one line per feature in name
@@ -446,10 +400,9 @@ impl Plan {
             .notices
             .iter()
             .cloned()
-            .chain(
-                rows.iter()
-                    .map(|(name, update, error)| self.line(name, update.level, error.as_ref())),
-            )
+            .chain(rows.iter().map(|(name, update, error)| {
+                self.line(name, update.max_version_level(), error.as_ref())
+            }))
             .collect();
         let data = json!({
             "operation": self.op.verb(),
@@ -457,8 +410,8 @@ impl Plan {
                 .iter()
                 .map(|(name, update, error)| json!({
                     "feature": name,
-                    "level": update.level,
-                    "upgrade_type": update.upgrade_type.name(),
+                    "level": update.max_version_level(),
+                    "upgrade_type": upgrade_type_name(update.upgrade_type()),
                     "error": error.as_ref().map_or(Value::Null, |error| json!({
                         "code": error.code,
                         "name": error.name,
@@ -468,7 +421,15 @@ impl Plan {
                 .collect::<Vec<_>>(),
             "failures": failures,
         });
-        CommandResult::rows(human, data, failures > 0)
+        let notices = if failures > 0 {
+            vec![format!(
+                "{failures} out of {} operation(s) failed.",
+                self.updates.len()
+            )]
+        } else {
+            Vec::new()
+        };
+        CommandResult::rows(human, data, failures > 0).with_notices(notices)
     }
 
     fn line(&self, name: &str, level: i16, error: Option<&RowError>) -> String {
@@ -494,19 +455,13 @@ impl Plan {
     }
 }
 
-/// `new FeatureUpdate(level, upgradeType)`, which refuses these two values.
-fn new_update(level: i16, upgrade_type: UpgradeType) -> Result<Update, String> {
-    if level == 0 && upgrade_type == UpgradeType::Upgrade {
-        return Err(format!(
-            "The upgradeType flag should be set to SAFE_DOWNGRADE or UNSAFE_DOWNGRADE when the provided maxVersionLevel:{level} is < 1."
-        ));
-    }
-    if level < 0 {
-        return Err("Cannot specify a negative version level.".into());
-    }
-    Ok(Update {
-        level,
-        upgrade_type,
+/// `new FeatureUpdate(level, upgradeType)`, with the message of the
+/// `IllegalArgumentException` it throws for level 0 with `UPGRADE` or a
+/// negative level.
+fn new_update(level: i16, upgrade_type: UpgradeType) -> Result<FeatureUpdate, String> {
+    FeatureUpdate::new(level, upgrade_type).map_err(|error| match error {
+        AdminError::InvalidArgument(message) => message,
+        other => other.to_string(),
     })
 }
 
@@ -520,7 +475,7 @@ fn registry_dependencies(name: &str, level: i16) -> &'static [(&'static str, i16
 /// The levels the controller validates against: the finalized levels, with
 /// the requested updates applied.
 fn proposed_levels(
-    updates: &BTreeMap<String, Update>,
+    updates: &BTreeMap<String, FeatureUpdate>,
     metadata: &FeatureMetadata,
 ) -> BTreeMap<String, i16> {
     metadata
@@ -530,7 +485,7 @@ fn proposed_levels(
         .chain(
             updates
                 .iter()
-                .map(|(name, update)| (name.clone(), update.level)),
+                .map(|(name, update)| (name.clone(), update.max_version_level())),
         )
         .collect()
 }
@@ -539,137 +494,64 @@ fn proposed_levels(
 /// and `kraft.version`: the first update whose dependency `proposed` does not
 /// meet, with the controller's message.
 fn unmet_dependency(
-    updates: &BTreeMap<String, Update>,
+    updates: &BTreeMap<String, FeatureUpdate>,
     proposed: &BTreeMap<String, i16>,
     dependencies: impl Fn(&str, i16) -> &'static [(&'static str, i16)],
 ) -> Option<(String, i16, String)> {
     updates.iter().find_map(|(name, update)| {
-        dependencies(name, update.level)
+        dependencies(name, update.max_version_level())
             .iter()
             .find(|(dependency, min)| proposed.get(*dependency).is_none_or(|level| level < min))
             .map(|(dependency, min)| {
                 (
                     name.clone(),
-                    update.level,
+                    update.max_version_level(),
                     format!(
                         "{name} could not be set to {} because it depends on {dependency} level {min}",
-                        update.level
+                        update.max_version_level()
                     ),
                 )
             })
     })
 }
 
-/// The controller's verdict on `updates` (`FeatureControlManager.updateFeature`),
-/// predicted from the cluster's supported and finalized levels. The controller
-/// fails the whole request on the first bad update, so the prediction is one
-/// message for every feature, or none.
-///
-/// A `metadata.version` downgrade that would lose metadata is not predicted:
-/// the controller decides that from a per-level table that krabka does not
-/// have.
-fn predict_failure(
-    updates: &BTreeMap<String, Update>,
-    metadata: &FeatureMetadata,
-    dependencies: impl Fn(&str, i16) -> &'static [(&'static str, i16)],
-) -> Option<String> {
-    let proposed = proposed_levels(updates, metadata);
-    let reason = |name: &str, update: &Update| -> Option<String> {
-        let current = metadata
-            .finalized
-            .iter()
-            .find(|range| range.name == name)
-            .map_or(0, |range| range.max_version);
-        let (min, max) = metadata
-            .supported
-            .iter()
-            .find(|range| range.name == name)
-            .map_or((0, 0), |range| (range.min_version, range.max_version));
-        if !(min..=max).contains(&update.level) {
-            return Some(if max == 0 {
-                "Broker does not support this feature.".to_owned()
-            } else if min == max {
-                format!("Broker only supports versions {min}")
-            } else {
-                format!("Broker only supports versions {min}-{max}")
-            });
-        }
-        if update.level < current && update.upgrade_type == UpgradeType::Upgrade {
-            return Some(
-                "Can't downgrade the version of this feature without setting the upgrade type to either safe or unsafe downgrade."
-                    .to_owned(),
-            );
-        }
-        if update.level > current && update.upgrade_type != UpgradeType::Upgrade {
-            return Some("Can't downgrade to a newer version.".to_owned());
-        }
-        if name == KRAFT_VERSION_FEATURE
-            && update.upgrade_type != UpgradeType::Upgrade
-            && update.level != current
-        {
-            return Some("Can't downgrade the version of this feature.".to_owned());
-        }
-        None
-    };
-    updates
-        .iter()
-        .find_map(|(name, update)| {
-            reason(name, update).map(|message| (name.clone(), update.level, message))
-        })
-        .or_else(|| unmet_dependency(updates, &proposed, dependencies))
-        .map(|(name, level, message)| {
-            format!(
-                "The update failed for all features since the following feature had an error: Invalid update version {level} for feature {name}. {message}"
-            )
-        })
-}
-
-/// The failure of each requested feature, as `KafkaAdminClient.updateFeatures`
-/// completes each feature's future from the response.
+/// The failure of each requested feature, as `FeatureCommand.update` reads
+/// each future of `UpdateFeaturesResult.values`.
 fn outcome_errors(
-    updates: &BTreeMap<String, Update>,
-    outcome: Result<Vec<FeatureUpdateOutcome>, AdminError>,
+    updates: &BTreeMap<String, FeatureUpdate>,
+    outcome: Result<UpdateFeaturesResults, AdminError>,
 ) -> Result<BTreeMap<String, Option<RowError>>, CommandError> {
     match outcome {
-        // UpdateFeatures v2 answers a success with no per-feature results.
-        Ok(outcomes) if outcomes.is_empty() => {
-            Ok(updates.keys().map(|name| (name.clone(), None)).collect())
-        }
-        Ok(outcomes) => Ok(updates
+        Ok(results) => Ok(updates
             .keys()
             .map(|name| {
-                let error = match outcomes.iter().find(|outcome| &outcome.name == name) {
-                    Some(outcome) => outcome.error.as_ref().map(|error| RowError {
-                        code: Some(error.code),
-                        name: Some(error.name),
-                        message: error
-                            .message
-                            .clone()
-                            .unwrap_or_else(|| error.name.to_owned()),
-                    }),
-                    None => Some(RowError {
-                        code: None,
-                        name: None,
-                        message: format!(
+                let error = match results.get(name) {
+                    Some(Ok(())) => None,
+                    Some(Err(error)) => Some(RowError::from_kafka(error)),
+                    None => Some(RowError::from_kafka(&KafkaError {
+                        code: -1,
+                        name: "UNKNOWN_SERVER_ERROR",
+                        message: Some(format!(
                             "The controller response did not contain a result for feature {name}"
-                        ),
-                    }),
+                        )),
+                    })),
                 };
                 (name.clone(), error)
             })
             .collect()),
-        // A top-level error fails every feature with the same message.
+        // A call that fails as a whole, as at its deadline, fails every
+        // feature's future with the same error.
         Err(AdminError::Broker {
             api: "UpdateFeatures",
             code,
             name,
             message,
         }) => {
-            let error = RowError {
-                code: Some(code),
-                name: Some(name),
-                message: message.unwrap_or_else(|| name.to_owned()),
-            };
+            let error = RowError::from_kafka(&KafkaError {
+                code,
+                name,
+                message,
+            });
             Ok(updates
                 .keys()
                 .map(|feature| (feature.clone(), Some(error.clone())))
@@ -679,19 +561,40 @@ fn outcome_errors(
     }
 }
 
+impl RowError {
+    /// The error of one feature. Its message is the one the controller sent,
+    /// or else the default message of Kafka's exception for the code, as
+    /// `Errors.exception(null)` gives it.
+    fn from_kafka(error: &KafkaError) -> Self {
+        let exception = KafkaException::for_code(error.code);
+        let known = KafkaException::is_known(error.code);
+        Self {
+            code: error.code,
+            name: if known { exception.name() } else { error.name },
+            message: error
+                .message
+                .clone()
+                .unwrap_or_else(|| exception.message().to_owned()),
+        }
+    }
+}
+
 /// `handleDescribe`.
 async fn describe(
     connection: &ConnectionArgs,
     args: &DescribeArgs,
 ) -> Result<CommandResult, CommandError> {
-    if let Some(node_id) = args.node_id {
-        if node_id < 0 {
-            return Err(format!("Invalid node id {node_id}: must be non-negative.").into());
-        }
-        return Err(NODE_ID_UNSUPPORTED.into());
+    if let Some(node_id) = args.node_id.filter(|node_id| *node_id < 0) {
+        return Err(format!("Invalid node id {node_id}: must be non-negative.").into());
     }
-    let mut client = connection.connect("features").await?;
-    Ok(render_describe(&client.describe_features().await?))
+    let client = connection.connect("features").await?;
+    let metadata = client
+        .describe_features(DescribeFeaturesOptions {
+            timeout: Some(connection.timeout),
+            node_id: args.node_id,
+        })
+        .await?;
+    Ok(render_describe(&metadata))
 }
 
 /// One line per supported feature, in name order, in the `printf` layout of
@@ -699,8 +602,7 @@ async fn describe(
 fn render_describe(metadata: &FeatureMetadata) -> CommandResult {
     let mut supported = metadata.supported.iter().collect::<Vec<_>>();
     supported.sort_by(|a, b| a.name.cmp(&b.name));
-    let epoch =
-        (metadata.finalized_features_epoch >= 0).then_some(metadata.finalized_features_epoch);
+    let epoch = metadata.finalized_features_epoch;
     let rows = supported
         .iter()
         .map(|range| {

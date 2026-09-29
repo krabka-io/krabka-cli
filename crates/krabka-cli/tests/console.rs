@@ -1553,6 +1553,53 @@ async fn parse_key_splits_lines_and_a_line_without_the_separator_fails_the_run()
     broker.broker.stop();
 }
 
+/// `--socket-buffer-size`, `send.buffer.bytes` and `receive.buffer.bytes`
+/// size the producer's broker sockets, -1 included, and the records still
+/// reach the broker.
+#[tokio::test(flavor = "multi_thread")]
+async fn socket_buffer_sizes_produce_as_the_defaults_do() {
+    let cases: [&[&str]; 3] = [
+        &["--socket-buffer-size", "65536"],
+        &[
+            "--command-property",
+            "send.buffer.bytes=-1",
+            "--command-property",
+            "receive.buffer.bytes=-1",
+        ],
+        &[
+            "--command-property",
+            "send.buffer.bytes=262144",
+            "--command-property",
+            "receive.buffer.bytes=8192",
+        ],
+    ];
+    for flags in cases {
+        let broker = produce_broker().await;
+        let address = broker.broker.addr.to_string();
+        let argv = [
+            "console-producer",
+            "--bootstrap-server",
+            &address,
+            "--topic",
+            TOPIC,
+        ]
+        .iter()
+        .chain(flags)
+        .copied()
+        .collect::<Vec<_>>();
+        let out = run(args(&argv), b"one\n").await;
+        check!(
+            (out.code, out.stdout.as_str(), out.stderr.as_str()) == (Some(0), "", ""),
+            "{flags:?}"
+        );
+        check!(
+            *broker.records.lock().unwrap() == [(None, Some("one".into()), Vec::new())],
+            "{flags:?}"
+        );
+        broker.broker.stop();
+    }
+}
+
 /// `ignore.error=true` keeps going past a line without the separator, and
 /// sends it as a value with no key.
 #[tokio::test(flavor = "multi_thread")]

@@ -28,20 +28,29 @@ fn a_release_resolves_as_kafka_resolves_it() {
     }
 }
 
+/// Kafka 4.3.1's list of supported releases, from `MetadataVersion.VERSIONS`
+/// up to `latestTesting()`, as `kafka-features version-mapping` prints it.
+const KAFKA_4_3_1_VERSIONS: &str = "3.3-IV3, 3.4-IV0, 3.5-IV0, 3.5-IV1, 3.5-IV2, 3.6-IV0, 3.6-IV1, \
+    3.6-IV2, 3.7-IV0, 3.7-IV1, 3.7-IV2, 3.7-IV3, 3.7-IV4, 3.8-IV0, 3.9-IV0, 4.0-IV0, 4.0-IV1, \
+    4.0-IV2, 4.0-IV3, 4.1-IV0, 4.1-IV1, 4.2-IV0, 4.2-IV1, 4.3-IV0, 4.4-IV0";
+
 #[test]
-fn an_unknown_release_lists_every_known_version() {
-    let known = metadata_versions()
-        .map(MetadataVersion::ivn)
-        .collect::<Vec<_>>()
-        .join(", ");
-    for release in ["2.8", "4.0-IV9", "banana"] {
+fn an_unknown_release_lists_every_version_kafka_4_3_1_knows() {
+    // `4.4` names no production level, and `4.4-IV1` is a trunk level that
+    // Kafka 4.3.1 does not have.
+    for release in [
+        "2.8", "4.0-IV9", "banana", "9.9", "4.4", "4.4-IV1", "4.4-IV2",
+    ] {
         check!(
             level_of(release)
                 == Err(format!(
-                    "Unknown metadata.version '{release}'. Supported metadata.version are: {known}"
-                ))
+                    "Unknown metadata.version '{release}'. Supported metadata.version are: {KAFKA_4_3_1_VERSIONS}"
+                )),
+            "{release}"
         );
     }
+    check!(level_of("4.4-IV0") == Ok(31));
+    check!(level_of("4.3") == Ok(30));
 }
 
 #[test]
@@ -65,25 +74,43 @@ fn production_features_follow_kafka_order_and_omit_metadata_version() {
     check!(names.first() == Some(&"kraft.version"));
 }
 
+/// The stdout of `kafka-features version-mapping` in the apache/kafka:4.3.1
+/// image, one entry per `--release-version`.
 #[test]
-fn version_mapping_prints_each_feature_default_at_the_release() {
-    for release in [None, Some("4.0"), Some("3.8.1"), Some("3.5-IV2")] {
-        let version = release.map_or_else(latest_production_metadata_version, |release| {
-            resolve_release(release).unwrap()
-        });
-        let echoed = release.map_or_else(|| version.ivn().to_owned(), str::to_owned);
-        let expected = std::iter::once(format!(
-            "metadata.version={} ({echoed})",
-            version.feature_level()
-        ))
-        .chain(production_features().iter().map(|feature| {
-            format!(
-                "{}={}",
-                feature.name(),
-                feature.default_level(version.feature_level())
+fn version_mapping_prints_what_kafka_4_3_1_prints() {
+    let lines = |metadata: &str, levels: [i16; 6]| {
+        std::iter::once(metadata.to_owned())
+            .chain(
+                KAFKA_FEATURE_ORDER
+                    .iter()
+                    .zip(levels)
+                    .map(|(name, level)| format!("{name}={level}")),
             )
-        }))
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    };
+    let cases = [
+        (
+            None,
+            lines("metadata.version=30 (4.3-IV0)", [1, 2, 1, 1, 1, 1]),
+        ),
+        (
+            Some("4.0"),
+            lines("metadata.version=25 (4.0)", [1, 2, 1, 0, 0, 0]),
+        ),
+        (
+            Some("3.8.1"),
+            lines("metadata.version=20 (3.8.1)", [0, 0, 0, 0, 0, 0]),
+        ),
+        (
+            Some("3.5-IV2"),
+            lines("metadata.version=11 (3.5-IV2)", [0, 0, 0, 0, 0, 0]),
+        ),
+        (
+            Some("4.4-IV0"),
+            lines("metadata.version=31 (4.4-IV0)", [1, 2, 1, 1, 1, 1]),
+        ),
+    ];
+    for (release, expected) in cases {
         check!(
             version_mapping(release).unwrap().human() == expected,
             "{release:?}"
@@ -94,19 +121,19 @@ fn version_mapping_prints_each_feature_default_at_the_release() {
 #[test]
 fn version_mapping_json_carries_the_same_values() {
     let mapping = version_mapping(Some("4.0")).unwrap();
-    let version = resolve_release("4.0").unwrap();
     check!(
         mapping.json()
             == json!({
                 "release_version": "4.0",
-                "metadata_version": {"level": version.feature_level(), "name": version.ivn()},
-                "features": production_features()
-                    .iter()
-                    .map(|feature| json!({
-                        "feature": feature.name(),
-                        "level": feature.default_level(version.feature_level()),
-                    }))
-                    .collect::<Vec<_>>(),
+                "metadata_version": {"level": 25, "name": "4.0-IV3"},
+                "features": [
+                    {"feature": "kraft.version", "level": 1},
+                    {"feature": "transaction.version", "level": 2},
+                    {"feature": "group.version", "level": 1},
+                    {"feature": "eligible.leader.replicas.version", "level": 0},
+                    {"feature": "share.version", "level": 0},
+                    {"feature": "streams.version", "level": 0},
+                ],
             })
     );
 }
@@ -330,6 +357,9 @@ fn level_to_string_names_metadata_versions_only() {
             latest.ivn().to_owned(),
         ),
         (METADATA_VERSION_FEATURE, 0, "UNKNOWN 0".to_owned()),
+        (METADATA_VERSION_FEATURE, 31, "4.4-IV0".to_owned()),
+        // A trunk level that Kafka 4.3.1's `fromFeatureLevel` does not know.
+        (METADATA_VERSION_FEATURE, 32, "UNKNOWN 32".to_owned()),
         ("group.version", 1, "1".to_owned()),
     ];
     for (feature, level, expected) in cases {

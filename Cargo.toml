@@ -104,10 +104,10 @@ krabka-verified = { git = "https://github.com/krabka-io/krabka-broker", rev = "b
 # same source the broker itself patches, so the broker gets the copy it was
 # built against.
 krabka-schema-serde = { git = "https://github.com/krabka-io/krabka-schema-registry", rev = "b765604529915245a53bec462dfd895e7d772b02" }
-krabka-client-admin = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "791ad1c70aa80638e0b5bcd9a6f5942a2c2f7e51" }
-krabka-client-consumer = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "791ad1c70aa80638e0b5bcd9a6f5942a2c2f7e51" }
-krabka-client-core = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "791ad1c70aa80638e0b5bcd9a6f5942a2c2f7e51" }
-krabka-client-producer = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "791ad1c70aa80638e0b5bcd9a6f5942a2c2f7e51" }
+krabka-client-admin = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "36f0a2bc17bb405d7db81698b1b16b85f0898717" }
+krabka-client-consumer = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "36f0a2bc17bb405d7db81698b1b16b85f0898717" }
+krabka-client-core = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "36f0a2bc17bb405d7db81698b1b16b85f0898717" }
+krabka-client-producer = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "36f0a2bc17bb405d7db81698b1b16b85f0898717" }
 krabka-compression = { git = "https://github.com/krabka-io/krabka-protocol", rev = "c413f6e2011ba68e1a7e152ffd41fcbc6e42f9bf" }
 krabka-ids = { git = "https://github.com/krabka-io/krabka-protocol", rev = "c413f6e2011ba68e1a7e152ffd41fcbc6e42f9bf" }
 krabka-kafka-tap = { git = "https://github.com/krabka-io/krabka-protocol", rev = "c413f6e2011ba68e1a7e152ffd41fcbc6e42f9bf" }
