@@ -66,8 +66,6 @@ pub const DIVERGENCES: &[(&str, Difference)] = &[
 /// fails the day each is fixed.
 #[rustfmt::skip]
 pub const DEFECTS: &[(&str, Difference)] = &[
-    ("unknown-feature", Difference::defect(&[Layer::Stderr], "krabka lists metadata.version among the supported features; Kafka's list omits it, since --feature metadata.version is refused")),
-    ("feature-level-out-of-range", Difference::defect(&[Layer::Stderr], "krabka words it `feature transaction.version=9 is outside the supported range 0..=2`; Kafka says `No feature:transaction.version with feature level 9`")),
 ];
 
 /// What the directories of a row hold before it runs.
