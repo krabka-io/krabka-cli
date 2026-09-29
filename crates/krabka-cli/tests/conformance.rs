@@ -18,7 +18,7 @@
 //!    for byte.
 //!
 //! [`EXPECTED_DIFFERENCES`] declares every row where the two tools differ on
-//! purpose or because the pinned client lacks a call, with the reason.
+//! purpose, with the reason.
 
 #[path = "support/oracle.rs"]
 mod oracle;
@@ -204,41 +204,8 @@ const MATRIX: &[Row] = &[
     Row { phase: Phase::B, ..row("describe-overrides-none", &["--describe", "--topics-with-overrides", "--topic", "fx-bravo"], Expect::Accepted) },
 ];
 
-const DESCRIBE_TOPICS: &str = "needs AdminClient::describe_topics, which the pinned \
-                               krabka-client-admin does not have; krabka fails with a not \
-                               supported error";
-
 /// Every row where the two tools differ, with the reason.
 const EXPECTED_DIFFERENCES: &[(&str, Difference)] = &[
-    (
-        "describe-overrides",
-        Difference::Message(
-            "Kafka 4.3.1 sets a cluster-level min.insync.replicas while ELR is on, so every topic \
-         has a non-default config. The pinned describe_configs returns dynamic topic overrides \
-         only, so krabka does not see it; it needs every DescribeConfigs entry with its source",
-        ),
-    ),
-    ("describe-topic", Difference::Outcome(DESCRIBE_TOPICS)),
-    ("describe-all", Difference::Outcome(DESCRIBE_TOPICS)),
-    (
-        "describe-exclude-internal",
-        Difference::Outcome(DESCRIBE_TOPICS),
-    ),
-    (
-        "describe-under-replicated",
-        Difference::Outcome(DESCRIBE_TOPICS),
-    ),
-    ("describe-unavailable", Difference::Outcome(DESCRIBE_TOPICS)),
-    (
-        "describe-under-min-isr",
-        Difference::Outcome(DESCRIBE_TOPICS),
-    ),
-    ("describe-at-min-isr", Difference::Outcome(DESCRIBE_TOPICS)),
-    ("describe-size-limit", Difference::Outcome(DESCRIBE_TOPICS)),
-    (
-        "describe-zero-topic-id",
-        Difference::Outcome(DESCRIBE_TOPICS),
-    ),
     (
         "alter-with-config",
         Difference::Unordered(
@@ -286,20 +253,6 @@ const EXPECTED_DIFFERENCES: &[(&str, Difference)] = &[
     (
         "dry-run",
         Difference::Outcome("--dry-run is a krabka addition that kafka-topics does not know"),
-    ),
-    (
-        "create-with-assignment",
-        Difference::Outcome(
-            "a replica assignment at create time needs an assignment field in CreateTopicSpec, \
-         which the pinned krabka-client-admin does not have",
-        ),
-    ),
-    (
-        "alter-with-assignment",
-        Difference::Outcome(
-            "a replica assignment for new partitions needs an assignment field in \
-         CreatePartitionsOp, which the pinned krabka-client-admin does not have",
-        ),
     ),
     (
         "delete-without-confirmation",
