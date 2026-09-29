@@ -5,29 +5,34 @@
 //! makes on the command line is made here before any connection, so a
 //! command that Kafka refuses is refused here with the same message.
 //!
-//! The pinned `krabka-client-admin` reads and changes the configs of topics
-//! only, and the quotas of one named user only. Every other entity type,
-//! `--all`, and the default-entity and every-entity quota forms pass the
-//! command-line checks and then fail with a message that names the missing
-//! admin call. See [`unsupported`].
+//! Config resources (topics, brokers, broker loggers, client-metrics
+//! subscriptions and groups) go through `DescribeConfigs` and
+//! `IncrementalAlterConfigs`, client quotas of users, clients and ips through
+//! `DescribeClientQuotas` and `AlterClientQuotas`, and SCRAM credentials
+//! through `DescribeUserScramCredentials` and `AlterUserScramCredentials`,
+//! as `ConfigCommand` sends them.
 
 mod java;
 mod parse;
 mod render;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::{IpAddr, ToSocketAddrs as _},
     path::PathBuf,
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Args, FromArgMatches};
 use krabka_client_admin::{
-    AdminClient, AlterConfigOp, ConfigResource, DescribeConfigsOptions,
-    IncrementalAlterConfigsOptions, KafkaError, QuotaOp, ScramDeletion, ScramUpsertion,
-    diff_user_quotas,
+    AdminClient, AdminError, AlterConfigOp, AlterConfigOpType, ClientQuotaAlteration,
+    ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent, ClientQuotas, Config,
+    ConfigResource, ConfigResourceType, ConfigSource, DescribeClusterOptions,
+    DescribeConfigsOptions, ENTITY_CLIENT_ID, ENTITY_IP, ENTITY_USER,
+    IncrementalAlterConfigsOptions, KafkaError, ListTopicsOptions, QuotaOp, ScramDeletion,
+    ScramUpsertion, groups::ListGroupsOptions,
 };
-use serde_json::{Value, json};
+use krabka_client_core::ClientError;
+use serde_json::json;
 
 use self::{
     parse::{Mechanism, ScramCredential},
@@ -35,6 +40,7 @@ use self::{
 };
 use crate::{
     connection::{ConnectionArgs, Properties},
+    jvm::{Table, hash_order, integer_hash, string_hash},
     output::{CommandError, CommandResult},
 };
 
@@ -264,24 +270,53 @@ impl Args for EntitySelectors {
     }
 }
 
-/// What a checked command line asks for, with everything that the pinned
-/// admin client can do.
+/// What a checked command line asks for.
 #[derive(Debug, Clone, PartialEq)]
 enum Plan {
-    /// Describe the dynamic configs of one topic, or of every topic.
-    DescribeTopics { name: Option<String> },
-    /// Delete, then set, configs of one topic.
-    AlterTopic {
+    /// Describe the configs of one config resource, or of every resource of
+    /// the type, as `describeResourceConfig` does. `entity_type` is
+    /// `topics`, `brokers`, `broker-loggers`, `client-metrics` or `groups`,
+    /// and an empty name is the default broker.
+    DescribeResources {
+        entity_type: &'static str,
+        name: Option<String>,
+        all: bool,
+    },
+    /// Delete, then set, configs of one topic, client-metrics subscription,
+    /// broker (or the default broker, the empty name) or group, as
+    /// `alterResourceConfig` does.
+    AlterResource {
+        entity_type: &'static str,
         name: String,
         deletes: Vec<String>,
         sets: Vec<(String, String)>,
     },
-    /// Describe the quotas and SCRAM credentials of one user.
-    DescribeUser { name: String },
-    /// Set and remove quotas of one user. The values are parsed after the
-    /// current quotas are read, as Kafka does.
-    AlterUserQuotas {
+    /// Delete, then set, levels of loggers of one broker, after checking
+    /// that the broker has each logger.
+    AlterBrokerLoggers {
+        broker: String,
+        deletes: Vec<String>,
+        sets: Vec<(String, String)>,
+    },
+    /// Describe the quotas of the entities that `components` match, then
+    /// the SCRAM credentials of `scram_users`, as
+    /// `describeClientQuotaAndUserScramCredentialConfigs` and
+    /// `describeQuotaConfigs` do.
+    DescribeQuotas {
+        components: Vec<ClientQuotaFilterComponent>,
+        scram_users: Option<Vec<String>>,
+    },
+    /// Set and remove quotas of one entity, as `alterQuotaConfigs` does. The
+    /// values are parsed after the current quotas are read, as Kafka does.
+    /// `entity_type` and `name` are the head of the command line, which the
+    /// completion line names.
+    AlterQuotas {
+        entity_type: &'static str,
         name: String,
+        entity: ClientQuotaEntity,
+        /// The filter that reads the current quotas of the entity, in
+        /// command-line order.
+        components: Vec<ClientQuotaFilterComponent>,
         sets: Vec<(String, String)>,
         deletes: Vec<String>,
     },
@@ -301,21 +336,56 @@ enum ScramChange {
     Delete(Mechanism),
 }
 
-/// The message for a feature that needs an admin call that the pinned
-/// `krabka-client-admin` does not have.
-fn unsupported(subject: &str, needs: &str) -> String {
-    format!(
-        "{subject} is not supported by this build: it needs {needs}, which the pinned krabka-client-admin does not have"
-    )
+/// The entity type of the command line as a static string. Every type is
+/// checked against [`ENTITY_TYPES`] before this is called.
+fn static_type(entity_type: &str) -> &'static str {
+    ENTITY_TYPES
+        .iter()
+        .copied()
+        .find(|known| *known == entity_type)
+        .expect("the entity type is checked")
 }
 
-/// The admin calls that a config resource other than a topic needs.
-const RESOURCE_CONFIG_CALLS: &str = "describe_configs and incremental_alter_configs for a config resource of any type (the pinned calls address topics only), and describe_cluster or list_config_resources to list the entities";
+/// The `ClientQuotaEntity` type of a quota entity type of the command line.
+fn quota_entity_type(entity_type: &str) -> &'static str {
+    match entity_type {
+        USERS => ENTITY_USER,
+        CLIENTS => ENTITY_CLIENT_ID,
+        _ => ENTITY_IP,
+    }
+}
 
-const CLIENT_QUOTA_CALLS: &str = "describe_client_quotas and alter_client_quotas for any client-quota entity (the pinned calls address one named user only)";
+/// The `ClientQuotaEntity` of `alterQuotaConfigs`: each entity type to its
+/// name, `None` for the default entity.
+fn quota_entity(types: &[String], names: &[String]) -> ClientQuotaEntity {
+    types
+        .iter()
+        .zip(names)
+        .map(|(entity_type, name)| {
+            (
+                quota_entity_type(entity_type).to_owned(),
+                (!name.is_empty()).then(|| name.clone()),
+            )
+        })
+        .collect()
+}
 
-fn quota_unsupported(entity: &str) -> String {
-    unsupported(&format!("the quotas of {entity}"), CLIENT_QUOTA_CALLS)
+/// The filter components of `getAllClientQuotasConfigs`: one for each
+/// entity type, the entity that its name names, the default entity for the
+/// empty name, and any entity of the type when it has no name.
+fn quota_components(types: &[String], names: &[String]) -> Vec<ClientQuotaFilterComponent> {
+    types
+        .iter()
+        .enumerate()
+        .map(|(index, entity_type)| {
+            let entity_type = quota_entity_type(entity_type);
+            match names.get(index).map(String::as_str) {
+                Some("") => ClientQuotaFilterComponent::of_default_entity(entity_type),
+                Some(name) => ClientQuotaFilterComponent::of_entity(entity_type, name),
+                None => ClientQuotaFilterComponent::of_entity_type(entity_type),
+            }
+        })
+        .collect()
 }
 
 /// `options.valueOf` on an option that the command line repeats.
@@ -574,39 +644,34 @@ impl ConfigsArgs {
         types: &[String],
         names: &[String],
     ) -> Result<Plan, String> {
-        let all = self.all.is_some();
         match head {
-            TOPICS => {
+            TOPICS | BROKERS | BROKER_LOGGERS | CLIENT_METRICS | GROUPS => {
                 let name = names.first().cloned();
-                if !all && let Some(name) = &name {
+                if head == TOPICS
+                    && let Some(name) = &name
+                {
                     parse::topic_name(name)?;
                 }
-                if all {
-                    return Err(unsupported(
-                        "--describe --all",
-                        "describe_configs that returns every config source, not only dynamic topic overrides",
-                    ));
-                }
-                Ok(Plan::DescribeTopics { name })
+                Ok(Plan::DescribeResources {
+                    entity_type: static_type(head),
+                    name,
+                    all: self.all.is_some(),
+                })
             }
-            BROKERS | BROKER_LOGGERS | CLIENT_METRICS | GROUPS => Err(unsupported(
-                &format!("--entity-type {head}"),
-                RESOURCE_CONFIG_CALLS,
-            )),
             _ => {
                 if names.len() > types.len() {
                     return Err("More entity names specified than entity types".into());
                 }
-                match (head, types.len(), names) {
-                    (USERS, 1, [name]) if !name.is_empty() => {
-                        Ok(Plan::DescribeUser { name: name.clone() })
-                    }
-                    (USERS, 1, []) => Err(quota_unsupported("every user")),
-                    (USERS, 1, _) => Err(quota_unsupported("the default user")),
-                    (IPS, _, _) => Err(quota_unsupported("an ip")),
-                    (_, 2, _) => Err(quota_unsupported("a user's clients")),
-                    _ => Err(quota_unsupported("a client")),
-                }
+                // Kafka describes SCRAM credentials only for users, and not
+                // for the default user.
+                let scram_users = (head != IPS
+                    && !types.iter().any(|entity_type| entity_type == CLIENTS)
+                    && !names.iter().any(String::is_empty))
+                .then(|| names.to_vec());
+                Ok(Plan::DescribeQuotas {
+                    components: quota_components(types, names),
+                    scram_users,
+                })
             }
         }
     }
@@ -616,10 +681,11 @@ impl ConfigsArgs {
     /// `ConfigCommand.parseConfigsToBeAdded` fills, and checked by
     /// `validatePropsKey`.
     ///
+    /// The keys are checked in the order of the `Properties`, and returned in
+    /// the order of the Scala `Map` that `alterConfig` copies them into:
+    /// the same order up to four keys, and a Scala `HashMap`'s above that.
     /// The order decides the order of the operations in the request and of
-    /// the keys that an error message lists. It is exact for up to four keys.
-    /// Above that Kafka copies the keys into a Scala hash map, whose order
-    /// this does not model.
+    /// the keys that an error message lists.
     fn configs_to_add(&self) -> Result<Vec<(String, String)>, String> {
         let mut configs = BTreeMap::new();
         if let Some(path) = single(&self.add_config_file, "add-config-file")? {
@@ -640,7 +706,7 @@ impl ConfigsArgs {
         for key in &order {
             parse::config_key(key)?;
         }
-        Ok(order
+        Ok(java::scala_set_order(order)
             .into_iter()
             .map(|key| {
                 let value = configs[&key].clone();
@@ -659,25 +725,26 @@ impl ConfigsArgs {
             .collect::<Vec<_>>();
         let name = names[0].clone();
         match head {
-            TOPICS => Ok(Plan::AlterTopic {
-                name,
-                deletes,
-                sets: adds,
-            }),
-            BROKERS => {
-                if !name.is_empty() {
+            TOPICS | CLIENT_METRICS | BROKERS | GROUPS => {
+                if head == BROKERS && !name.is_empty() {
                     java::parse_int(&name).map_err(|_| {
                         format!(
                             "The entity name for {head} must be a valid integer broker id, found: {name}"
                         )
                     })?;
                 }
-                Err(unsupported("--entity-type brokers", RESOURCE_CONFIG_CALLS))
+                Ok(Plan::AlterResource {
+                    entity_type: static_type(head),
+                    name,
+                    deletes,
+                    sets: adds,
+                })
             }
-            BROKER_LOGGERS | CLIENT_METRICS | GROUPS => Err(unsupported(
-                &format!("--entity-type {head}"),
-                RESOURCE_CONFIG_CALLS,
-            )),
+            BROKER_LOGGERS => Ok(Plan::AlterBrokerLoggers {
+                broker: name,
+                deletes,
+                sets: adds,
+            }),
             IPS => {
                 let unknown = adds
                     .iter()
@@ -691,7 +758,14 @@ impl ConfigsArgs {
                         "Only connection quota configs can be added for '{IPS}' using --bootstrap-server. Unexpected config names: {unknown}"
                     ));
                 }
-                Err(quota_unsupported("an ip"))
+                Ok(Plan::AlterQuotas {
+                    entity_type: IPS,
+                    name,
+                    entity: quota_entity(types, names),
+                    components: quota_components(types, names),
+                    sets: adds,
+                    deletes,
+                })
             }
             _ => Self::alter_user_or_client_plan(head, types, names, adds, deletes),
         }
@@ -771,19 +845,14 @@ impl ConfigsArgs {
             }
         }
         if has_quota {
-            return if types.len() == 2 {
-                Err(quota_unsupported("a user's clients"))
-            } else if head == CLIENTS {
-                Err(quota_unsupported("a client"))
-            } else if name.is_empty() {
-                Err(quota_unsupported("the default user"))
-            } else {
-                Ok(Plan::AlterUserQuotas {
-                    name,
-                    sets: adds,
-                    deletes,
-                })
-            };
+            return Ok(Plan::AlterQuotas {
+                entity_type: static_type(head),
+                name,
+                entity: quota_entity(types, names),
+                components: quota_components(types, names),
+                sets: adds,
+                deletes,
+            });
         }
         let mut changes = scram_deletes
             .iter()
@@ -862,36 +931,69 @@ fn completed(entity_type: &str, name: &str) -> CommandResult {
 impl Plan {
     async fn execute(self, client: &mut AdminClient) -> Result<CommandResult, CommandError> {
         match self {
-            Self::DescribeTopics { name } => describe_topics(client, name).await,
-            Self::AlterTopic {
+            Self::DescribeResources {
+                entity_type,
+                name,
+                all,
+            } => describe_resources(client, entity_type, name, all).await,
+            Self::AlterResource {
+                entity_type,
                 name,
                 deletes,
                 sets,
             } => {
-                let ops = deletes
-                    .into_iter()
-                    .map(AlterConfigOp::delete)
-                    .chain(
-                        sets.into_iter()
-                            .map(|(key, value)| AlterConfigOp::set(key, value)),
-                    )
-                    .collect::<Vec<_>>();
-                let changes = BTreeMap::from([(ConfigResource::topic(&name), ops)]);
-                let outcomes = client
-                    .incremental_alter_configs(&changes, IncrementalAlterConfigsOptions::default())
-                    .await?;
-                if let Some(error) = outcomes.into_values().find_map(Result::err) {
-                    return Err(broker_error("IncrementalAlterConfigs", error));
-                }
-                Ok(completed(TOPICS, &name))
+                let resource = config_resource(entity_type, &name);
+                alter_resource(client, resource, deletes, sets)
+                    .await
+                    .map_err(|error| {
+                        if error.code == UNSUPPORTED_VERSION {
+                            CommandError::Other(INCREMENTAL_ALTER_CONFIGS_UNSUPPORTED.into())
+                        } else {
+                            broker_error("IncrementalAlterConfigs", error)
+                        }
+                    })?;
+                Ok(completed(entity_type, &name))
             }
-            Self::DescribeUser { name } => describe_user(client, name).await,
-            Self::AlterUserQuotas {
+            Self::AlterBrokerLoggers {
+                broker,
+                deletes,
+                sets,
+            } => {
+                let resource = config_resource(BROKER_LOGGERS, &broker);
+                let loggers = resource_config(client, &resource, false).await?;
+                let invalid = deletes
+                    .iter()
+                    .map(String::as_str)
+                    .chain(sets.iter().map(|(key, _)| key.as_str()))
+                    .filter(|logger| !loggers.entries.contains_key(*logger))
+                    .collect::<Vec<_>>();
+                if !invalid.is_empty() {
+                    return Err(format!("Invalid broker logger(s): {}", invalid.join(",")).into());
+                }
+                alter_resource(client, resource, deletes, sets)
+                    .await
+                    .map_err(|error| broker_error("IncrementalAlterConfigs", error))?;
+                Ok(completed(BROKER_LOGGERS, &broker))
+            }
+            Self::DescribeQuotas {
+                components,
+                scram_users,
+            } => describe_quotas(client, components, scram_users).await,
+            Self::AlterQuotas {
+                entity_type,
                 name,
+                entity,
+                components,
                 sets,
                 deletes,
             } => {
-                let current = client.describe_user_quotas(&name).await?;
+                let filter = ClientQuotaFilter::contains_only(components);
+                let described = client.describe_client_quotas(&filter).await?;
+                let current = quota_order(&described)
+                    .into_iter()
+                    .next()
+                    .map(|(_, values)| values.clone())
+                    .unwrap_or_default();
                 let invalid = deletes
                     .iter()
                     .filter(|key| !current.contains_key(key.as_str()))
@@ -900,11 +1002,17 @@ impl Plan {
                 if !invalid.is_empty() {
                     return Err(format!("Invalid config(s): {}", invalid.join(",")).into());
                 }
-                let ops = quota_ops(&current, &sets, &deletes)?;
-                if let Some(error) = client.alter_user_quotas(&name, &ops, false).await? {
+                let alteration = ClientQuotaAlteration {
+                    entity,
+                    ops: quota_ops(&sets, &deletes)?,
+                };
+                let results = client
+                    .alter_client_quotas(std::slice::from_ref(&alteration), false)
+                    .await?;
+                if let Some(error) = results.into_values().find_map(Result::err) {
                     return Err(broker_error("AlterClientQuotas", error));
                 }
-                Ok(completed(USERS, &name))
+                Ok(completed(entity_type, &name))
             }
             Self::AlterUserScram {
                 entity_type,
@@ -959,70 +1067,307 @@ impl Plan {
     }
 }
 
-/// The quota changes for a user whose quotas are `current`: the `QuotaOp`
-/// list that `diff_user_quotas` computes from `current` to the quotas after
-/// `sets` and `deletes`.
-fn quota_ops(
-    current: &krabka_client_admin::UserQuotaConfig,
-    sets: &[(String, String)],
-    deletes: &[String],
-) -> Result<Vec<QuotaOp>, String> {
-    let mut desired = current.clone();
-    for (key, value) in sets {
-        let parsed = java::parse_double(value)
-            .ok_or_else(|| format!("Cannot parse quota configuration value for {key}: {value}"))?;
-        desired.insert(key.clone(), parsed);
-    }
-    for key in deletes {
-        desired.remove(key);
-    }
-    Ok(diff_user_quotas(current, &desired))
+/// `UNSUPPORTED_VERSION`.
+const UNSUPPORTED_VERSION: i16 = 35;
+
+/// `CLUSTER_AUTHORIZATION_FAILED`.
+const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
+
+/// What `alterConfig` prints when the cluster does not support
+/// `IncrementalAlterConfigs`.
+const INCREMENTAL_ALTER_CONFIGS_UNSUPPORTED: &str = "The INCREMENTAL_ALTER_CONFIGS API is not supported by the cluster. The API is supported starting from version 2.3.0. You may want to use an older version of this tool to interact with your cluster, or upgrade your brokers to version 2.3.0 or newer to avoid this error.";
+
+/// The config resource of an entity of the command line.
+fn config_resource(entity_type: &str, name: &str) -> ConfigResource {
+    let resource_type = match entity_type {
+        TOPICS => ConfigResourceType::Topic,
+        BROKERS => ConfigResourceType::Broker,
+        BROKER_LOGGERS => ConfigResourceType::BrokerLogger,
+        CLIENT_METRICS => ConfigResourceType::ClientMetrics,
+        _ => ConfigResourceType::Group,
+    };
+    ConfigResource::new(resource_type, name)
 }
 
-async fn describe_topics(
+/// The source of the configs that `--describe` without `--all` lists for a
+/// resource, as `getResourceConfig` picks it. Broker loggers list every
+/// entry.
+fn dynamic_source(resource: &ConfigResource) -> Option<ConfigSource> {
+    match resource.resource_type {
+        ConfigResourceType::BrokerLogger => None,
+        _ => resource.dynamic_config_source(),
+    }
+}
+
+/// `alterResourceConfig`: one `IncrementalAlterConfigs` request that deletes
+/// `deletes`, then sets `sets`. A delete carries the empty value, as the
+/// `ConfigEntry(k, "")` that Kafka builds for it does.
+async fn alter_resource(
     client: &mut AdminClient,
-    name: Option<String>,
-) -> Result<CommandResult, CommandError> {
-    let metadata = client.metadata(&[]).await?;
-    let topics = metadata
-        .topics
-        .iter()
-        .filter(|topic| topic.error.is_none())
-        .map(|topic| topic.name.as_str())
+    resource: ConfigResource,
+    deletes: Vec<String>,
+    sets: Vec<(String, String)>,
+) -> Result<(), KafkaError> {
+    let ops = deletes
+        .into_iter()
+        .map(|name| AlterConfigOp {
+            name,
+            value: Some(String::new()),
+            op_type: AlterConfigOpType::Delete,
+        })
+        .chain(
+            sets.into_iter()
+                .map(|(key, value)| AlterConfigOp::set(key, value)),
+        )
         .collect::<Vec<_>>();
-    let entities = match &name {
-        Some(name) if !topics.contains(&name.as_str()) => {
-            return Ok(CommandResult::success(
-                vec![render::missing(TOPICS, name)],
-                json!([{"entity_type": TOPICS, "entity_name": name, "exists": false, "configs": []}]),
-            ));
-        }
-        Some(name) => vec![name.clone()],
-        None => java::hash_map_order(topics.iter().copied(), None)
+    let changes = BTreeMap::from([(resource, ops)]);
+    let outcomes = client
+        .incremental_alter_configs(&changes, IncrementalAlterConfigsOptions::default())
+        .await
+        .map_err(|error| admin_kafka_error(&error))?;
+    outcomes
+        .into_values()
+        .find_map(Result::err)
+        .map_or(Ok(()), Err)
+}
+
+/// The Kafka error of a call that failed as a whole.
+fn admin_kafka_error(error: &AdminError) -> KafkaError {
+    match error {
+        AdminError::Broker {
+            code,
+            name,
+            message,
+            ..
+        } => KafkaError {
+            code: *code,
+            name,
+            message: message.clone(),
+        },
+        AdminError::Transport(ClientError::IncompatibleVersion { .. }) => KafkaError {
+            code: UNSUPPORTED_VERSION,
+            name: "UNSUPPORTED_VERSION",
+            message: Some(error.to_string()),
+        },
+        other => KafkaError {
+            code: -1,
+            name: "UNKNOWN_SERVER_ERROR",
+            message: Some(other.to_string()),
+        },
+    }
+}
+
+/// `getResourceConfig` up to its filter: the configs of one resource.
+async fn resource_config(
+    client: &AdminClient,
+    resource: &ConfigResource,
+    include_synonyms: bool,
+) -> Result<Config, CommandError> {
+    let options = DescribeConfigsOptions {
+        include_synonyms,
+        ..Default::default()
+    };
+    match client
+        .describe_configs(std::slice::from_ref(resource), options)
+        .await?
+        .remove(resource)
+    {
+        Some(Ok(config)) => Ok(config),
+        Some(Err(error)) => Err(broker_error("DescribeConfigs", error)),
+        None => Err(format!("DescribeConfigs gave no result for {resource:?}").into()),
+    }
+}
+
+/// The ops of `alterQuotaConfigs`: a set for each added config, in the
+/// order of the configs, then a removal for each deleted one.
+fn quota_ops(sets: &[(String, String)], deletes: &[String]) -> Result<Vec<QuotaOp>, String> {
+    let mut ops = Vec::new();
+    for (key, value) in sets {
+        let value = java::parse_double(value)
+            .ok_or_else(|| format!("Cannot parse quota configuration value for {key}: {value}"))?;
+        ops.push(QuotaOp::Set {
+            key: key.clone(),
+            value,
+        });
+    }
+    ops.extend(
+        deletes
+            .iter()
+            .map(|key| QuotaOp::Remove { key: key.clone() }),
+    );
+    Ok(ops)
+}
+
+/// `ClientQuotaEntity.hashCode`: `Objects.hash(entries)`, where the hash of
+/// a map is the sum of `key.hashCode() ^ value.hashCode()`, a null name
+/// hashing to 0.
+fn quota_entity_hash(entity: &ClientQuotaEntity) -> i32 {
+    let entries = entity.iter().fold(0_i32, |sum, (entity_type, name)| {
+        sum.wrapping_add(string_hash(entity_type) ^ name.as_deref().map_or(0, string_hash))
+    });
+    31_i32.wrapping_add(entries)
+}
+
+/// The entities of a describe in the order of the `HashMap` that
+/// `DescribeClientQuotasResponse.complete` fills.
+fn quota_order(quotas: &ClientQuotas) -> Vec<(&ClientQuotaEntity, &BTreeMap<String, f64>)> {
+    hash_order(
+        quotas.iter().collect(),
+        Table::WithCapacity(quotas.len()),
+        |(entity, _)| quota_entity_hash(entity),
+    )
+}
+
+/// Every node id of the cluster, in the order of the `HashMap` that
+/// `DescribeClusterResponse.nodes` collects.
+async fn broker_ids(client: &AdminClient) -> Result<Vec<String>, CommandError> {
+    let cluster = client
+        .describe_cluster(DescribeClusterOptions::default())
+        .await?;
+    let ids = cluster.nodes.iter().map(|node| node.id).collect::<Vec<_>>();
+    Ok(hash_order(ids, Table::Default, |id| integer_hash(*id))
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect())
+}
+
+/// Every topic name, internal ones included, in the order of the key set of
+/// the `HashMap` that `listTopics` fills.
+async fn topic_names(client: &AdminClient) -> Result<Vec<String>, CommandError> {
+    let topics = client
+        .list_topics(ListTopicsOptions {
+            list_internal: true,
+        })
+        .await?;
+    Ok(
+        java::hash_map_order(topics.keys().map(String::as_str), None)
             .into_iter()
             .map(str::to_owned)
             .collect(),
+    )
+}
+
+/// The names of the client-metrics subscriptions, in the order of the
+/// answer.
+async fn client_metrics_names(client: &AdminClient) -> Result<Vec<String>, CommandError> {
+    let types = BTreeSet::from([ConfigResourceType::ClientMetrics]);
+    Ok(client
+        .list_config_resources(&types)
+        .await?
+        .into_iter()
+        .map(|resource| resource.name)
+        .collect())
+}
+
+/// Every group id that `listGroups().all` gives.
+async fn group_ids(client: &AdminClient) -> Result<Vec<String>, CommandError> {
+    let listed = client.list_groups(&ListGroupsOptions::default()).await?;
+    Ok(listed
+        .all()
+        .map_err(|failure| broker_error("ListGroups", failure.error))?
+        .into_iter()
+        .map(|group| group.group_id)
+        .collect())
+}
+
+/// `listGroupConfigResources`: the names of the group config resources, or
+/// `None` for a broker that does not support listing them (KIP-1142) or
+/// does not authorize it.
+async fn group_config_names(client: &AdminClient) -> Result<Option<Vec<String>>, CommandError> {
+    let types = BTreeSet::from([ConfigResourceType::Group]);
+    match client.list_config_resources(&types).await {
+        Ok(resources) => Ok(Some(
+            resources
+                .into_iter()
+                .map(|resource| resource.name)
+                .collect(),
+        )),
+        Err(error)
+            if matches!(
+                admin_kafka_error(&error).code,
+                UNSUPPORTED_VERSION | CLUSTER_AUTHORIZATION_FAILED
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether the entity that `--describe` names exists, as the checks of
+/// `describeResourceConfig` decide before any config is read.
+async fn entity_exists(
+    client: &AdminClient,
+    entity_type: &str,
+    name: &str,
+) -> Result<bool, CommandError> {
+    Ok(match entity_type {
+        TOPICS => topic_names(client).await?.iter().any(|topic| topic == name),
+        BROKERS | BROKER_LOGGERS => {
+            broker_ids(client).await?.iter().any(|id| id == name) || name.is_empty()
+        }
+        CLIENT_METRICS => client_metrics_names(client)
+            .await?
+            .iter()
+            .any(|resource| resource == name),
+        _ => {
+            group_ids(client).await?.iter().any(|group| group == name)
+                || !group_config_names(client)
+                    .await?
+                    .is_some_and(|names| names.iter().all(|resource| resource != name))
+        }
+    })
+}
+
+/// `describeResourceConfig`.
+async fn describe_resources(
+    client: &AdminClient,
+    entity_type: &'static str,
+    name: Option<String>,
+    all: bool,
+) -> Result<CommandResult, CommandError> {
+    if !all
+        && let Some(name) = &name
+        && !entity_exists(client, entity_type, name).await?
+    {
+        return Ok(CommandResult::success(
+            vec![render::missing(entity_type, name)],
+            json!([{"entity_type": entity_type, "entity_name": name, "exists": false, "configs": []}]),
+        ));
+    }
+    let entities = match name {
+        Some(name) => vec![name],
+        None => match entity_type {
+            TOPICS => topic_names(client).await?,
+            BROKERS | BROKER_LOGGERS => {
+                let mut ids = broker_ids(client).await?;
+                ids.push(String::new());
+                ids
+            }
+            CLIENT_METRICS => client_metrics_names(client).await?,
+            _ => {
+                let mut ids = group_ids(client).await?;
+                ids.extend(group_config_names(client).await?.unwrap_or_default());
+                java::scala_set_order(ids)
+            }
+        },
     };
     let mut human = Vec::new();
     let mut data = Vec::new();
     for entity in entities {
-        let resource = ConfigResource::topic(&entity);
-        let configs = match client
-            .describe_configs(
-                std::slice::from_ref(&resource),
-                DescribeConfigsOptions::default(),
-            )
-            .await?
-            .remove(&resource)
-        {
-            Some(Ok(config)) => render::from_overrides(&config.dynamic_overrides(&resource)),
-            Some(Err(error)) => return Err(broker_error("DescribeConfigs", error)),
-            None => Vec::new(),
-        };
-        human.push(render::header(TOPICS, &entity, false));
+        human.push(render::header(entity_type, &entity, all));
+        let resource = config_resource(entity_type, &entity);
+        let config = resource_config(client, &resource, true).await?;
+        let source = if all { None } else { dynamic_source(&resource) };
+        let configs = config
+            .entries
+            .values()
+            .filter(|entry| source.is_none_or(|source| entry.source == source))
+            .map(DescribedConfig::from)
+            .collect::<Vec<_>>();
         human.extend(configs.iter().map(DescribedConfig::line));
         data.push(json!({
-            "entity_type": TOPICS,
+            "entity_type": entity_type,
             "entity_name": entity,
             "exists": true,
             "configs": configs.iter().map(DescribedConfig::json).collect::<Vec<_>>(),
@@ -1031,30 +1376,36 @@ async fn describe_topics(
     Ok(CommandResult::success(human, data))
 }
 
-async fn describe_user(
+/// `describeClientQuotaAndUserScramCredentialConfigs` and
+/// `describeQuotaConfigs`.
+async fn describe_quotas(
     client: &mut AdminClient,
-    name: String,
+    components: Vec<ClientQuotaFilterComponent>,
+    scram_users: Option<Vec<String>>,
 ) -> Result<CommandResult, CommandError> {
-    let quotas = client.describe_user_quotas(&name).await?;
-    let users = client
-        .describe_user_scram_credentials(Some(std::slice::from_ref(&name)))
+    let quotas = client
+        .describe_client_quotas(&ClientQuotaFilter::contains_only(components))
         .await?;
-    let mut human = render::quota_line(&name, &quotas)
-        .into_iter()
-        .collect::<Vec<_>>();
-    human.extend(users.iter().filter_map(render::scram_line));
-    let scram = users
+    let ordered = quota_order(&quotas);
+    let mut human = ordered
         .iter()
-        .find(|user| user.username == name && render::scram_line(user).is_some())
-        .map_or(Value::Null, render::scram_json);
+        .map(|(entity, values)| render::quota_line(entity, values))
+        .collect::<Vec<_>>();
+    let quota_data = ordered
+        .iter()
+        .map(|(entity, values)| render::quota_json(entity, values))
+        .collect::<Vec<_>>();
+    let mut scram_data = Vec::new();
+    if let Some(users) = scram_users {
+        let described = client.describe_user_scram_credentials(Some(&users)).await?;
+        for user in render::scram_users(&described) {
+            human.push(render::scram_line(user));
+            scram_data.push(render::scram_json(user));
+        }
+    }
     Ok(CommandResult::success(
         human,
-        json!([{
-            "entity_type": USERS,
-            "entity_name": name,
-            "quotas": render::quota_json(&quotas),
-            "scram_credentials": scram,
-        }]),
+        json!({"quotas": quota_data, "scram_credentials": scram_data}),
     ))
 }
 

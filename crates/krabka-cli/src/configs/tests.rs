@@ -53,19 +53,27 @@ fn command_lines_become_the_request_plan() {
                 "--entity-name",
                 "t1",
             ],
-            Plan::DescribeTopics {
+            Plan::DescribeResources {
+                entity_type: TOPICS,
                 name: Some("t1".into()),
+                all: false,
             },
         ),
         (
             &["--describe", "--topic", "t1"],
-            Plan::DescribeTopics {
+            Plan::DescribeResources {
+                entity_type: TOPICS,
                 name: Some("t1".into()),
+                all: false,
             },
         ),
         (
             &["--describe", "--entity-type", "topics"],
-            Plan::DescribeTopics { name: None },
+            Plan::DescribeResources {
+                entity_type: TOPICS,
+                name: None,
+                all: false,
+            },
         ),
         (
             &[
@@ -79,7 +87,8 @@ fn command_lines_become_the_request_plan() {
                 "--delete-config",
                 " segment.bytes , flush.ms",
             ],
-            Plan::AlterTopic {
+            Plan::AlterResource {
+                entity_type: TOPICS,
                 name: "t1".into(),
                 deletes: strings(&["segment.bytes", "flush.ms"]),
                 sets: pairs(&[
@@ -98,12 +107,22 @@ fn command_lines_become_the_request_plan() {
                 "--delete-config",
                 "b",
             ],
-            Plan::AlterTopic {
+            Plan::AlterResource {
+                entity_type: TOPICS,
                 name: "t1".into(),
                 deletes: strings(&["a", "b"]),
                 sets: Vec::new(),
             },
         ),
+    ];
+    for (argv, expected) in cases {
+        check!(plan(argv) == Ok(expected), "{argv:?}");
+    }
+}
+
+#[test]
+fn user_command_lines_become_the_request_plan() {
+    let cases: Vec<(&[&str], Plan)> = vec![
         (
             &[
                 "--describe",
@@ -112,14 +131,16 @@ fn command_lines_become_the_request_plan() {
                 "--entity-name",
                 "alice",
             ],
-            Plan::DescribeUser {
-                name: "alice".into(),
+            Plan::DescribeQuotas {
+                components: vec![ClientQuotaFilterComponent::of_entity("user", "alice")],
+                scram_users: Some(strings(&["alice"])),
             },
         ),
         (
             &["--describe", "--user", "alice"],
-            Plan::DescribeUser {
-                name: "alice".into(),
+            Plan::DescribeQuotas {
+                components: vec![ClientQuotaFilterComponent::of_entity("user", "alice")],
+                scram_users: Some(strings(&["alice"])),
             },
         ),
         (
@@ -222,8 +243,11 @@ fn command_lines_become_the_request_plan() {
                 "--delete-config",
                 "producer_byte_rate",
             ],
-            Plan::AlterUserQuotas {
+            Plan::AlterQuotas {
+                entity_type: USERS,
                 name: "alice".into(),
+                entity: entity(&[("user", Some("alice"))]),
+                components: vec![ClientQuotaFilterComponent::of_entity("user", "alice")],
                 sets: pairs(&[("consumer_byte_rate", "1024")]),
                 deletes: strings(&["producer_byte_rate"]),
             },
@@ -578,9 +602,43 @@ fn a_command_without_a_bootstrap_flag_is_refused_with_the_kafka_message() {
     );
 }
 
+fn entity(entries: &[(&str, Option<&str>)]) -> ClientQuotaEntity {
+    entries
+        .iter()
+        .map(|(entity_type, name)| ((*entity_type).to_owned(), name.map(str::to_owned)))
+        .collect()
+}
+
+fn of_entity(entity_type: &str, name: &str) -> ClientQuotaFilterComponent {
+    ClientQuotaFilterComponent::of_entity(entity_type, name)
+}
+
+fn of_default(entity_type: &str) -> ClientQuotaFilterComponent {
+    ClientQuotaFilterComponent::of_default_entity(entity_type)
+}
+
+fn resources(entity_type: &'static str, name: Option<&str>, all: bool) -> Plan {
+    Plan::DescribeResources {
+        entity_type,
+        name: name.map(str::to_owned),
+        all,
+    }
+}
+
+fn quotas(components: Vec<ClientQuotaFilterComponent>, scram_users: Option<&[&str]>) -> Plan {
+    Plan::DescribeQuotas {
+        components,
+        scram_users: scram_users.map(strings),
+    }
+}
+
 #[test]
-fn entity_types_the_pinned_client_cannot_reach_name_the_missing_call() {
-    let cases: Vec<(&[&str], String)> = vec![
+fn every_entity_type_and_form_becomes_its_plan() {
+    let cases: Vec<(&[&str], Plan)> = vec![
+        (
+            &["--describe", "--topic", "t1", "--all"],
+            resources(TOPICS, Some("t1"), true),
+        ),
         (
             &[
                 "--describe",
@@ -589,12 +647,85 @@ fn entity_types_the_pinned_client_cannot_reach_name_the_missing_call() {
                 "--entity-name",
                 "1",
             ],
-            unsupported("--entity-type brokers", RESOURCE_CONFIG_CALLS),
+            resources(BROKERS, Some("1"), false),
         ),
         (
             &["--describe", "--broker-defaults"],
-            unsupported("--entity-type brokers", RESOURCE_CONFIG_CALLS),
+            resources(BROKERS, Some(""), false),
         ),
+        (
+            &["--describe", "--entity-type", "brokers", "--all"],
+            resources(BROKERS, None, true),
+        ),
+        (
+            &["--describe", "--broker-logger", "2"],
+            resources(BROKER_LOGGERS, Some("2"), false),
+        ),
+        (
+            &["--describe", "--client-metrics", "cm"],
+            resources(CLIENT_METRICS, Some("cm"), false),
+        ),
+        (
+            &["--describe", "--entity-type", "groups"],
+            resources(GROUPS, None, false),
+        ),
+        (
+            &["--describe", "--entity-type", "users"],
+            quotas(
+                vec![ClientQuotaFilterComponent::of_entity_type("user")],
+                Some(&[]),
+            ),
+        ),
+        (
+            &["--describe", "--user-defaults"],
+            quotas(vec![of_default("user")], None),
+        ),
+        (
+            &["--describe", "--client", "c1"],
+            quotas(vec![of_entity("client-id", "c1")], None),
+        ),
+        (
+            &["--describe", "--user", "alice", "--client", "c1"],
+            quotas(
+                vec![of_entity("client-id", "c1"), of_entity("user", "alice")],
+                None,
+            ),
+        ),
+        (
+            &[
+                "--describe",
+                "--entity-type",
+                "users",
+                "--entity-name",
+                "alice",
+                "--entity-type",
+                "clients",
+            ],
+            quotas(
+                vec![
+                    of_entity("user", "alice"),
+                    ClientQuotaFilterComponent::of_entity_type("client-id"),
+                ],
+                None,
+            ),
+        ),
+        (
+            &["--describe", "--ip", "1.2.3.4"],
+            quotas(vec![of_entity("ip", "1.2.3.4")], None),
+        ),
+        (
+            &["--describe", "--ip-defaults"],
+            quotas(vec![of_default("ip")], None),
+        ),
+    ];
+    for (argv, expected) in cases {
+        check!(plan(argv) == Ok(expected), "{argv:?}");
+    }
+}
+
+#[test]
+fn every_alter_form_becomes_its_plan() {
+    let cases: Vec<(&[&str], Plan)> = vec![
         (
             &[
                 "--alter",
@@ -604,17 +735,12 @@ fn entity_types_the_pinned_client_cannot_reach_name_the_missing_call() {
                 "--add-config",
                 "log.cleaner.threads=2",
             ],
-            unsupported("--entity-type brokers", RESOURCE_CONFIG_CALLS),
-        ),
-        (
-            &[
-                "--describe",
-                "--entity-type",
-                "broker-loggers",
-                "--entity-name",
-                "1",
-            ],
-            unsupported("--entity-type broker-loggers", RESOURCE_CONFIG_CALLS),
+            Plan::AlterResource {
+                entity_type: BROKERS,
+                name: String::new(),
+                deletes: Vec::new(),
+                sets: pairs(&[("log.cleaner.threads", "2")]),
+            },
         ),
         (
             &[
@@ -624,38 +750,41 @@ fn entity_types_the_pinned_client_cannot_reach_name_the_missing_call() {
                 "--add-config",
                 "consumer.session.timeout.ms=50000",
             ],
-            unsupported("--entity-type groups", RESOURCE_CONFIG_CALLS),
+            Plan::AlterResource {
+                entity_type: GROUPS,
+                name: "g".into(),
+                deletes: Vec::new(),
+                sets: pairs(&[("consumer.session.timeout.ms", "50000")]),
+            },
         ),
         (
-            &["--describe", "--client-metrics", "cm"],
-            unsupported("--entity-type client-metrics", RESOURCE_CONFIG_CALLS),
+            &[
+                "--alter",
+                "--client-metrics",
+                "cm",
+                "--delete-config",
+                "metrics",
+            ],
+            Plan::AlterResource {
+                entity_type: CLIENT_METRICS,
+                name: "cm".into(),
+                deletes: strings(&["metrics"]),
+                sets: Vec::new(),
+            },
         ),
         (
-            &["--describe", "--topic", "t1", "--all"],
-            unsupported(
-                "--describe --all",
-                "describe_configs that returns every config source, not only dynamic topic overrides",
-            ),
-        ),
-        (
-            &["--describe", "--entity-type", "users"],
-            quota_unsupported("every user"),
-        ),
-        (
-            &["--describe", "--user-defaults"],
-            quota_unsupported("the default user"),
-        ),
-        (
-            &["--describe", "--client", "c1"],
-            quota_unsupported("a client"),
-        ),
-        (
-            &["--describe", "--user", "alice", "--client", "c1"],
-            quota_unsupported("a user's clients"),
-        ),
-        (
-            &["--describe", "--ip", "1.2.3.4"],
-            quota_unsupported("an ip"),
+            &[
+                "--alter",
+                "--broker-logger",
+                "1",
+                "--add-config",
+                "kafka.server=DEBUG",
+            ],
+            Plan::AlterBrokerLoggers {
+                broker: "1".into(),
+                deletes: Vec::new(),
+                sets: pairs(&[("kafka.server", "DEBUG")]),
+            },
         ),
         (
             &[
@@ -665,7 +794,14 @@ fn entity_types_the_pinned_client_cannot_reach_name_the_missing_call() {
                 "--add-config",
                 "consumer_byte_rate=1",
             ],
-            quota_unsupported("a client"),
+            Plan::AlterQuotas {
+                entity_type: CLIENTS,
+                name: "c1".into(),
+                entity: entity(&[("client-id", Some("c1"))]),
+                components: vec![of_entity("client-id", "c1")],
+                sets: pairs(&[("consumer_byte_rate", "1")]),
+                deletes: Vec::new(),
+            },
         ),
         (
             &[
@@ -674,19 +810,36 @@ fn entity_types_the_pinned_client_cannot_reach_name_the_missing_call() {
                 "--add-config",
                 "consumer_byte_rate=1",
             ],
-            quota_unsupported("the default user"),
+            Plan::AlterQuotas {
+                entity_type: USERS,
+                name: String::new(),
+                entity: entity(&[("user", None)]),
+                components: vec![of_default("user")],
+                sets: pairs(&[("consumer_byte_rate", "1")]),
+                deletes: Vec::new(),
+            },
         ),
         (
             &[
                 "--alter",
-                "--user",
+                "--entity-type",
+                "users",
+                "--entity-name",
                 "a",
-                "--client",
-                "c",
+                "--entity-type",
+                "clients",
+                "--entity-default",
                 "--add-config",
                 "consumer_byte_rate=1",
             ],
-            quota_unsupported("a user's clients"),
+            Plan::AlterQuotas {
+                entity_type: USERS,
+                name: "a".into(),
+                entity: entity(&[("client-id", None), ("user", Some("a"))]),
+                components: vec![of_entity("user", "a"), of_default("client-id")],
+                sets: pairs(&[("consumer_byte_rate", "1")]),
+                deletes: Vec::new(),
+            },
         ),
         (
             &[
@@ -696,13 +849,18 @@ fn entity_types_the_pinned_client_cannot_reach_name_the_missing_call() {
                 "--add-config",
                 "connection_creation_rate=10",
             ],
-            quota_unsupported("an ip"),
+            Plan::AlterQuotas {
+                entity_type: IPS,
+                name: "broker.example".into(),
+                entity: entity(&[("ip", Some("broker.example"))]),
+                components: vec![of_entity("ip", "broker.example")],
+                sets: pairs(&[("connection_creation_rate", "10")]),
+                deletes: Vec::new(),
+            },
         ),
     ];
     for (argv, expected) in cases {
-        let error = plan(argv).unwrap_err();
-        check!(error == expected, "{argv:?}");
-        check!(error.contains("not supported by this build"), "{argv:?}");
+        check!(plan(argv) == Ok(expected), "{argv:?}");
     }
 }
 
@@ -718,7 +876,8 @@ fn add_config_file_reads_a_properties_file() {
     let path = path.to_str().unwrap();
     check!(
         plan(&["--alter", "--topic", "t1", "--add-config-file", path])
-            == Ok(Plan::AlterTopic {
+            == Ok(Plan::AlterResource {
+                entity_type: TOPICS,
                 name: "t1".into(),
                 deletes: Vec::new(),
                 sets: pairs(&[
@@ -766,57 +925,77 @@ fn entity_names_follow_the_command_line_order() {
 }
 
 #[test]
-fn quota_ops_are_the_diff_from_the_current_quotas() {
-    let quotas = |entries: &[(&str, f64)]| {
-        entries
-            .iter()
-            .map(|(key, value)| ((*key).to_owned(), *value))
-            .collect::<BTreeMap<_, _>>()
-    };
+fn quota_ops_set_each_added_config_then_remove_each_deleted_one() {
     let cases = [
         (
-            quotas(&[]),
-            pairs(&[("consumer_byte_rate", "1024")]),
-            Vec::new(),
-            Ok(vec![QuotaOp::Set {
-                key: "consumer_byte_rate".into(),
-                value: 1024.0,
-            }]),
-        ),
-        (
-            quotas(&[("consumer_byte_rate", 1024.0), ("producer_byte_rate", 5.0)]),
-            Vec::new(),
-            strings(&["consumer_byte_rate"]),
-            Ok(vec![QuotaOp::Remove {
-                key: "consumer_byte_rate".into(),
-            }]),
-        ),
-        // Setting the value a quota already has changes nothing.
-        (
-            quotas(&[("consumer_byte_rate", 1024.0)]),
             pairs(&[
-                ("consumer_byte_rate", "1024.0"),
+                ("consumer_byte_rate", "1024"),
                 ("request_percentage", "12.5"),
             ]),
-            Vec::new(),
-            Ok(vec![QuotaOp::Set {
-                key: "request_percentage".into(),
-                value: 12.5,
-            }]),
+            strings(&["producer_byte_rate"]),
+            Ok(vec![
+                QuotaOp::Set {
+                    key: "consumer_byte_rate".into(),
+                    value: 1024.0,
+                },
+                QuotaOp::Set {
+                    key: "request_percentage".into(),
+                    value: 12.5,
+                },
+                QuotaOp::Remove {
+                    key: "producer_byte_rate".into(),
+                },
+            ]),
         ),
         (
-            quotas(&[]),
             pairs(&[("consumer_byte_rate", "abc")]),
             Vec::new(),
             Err("Cannot parse quota configuration value for consumer_byte_rate: abc".to_owned()),
         ),
     ];
-    for (current, sets, deletes, expected) in cases {
+    for (sets, deletes, expected) in cases {
         check!(
-            quota_ops(&current, &sets, &deletes) == expected,
+            quota_ops(&sets, &deletes) == expected,
             "{sets:?} {deletes:?}"
         );
     }
+}
+
+#[test]
+fn quota_entities_hash_and_iterate_as_java_does() {
+    // `ClientQuotaEntity.hashCode`, from the JDK of apache/kafka:4.3.1.
+    let cases = [
+        (entity(&[("user", Some("alice"))]), 96_435_562),
+        (entity(&[("user", None)]), 3_599_338),
+        (
+            entity(&[("user", Some("alice")), ("client-id", Some("c1"))]),
+            -1_807_703_075,
+        ),
+    ];
+    for (entity, expected) in cases {
+        check!(quota_entity_hash(&entity) == expected, "{entity:?}");
+    }
+    // The JDK iterates `new HashMap<>(3)` of these as `{user=null}`,
+    // `{user=alice}`, `{user=bob}`.
+    let described = [
+        entity(&[("user", Some("alice"))]),
+        entity(&[("user", None)]),
+        entity(&[("user", Some("bob"))]),
+    ]
+    .into_iter()
+    .map(|entity| (entity, BTreeMap::new()))
+    .collect::<ClientQuotas>();
+    check!(
+        quota_order(&described)
+            .into_iter()
+            .map(|(entity, _)| entity.clone())
+            .collect::<Vec<_>>()
+            == [
+                entity(&[("user", None)]),
+                entity(&[("user", Some("alice"))]),
+                entity(&[("user", Some("bob"))]),
+            ]
+    );
 }
 
 #[test]
