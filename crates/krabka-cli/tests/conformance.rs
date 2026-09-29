@@ -1,443 +1,471 @@
-//! Conformance of `krabka topics` with `kafka-topics`, against a Kafka
-//! oracle.
+//! Conformance of every `krabka` command with the `kafka-*` tool it copies,
+//! against a Kafka oracle.
 //!
-//! Every case needs a Docker daemon and is `#[ignore]`d. Run them with
-//! `cargo nextest run -p krabka-cli --test conformance --run-ignored all`.
-//! See `support/oracle.rs` for the topology, the pinned image, and what a
-//! passing row proves.
+//! Every comparison case needs a Docker daemon and is `#[ignore]`d. Run them
+//! with `cargo nextest run -p krabka-cli --test conformance --run-ignored
+//! all`, or with `bazel test --config=docker //crates/krabka-cli:all`, which
+//! loads the digest-pinned oracle image first. See `support/oracle.rs` for the
+//! topology, the pinned image, and what a passing row proves.
 //!
-//! The matrix runs each argument vector once under `kafka-topics` in the
-//! container and once under `krabka topics` on the host, and compares them
-//! in three layers:
+//! Each command has a named argument matrix. Each row runs once under the
+//! JVM tool in the container and once under `krabka` on the host, and the two
+//! runs are compared in four categories:
 //!
-//! 1. Argument surface: a row that `kafka-topics` accepts is accepted by
-//!    `krabka topics`, and a row that it refuses is refused.
-//! 2. Exit code: on each refused row the exit codes agree, and so does the
-//!    message.
-//! 3. Stdout: on each accepted row, exit code, stdout and stderr agree byte
-//!    for byte.
+//! 1. Flag surface: a row that the JVM tool accepts is accepted by `krabka`,
+//!    and a row that it refuses is refused.
+//! 2. Exit code: on each refused row the exit codes agree.
+//! 3. Output: on each accepted row, stdout and stderr agree byte for byte; on
+//!    each refused row, the message agrees.
+//! 4. Resolved state: where a row changes the cluster or the disk, what it
+//!    holds afterwards agrees, as a neutral reader sees it. The reader is the
+//!    JVM tool, or for a formatted directory the harness itself, and never
+//!    the output of the command under test.
 //!
-//! [`EXPECTED_DIFFERENCES`] declares every row where the two tools differ on
-//! purpose, with the reason.
+//! Each matrix declares every row where the tools differ, the layers that
+//! differ, and why. An undeclared difference fails, and so does a declared
+//! one that no longer shows. [`COVERAGE`] names a comparison for every
+//! built-in subcommand, and [`every_built_in_command_has_a_matrix`] reads the
+//! subcommands from clap's own command tree. A new command without a matrix
+//! then fails a test that needs no Docker.
 
+#[path = "conformance/format.rs"]
+mod format;
+#[path = "conformance/matrices.rs"]
+mod matrices;
 #[path = "support/oracle.rs"]
 mod oracle;
+#[path = "conformance/topics.rs"]
+mod topics;
+
+use std::collections::BTreeSet;
 
 use assert2::{assert, check};
+use clap::CommandFactory;
 
 use self::oracle::{
-    Capture, Difference, Expect, KAFKA_VERSION, Oracle, Tool, Verdict, View, judge, view,
+    Capture, Clean, Declared, Difference, Expect, KAFKA_VERSION, Oracle, Scrub, Tool, Verdict,
+    View, judge, remove_column, view, wanted,
 };
 
-/// When a row runs. Phase B runs after the oracle's cluster-level
-/// `min.insync.replicas` is removed, which Kafka allows once ELR is off.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    A,
-    B,
+/// One JVM tool invocation that prepares, restores or reads back a row.
+#[derive(Debug, Clone, Copy)]
+pub struct Step {
+    pub script: &'static str,
+    pub args: &'static [&'static str],
+    /// Whether `--bootstrap-server <oracle>` comes first.
+    pub bootstrap: bool,
+    pub stdin: &'static str,
 }
 
-/// One argument vector.
+/// A [`Step`] that runs `script` against the oracle's bootstrap server.
+const fn step(script: &'static str, args: &'static [&'static str]) -> Step {
+    Step {
+        script,
+        args,
+        bootstrap: true,
+        stdin: "",
+    }
+}
+
+/// One argument vector of a command's matrix.
 ///
-/// `{t}` in an argument stands for a topic name of the row's own, which
-/// differs between the two tools so that a mutation by one does not change
-/// what the other sees. The comparison reads both names as `{t}`.
-struct Row {
-    name: &'static str,
-    args: &'static [&'static str],
-    expect: Expect,
-    phase: Phase,
-    /// Whether both tools get `--bootstrap-server <oracle>`.
-    bootstrap: bool,
-    /// `kafka-topics` argument vectors run for each tool's `{t}` before the
-    /// row, and expected to succeed.
-    before: &'static [&'static [&'static str]],
+/// In every argument, file body and step, `{t}` stands for a name of the
+/// row's own, which differs between the two tools so that a mutation by one
+/// does not change what the other sees; `{f}` for a file of the row's own;
+/// `{w}` for the work directory that both tools see; and `{b}` for the
+/// oracle's bootstrap address. The comparison reads both tools' names as
+/// `{t}`.
+#[derive(Debug, Clone, Copy)]
+pub struct Row {
+    pub name: &'static str,
+    pub args: &'static [&'static str],
+    pub expect: Expect,
+    /// Whether both tools get `--bootstrap-server <oracle>` first.
+    pub bootstrap: bool,
+    pub stdin: &'static str,
     /// Environment for `krabka` only.
-    env: &'static [(&'static str, &'static str)],
+    pub env: &'static [(&'static str, &'static str)],
+    /// The body of `{f}`, written for each tool before it runs.
+    pub file: &'static str,
+    /// Run for each tool before the row, and expected to succeed.
+    pub before: &'static [Step],
+    /// Run for each tool after the row and its read-back, and expected to
+    /// succeed: the restore of a cluster-wide change.
+    pub after: &'static [Step],
+    /// The read-back whose stdout is the row's resolved state.
+    pub resolve: Option<Step>,
+    /// Rewrites of volatile output.
+    pub scrub: &'static [Scrub],
 }
 
+/// A row with no preparation, read-back or rewrite.
 const fn row(name: &'static str, args: &'static [&'static str], expect: Expect) -> Row {
     Row {
         name,
         args,
         expect,
-        phase: Phase::A,
         bootstrap: true,
-        before: &[],
+        stdin: "",
         env: &[],
+        file: "",
+        before: &[],
+        after: &[],
+        resolve: None,
+        scrub: &[],
     }
 }
 
-const fn after(
-    before: &'static [&'static [&'static str]],
-    name: &'static str,
-    args: &'static [&'static str],
-    expect: Expect,
-) -> Row {
-    Row {
-        before,
-        ..row(name, args, expect)
-    }
+/// A command's matrix.
+pub struct Matrix {
+    /// The JVM tool, a script in `/opt/kafka/bin`.
+    pub script: &'static str,
+    /// The `krabka` subcommand.
+    pub command: &'static str,
+    /// The prefix of the rows' own names.
+    pub prefix: &'static str,
+    pub rows: &'static [Row],
+    /// Every row where the two tools differ. A row may be named more than
+    /// once, and its declarations merge.
+    pub differences: &'static [(&'static str, Difference)],
 }
 
-const CREATE_T: &[&[&str]] = &[&["--create", "--topic", "{t}"]];
-
-/// The topics that every read-only row reads, with their `--create`
-/// arguments.
-const FIXTURES: &[&[&str]] = &[
-    &["--topic", "fx-alpha", "--config", "retention.ms=1000"],
-    &["--topic", "fx-bravo", "--partitions", "2"],
-    &[
-        "--topic",
-        "fx-charlie",
-        "--partitions",
-        "3",
-        "--config",
-        "retention.ms=5",
-        "--config",
-        "cleanup.policy=compact",
-    ],
-    &["--topic", "fx-delta"],
-    &["--topic", "fx-echo", "--config", "max.message.bytes=2048"],
-    &["--topic", "fx-foxtrot", "--config", "segment.ms=600000"],
-];
-
-#[rustfmt::skip]
-const MATRIX: &[Row] = &[
-    // Read-only rows first, while the topic set is the fixtures alone.
-    row("list", &["--list"], Expect::Accepted),
-    row("list-exclude-internal", &["--list", "--exclude-internal"], Expect::Accepted),
-    row("list-regex", &["--list", "--topic", "fx-.*"], Expect::Accepted),
-    row("list-equals-form", &["--list", "--topic=fx-alpha"], Expect::Accepted),
-    row("list-comma-list", &["--list", "--topic", "fx-alpha,fx-bravo"], Expect::Accepted),
-    row("list-quoted", &["--list", "--topic", "'fx-a.*'"], Expect::Accepted),
-    row("list-no-match", &["--list", "--topic", "missing"], Expect::Accepted),
-    row("list-twice", &["--list", "--list"], Expect::Accepted),
-    row("list-delete-config", &["--list", "--topic", "fx-.*", "--delete-config", "retention.ms"], Expect::Accepted),
-    row("list-invalid-regex", &["--list", "--topic", "["], Expect::Rejected),
-    row("describe-overrides", &["--describe", "--topics-with-overrides", "--topic", "fx-.*"], Expect::Accepted),
-    row("describe-topic", &["--describe", "--topic", "fx-bravo"], Expect::Accepted),
-    row("describe-all", &["--describe"], Expect::Accepted),
-    row("describe-exclude-internal", &["--describe", "--exclude-internal", "--topic", "fx-.*"], Expect::Accepted),
-    row("describe-under-replicated", &["--describe", "--under-replicated-partitions"], Expect::Accepted),
-    row("describe-unavailable", &["--describe", "--unavailable-partitions"], Expect::Accepted),
-    row("describe-under-min-isr", &["--describe", "--under-min-isr-partitions"], Expect::Accepted),
-    row("describe-at-min-isr", &["--describe", "--at-min-isr-partitions", "--topic", "fx-alpha"], Expect::Accepted),
-    row("describe-size-limit", &["--describe", "--topic", "fx-charlie", "--partition-size-limit-per-response", "1"], Expect::Accepted),
-    row("describe-zero-topic-id", &["--describe", "--topic-id", "AAAAAAAAAAAAAAAAAAAAAA"], Expect::Accepted),
-    row("describe-missing-if-exists", &["--describe", "--topic", "missing", "--if-exists"], Expect::Accepted),
-    row("describe-unknown-topic-id-if-exists", &["--describe", "--topic-id", "AQEBAQEBAQEBAQEBAQEBAQ", "--if-exists"], Expect::Accepted),
-    row("describe-missing", &["--describe", "--topic", "missing"], Expect::Rejected),
-    row("describe-unknown-topic-id", &["--describe", "--topic-id", "AQEBAQEBAQEBAQEBAQEBAQ"], Expect::Rejected),
-    row("describe-bad-topic-id", &["--describe", "--topic-id", "nonsense"], Expect::Rejected),
-    row("describe-long-topic-id", &["--describe", "--topic-id", "AAAAAAAAAAAAAAAAAAAAAAAAAAAA"], Expect::Rejected),
-    row("describe-if-exists-without-topic", &["--describe", "--if-exists"], Expect::Rejected),
-    row("describe-bad-size-limit", &["--describe", "--partition-size-limit-per-response", "x"], Expect::Rejected),
-    // Command-line checks, which refuse before any request.
-    row("no-action", &[], Expect::Rejected),
-    row("two-actions", &["--list", "--describe"], Expect::Rejected),
-    row("create-without-topic", &["--create"], Expect::Rejected),
-    row("delete-without-topic", &["--delete"], Expect::Rejected),
-    row("alter-without-partitions", &["--alter", "--topic", "fx-alpha"], Expect::Rejected),
-    row("alter-with-config", &["--alter", "--topic", "fx-alpha", "--partitions", "5", "--config", "retention.ms=1"], Expect::Rejected),
-    row("describe-with-config", &["--describe", "--config", "retention.ms=1"], Expect::Rejected),
-    row("describe-with-partitions", &["--describe", "--partitions", "3"], Expect::Rejected),
-    row("alter-with-replication-factor", &["--alter", "--topic", "{t}", "--partitions", "3", "--replication-factor", "1"], Expect::Rejected),
-    row("list-with-replica-assignment", &["--list", "--replica-assignment", "1"], Expect::Rejected),
-    row("create-assignment-and-partitions", &["--create", "--topic", "{t}", "--partitions", "1", "--replica-assignment", "1"], Expect::Rejected),
-    row("create-assignment-and-factor", &["--create", "--topic", "{t}", "--replication-factor", "1", "--replica-assignment", "1"], Expect::Rejected),
-    row("list-under-replicated", &["--list", "--under-replicated-partitions"], Expect::Rejected),
-    row("list-unavailable", &["--list", "--unavailable-partitions"], Expect::Rejected),
-    row("list-under-min-isr", &["--list", "--under-min-isr-partitions"], Expect::Rejected),
-    row("list-at-min-isr", &["--list", "--at-min-isr-partitions"], Expect::Rejected),
-    row("list-overrides", &["--list", "--topics-with-overrides"], Expect::Rejected),
-    row("unavailable-and-overrides", &["--describe", "--unavailable-partitions", "--topics-with-overrides"], Expect::Rejected),
-    row("overrides-and-at-min-isr", &["--describe", "--topics-with-overrides", "--at-min-isr-partitions"], Expect::Rejected),
-    row("create-if-exists", &["--create", "--topic", "{t}", "--if-exists"], Expect::Rejected),
-    row("list-if-not-exists", &["--list", "--if-not-exists"], Expect::Rejected),
-    row("delete-exclude-internal", &["--delete", "--topic", "{t}", "--exclude-internal"], Expect::Rejected),
-    row("create-two-topics", &["--create", "--topic", "{t}-a", "--topic", "{t}-b"], Expect::Rejected),
-    row("alter-two-partition-counts", &["--alter", "--topic", "{t}", "--partitions", "5", "--partitions", "6"], Expect::Rejected),
-    row("create-partitions-not-a-number", &["--create", "--topic", "{t}", "--partitions", "abc"], Expect::Rejected),
-    row("create-zero-partitions", &["--create", "--topic", "{t}", "--partitions", "0"], Expect::Rejected),
-    row("create-negative-partitions", &["--create", "--topic", "{t}", "--partitions", "-1"], Expect::Rejected),
-    row("create-factor-too-large", &["--create", "--topic", "{t}", "--replication-factor", "40000"], Expect::Rejected),
-    row("create-negative-factor", &["--create", "--topic", "{t}", "--replication-factor", "-1"], Expect::Rejected),
-    row("create-config-without-value", &["--create", "--topic", "{t}", "--config", "retention.ms"], Expect::Rejected),
-    row("create-unknown-config", &["--create", "--topic", "{t}", "--config", "foo=bar"], Expect::Rejected),
-    row("create-config-not-a-number", &["--create", "--topic", "{t}", "--config", "retention.ms=abc"], Expect::Rejected),
-    row("create-duplicate-replica", &["--create", "--topic", "{t}", "--replica-assignment", "1:1"], Expect::Rejected),
-    row("create-uneven-assignment", &["--create", "--topic", "{t}", "--replica-assignment", "1,1:2"], Expect::Rejected),
-    row("create-assignment-not-a-number", &["--create", "--topic", "{t}", "--replica-assignment", "a"], Expect::Rejected),
-    Row { bootstrap: false, ..row("no-bootstrap", &["--list"], Expect::Rejected) },
-    row("unknown-flag", &["--list", "--bogus"], Expect::Rejected),
-    row("flag-without-value", &["--list", "--topic"], Expect::Rejected),
-    row("single-dash-flag", &["-list"], Expect::Accepted),
-    row("help", &["--help"], Expect::Rejected),
-    row("version", &["--version"], Expect::Accepted),
-    row("dry-run", &["--create", "--topic", "{t}", "--dry-run"], Expect::Rejected),
-    // Rows that change the cluster, each on topics of its own.
-    row("create", &["--create", "--topic", "{t}"], Expect::Accepted),
-    row("create-with-everything", &["--create", "--topic", "{t}", "--partitions", "3", "--replication-factor", "1", "--config", "retention.ms=1000", "--config", " cleanup.policy = compact "], Expect::Accepted),
-    row("create-colliding-name", &["--create", "--topic", "{t}.x"], Expect::Accepted),
-    row("create-with-assignment", &["--create", "--topic", "{t}", "--replica-assignment", "1,1"], Expect::Accepted),
-    row("create-existing", &["--create", "--topic", "fx-alpha"], Expect::Rejected),
-    row("create-existing-if-not-exists", &["--create", "--topic", "fx-alpha", "--if-not-exists"], Expect::Accepted),
-    row("create-invalid-name", &["--create", "--topic", "bad name"], Expect::Rejected),
-    row("create-factor-above-brokers", &["--create", "--topic", "{t}", "--replication-factor", "2"], Expect::Rejected),
-    // kafka-topics checks the range before it sends the request; krabka
-    // leaves it to the broker, which refuses with the same message.
-    row("create-config-out-of-range", &["--create", "--topic", "{t}", "--config", "retention.ms=-5"], Expect::Rejected),
-    after(CREATE_T, "alter", &["--alter", "--topic", "{t}", "--partitions", "4"], Expect::Accepted),
-    after(CREATE_T, "alter-no-increase", &["--alter", "--topic", "{t}", "--partitions", "1"], Expect::Rejected),
-    after(CREATE_T, "alter-with-assignment", &["--alter", "--topic", "{t}", "--partitions", "2", "--replica-assignment", "1,1"], Expect::Accepted),
-    row("alter-missing", &["--alter", "--topic", "missing", "--partitions", "2"], Expect::Rejected),
-    row("alter-missing-if-exists", &["--alter", "--topic", "missing", "--partitions", "2", "--if-exists"], Expect::Accepted),
-    after(CREATE_T, "delete-without-confirmation", &["--delete", "--topic", "{t}"], Expect::Accepted),
-    Row { env: &[("KRABKA_ASSUME_YES", "true")], ..after(CREATE_T, "delete", &["--delete", "--topic", "{t}"], Expect::Accepted) },
-    row("delete-missing", &["--delete", "--topic", "missing"], Expect::Rejected),
-    row("delete-missing-if-exists", &["--delete", "--topic", "missing", "--if-exists"], Expect::Accepted),
-    // With no cluster-level `min.insync.replicas`, only topic overrides are
-    // non-default configs.
-    Row { phase: Phase::B, ..row("describe-overrides-topic-configs", &["--describe", "--topics-with-overrides", "--topic", "fx-.*"], Expect::Accepted) },
-    Row { phase: Phase::B, ..row("describe-overrides-one", &["--describe", "--topics-with-overrides", "--topic", "fx-charlie", "--exclude-internal"], Expect::Accepted) },
-    Row { phase: Phase::B, ..row("describe-overrides-none", &["--describe", "--topics-with-overrides", "--topic", "fx-bravo"], Expect::Accepted) },
-];
-
-/// Every row where the two tools differ, with the reason.
-const EXPECTED_DIFFERENCES: &[(&str, Difference)] = &[
-    (
-        "alter-with-config",
-        Difference::Unordered(
-            "kafka-topics prints the option combination from a Set.of, whose order changes \
-         between JVM runs",
-        ),
-    ),
-    (
-        "create-two-topics",
-        Difference::Outcome(
-            "krabka accepts --topic more than once and creates each topic; kafka-topics refuses a \
-         second value",
-        ),
-    ),
-    (
-        "unknown-flag",
-        Difference::Outcome(
-            "clap refuses an unknown flag with its own message and exit 2, the exit code krabka \
-         uses for a command line that does not parse",
-        ),
-    ),
-    (
-        "flag-without-value",
-        Difference::Outcome(
-            "clap refuses a flag without its value with its own message and exit 2",
-        ),
-    ),
-    (
-        "single-dash-flag",
-        Difference::Outcome(
-            "joptsimple accepts a long option after one dash; clap reads -list as short options",
-        ),
-    ),
-    (
-        "help",
-        Difference::Outcome(
-            "krabka prints clap's help on stdout and exits 0; kafka-topics prints joptsimple's \
-         help on stderr and exits 1",
-        ),
-    ),
-    (
-        "version",
-        Difference::Outcome("krabka reports its version at `krabka --version`, not per subcommand"),
-    ),
-    (
-        "dry-run",
-        Difference::Outcome("--dry-run is a krabka addition that kafka-topics does not know"),
-    ),
-    (
-        "delete-without-confirmation",
-        Difference::Outcome(
-            "krabka asks before it deletes, and refuses on a non-interactive stdin without --yes \
-         or KRABKA_ASSUME_YES; the row `delete` shows the same output once confirmed",
-        ),
-    ),
-];
-
-fn declared(name: &str) -> Option<Difference> {
-    EXPECTED_DIFFERENCES
-        .iter()
-        .find_map(|(row, difference)| (*row == name).then_some(*difference))
+/// How a built-in subcommand is compared with its JVM tool.
+pub enum Coverage {
+    /// Through a [`Matrix`] and the generic runner.
+    Matrix(&'static Matrix),
+    /// Through the `topics` matrix, which has phases of its own.
+    Topics,
+    /// Through the `format` matrix and the divergence table.
+    Format,
+    /// The command has no JVM counterpart.
+    NoCounterpart(&'static str),
 }
 
-/// The row's own topic name for `tool`.
-fn own_topic(index: usize, tool: Tool) -> String {
+/// A row's own name for `tool`.
+fn own_name(prefix: &str, index: usize, tool: Tool) -> String {
     match tool {
-        Tool::Jvm => format!("ct-jvm-{index:02}"),
-        Tool::Krabka => format!("ct-krb-{index:02}"),
+        Tool::Jvm => format!("{prefix}-jvm-{index:02}"),
+        Tool::Krabka => format!("{prefix}-krb-{index:02}"),
     }
 }
 
-fn substitute(args: &[&str], topic: &str) -> Vec<String> {
-    args.iter().map(|arg| arg.replace("{t}", topic)).collect()
+/// What a row's placeholders stand for, for one tool.
+struct Place<'a> {
+    own: &'a str,
+    file: &'a str,
+    work: &'a str,
+    bootstrap: &'a str,
 }
 
-/// One row's captures from both tools.
-struct Outcome {
-    name: &'static str,
-    expect: Expect,
-    jvm: View,
-    krabka: View,
+impl Place<'_> {
+    fn fill(&self, text: &str) -> String {
+        text.replace("{t}", self.own)
+            .replace("{f}", self.file)
+            .replace("{w}", self.work)
+            .replace("{b}", self.bootstrap)
+    }
+
+    fn fill_all(&self, args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| self.fill(arg)).collect()
+    }
 }
 
-fn run_row(oracle: &Oracle, index: usize, row: &Row) -> Outcome {
-    let captures = [Tool::Jvm, Tool::Krabka].map(|tool| {
-        let topic = own_topic(index, tool);
-        for before in row.before {
-            let prepared = oracle.jvm("kafka-topics.sh", &substitute(before, &topic), true);
-            assert!(prepared.exit == Some(0), "{}: {prepared:?}", row.name);
-        }
-        let args = substitute(row.args, &topic);
-        let capture: Capture = match tool {
-            Tool::Jvm => oracle.jvm("kafka-topics.sh", &args, row.bootstrap),
-            Tool::Krabka => oracle.krabka("topics", &args, row.bootstrap, row.env),
+fn run_step(oracle: &Oracle, place: &Place<'_>, step: &Step) -> Capture {
+    oracle.jvm(
+        step.script,
+        &place.fill_all(step.args),
+        step.bootstrap,
+        &place.fill(step.stdin),
+    )
+}
+
+/// One row's views from both tools.
+pub struct Outcome {
+    pub name: &'static str,
+    pub expect: Expect,
+    pub declared: Option<Declared>,
+    pub jvm: View,
+    pub krabka: View,
+}
+
+impl Outcome {
+    fn verdict(&self) -> Verdict {
+        judge(self.expect, self.declared.as_ref(), &self.jvm, &self.krabka)
+    }
+}
+
+/// The declarations for `name` in `differences`, merged.
+fn declared(differences: &[(&str, Difference)], name: &str) -> Option<Declared> {
+    Declared::merge(
+        differences
+            .iter()
+            .filter(|(row, _)| *row == name)
+            .map(|(_, difference)| *difference),
+    )
+}
+
+fn run_row(oracle: &Oracle, matrix: &Matrix, index: usize, row: &Row) -> Outcome {
+    let work = oracle.work().display().to_string();
+    let bootstrap = oracle.bootstrap();
+    let [jvm, krabka] = [Tool::Jvm, Tool::Krabka].map(|tool| {
+        let own = own_name(matrix.prefix, index, tool);
+        let file = format!("{work}/{own}.in");
+        let place = Place {
+            own: &own,
+            file: &file,
+            work: &work,
+            bootstrap: &bootstrap,
         };
-        let rename = [(topic, "{t}")];
-        view(row.expect, &capture, tool, "topics", &rename)
+        for before in row.before {
+            let prepared = run_step(oracle, &place, before);
+            assert!(
+                prepared.exit == Some(0),
+                "{}: {before:?}: {prepared:?}",
+                row.name
+            );
+        }
+        if !row.file.is_empty() {
+            std::fs::write(&file, place.fill(row.file)).expect("write the row's file");
+        }
+        let args = place.fill_all(row.args);
+        let stdin = place.fill(row.stdin);
+        let capture = match tool {
+            Tool::Jvm => oracle.jvm(matrix.script, &args, row.bootstrap, &stdin),
+            Tool::Krabka => oracle.krabka(&[matrix.command], &args, row.bootstrap, row.env, &stdin),
+        };
+        let resolved = row
+            .resolve
+            .map(|read| run_step(oracle, &place, &read).stdout)
+            .unwrap_or_default();
+        for after in row.after {
+            let restored = run_step(oracle, &place, after);
+            assert!(
+                restored.exit == Some(0),
+                "{}: {after:?}: {restored:?}",
+                row.name
+            );
+        }
+        let rename = [(own.clone(), "{t}"), (work.clone(), "{w}")];
+        let clean = Clean {
+            rename: &rename,
+            scrub: row.scrub,
+        };
+        view(
+            row.expect,
+            &capture,
+            tool,
+            matrix.command,
+            &clean,
+            &resolved,
+        )
     });
-    let [jvm, krabka] = captures;
     Outcome {
         name: row.name,
         expect: row.expect,
+        declared: declared(matrix.differences, row.name),
         jvm,
         krabka,
     }
 }
 
-fn prepare_fixtures(oracle: &Oracle) {
+/// The topics, records and group that the generic matrices read.
+#[rustfmt::skip]
+const FIXTURES: &[Step] = &[
+    step("kafka-topics.sh", &["--create", "--topic", "fx-alpha", "--partitions", "2"]),
+    step("kafka-topics.sh", &["--create", "--topic", "fx-bravo"]),
+    Step {
+        stdin: "k1:v1\nk2:v2\n",
+        ..step("kafka-console-producer.sh", &["--topic", "fx-alpha", "--reader-property", "parse.key=true", "--reader-property", "key.separator=:"])
+    },
+    Step {
+        stdin: "a\nb\nc\n",
+        ..step("kafka-console-producer.sh", &["--topic", "fx-bravo"])
+    },
+    step("kafka-consumer-groups.sh", &["--group", "fx-group", "--topic", "fx-bravo", "--reset-offsets", "--to-earliest", "--execute"]),
+];
+
+fn prepare(oracle: &Oracle) {
+    let work = oracle.work().display().to_string();
+    let bootstrap = oracle.bootstrap();
+    let place = Place {
+        own: "",
+        file: "",
+        work: &work,
+        bootstrap: &bootstrap,
+    };
     for fixture in FIXTURES {
-        let args = std::iter::once("--create")
-            .chain(fixture.iter().copied())
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let created = oracle.jvm("kafka-topics.sh", &args, true);
-        assert!(created.exit == Some(0), "{created:?}");
+        let prepared = run_step(oracle, &place, fixture);
+        assert!(prepared.exit == Some(0), "{fixture:?}: {prepared:?}");
     }
 }
 
-/// Removes the cluster-level `min.insync.replicas`, which Kafka refuses
-/// while ELR is on, and waits until topics without overrides show none.
-fn remove_cluster_min_isr(oracle: &Oracle) {
-    let disable = [
-        "--bootstrap-server",
-        &oracle.bootstrap(),
-        "disable",
-        "--feature",
-        "eligible.leader.replicas.version",
-    ]
-    .map(str::to_owned);
-    let disabled = oracle.jvm("kafka-features.sh", &disable, false);
-    assert!(disabled.exit == Some(0), "{disabled:?}");
-    let delete = [
-        "--alter",
-        "--entity-type",
-        "brokers",
-        "--entity-default",
-        "--delete-config",
-        "min.insync.replicas",
-    ]
-    .map(str::to_owned);
-    let deleted = oracle.jvm("kafka-configs.sh", &delete, true);
-    assert!(deleted.exit == Some(0), "{deleted:?}");
-    let probe = [
-        "--describe",
-        "--topics-with-overrides",
-        "--topic",
-        "fx-bravo",
-    ]
-    .map(str::to_owned);
-    for _ in 0..30 {
-        if oracle
-            .jvm("kafka-topics.sh", &probe, true)
-            .stdout
-            .is_empty()
-        {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
-    panic!("the cluster-level min.insync.replicas did not go");
-}
-
-#[test]
-#[ignore = "needs a Docker daemon to run the Kafka oracle"]
-fn krabka_topics_matches_kafka_topics_on_every_row() {
+/// Runs `matrix` against a fresh oracle.
+fn run_matrix(matrix: &Matrix) -> Vec<Outcome> {
     let oracle = Oracle::start();
-    prepare_fixtures(&oracle);
-    let mut outcomes = Vec::new();
-    for phase in [Phase::A, Phase::B] {
-        if phase == Phase::B {
-            remove_cluster_min_isr(&oracle);
-        }
-        for (index, row) in MATRIX.iter().enumerate() {
-            if row.phase == phase {
-                outcomes.push(run_row(&oracle, index, row));
-            }
-        }
-    }
+    prepare(&oracle);
+    matrix
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| run_row(&oracle, matrix, index, row))
+        .collect()
+}
 
-    for outcome in &outcomes {
-        let difference = declared(outcome.name);
-        let want = if difference.is_some() {
-            Verdict::ExpectedDifference
-        } else {
-            Verdict::Agree
+/// Checks every outcome of `command` against the verdict it passes with, in
+/// one comparison of the failing rows, so that a run reports all of them.
+pub fn check_outcomes(command: &str, outcomes: &[Outcome]) {
+    let failing = |verdict: &dyn Fn(&Outcome) -> Verdict| {
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.verdict() != wanted(outcome.declared.as_ref()))
+            .map(|outcome| (outcome.name, verdict(outcome)))
+            .collect::<Vec<_>>()
+    };
+    let got = failing(&Outcome::verdict);
+    let want = failing(&|outcome| wanted(outcome.declared.as_ref()));
+    check!(got == want, "{command} against Kafka {KAFKA_VERSION}");
+}
+
+/// The comparison fails on each deliberately wrong expectation, so it does
+/// not pass by construction: an expected exit code that the JVM tool does
+/// not return, and an expected stdout shape with a column removed.
+pub fn check_not_vacuous(outcomes: &[Outcome]) {
+    if let Some(refused) = outcomes
+        .iter()
+        .find(|outcome| outcome.expect == Expect::Rejected && outcome.verdict() == Verdict::Agree)
+    {
+        check!(matches!(
+            judge(Expect::Accepted, None, &refused.jvm, &refused.krabka),
+            Verdict::Mislabeled { expected: 0, .. }
+        ));
+    }
+    if let Some(table) = outcomes.iter().find(|outcome| {
+        outcome.expect == Expect::Accepted
+            && outcome.verdict() == Verdict::Agree
+            && outcome
+                .jvm
+                .stdout
+                .lines()
+                .any(|line| line.split_whitespace().count() > 2)
+    }) {
+        let expected = View {
+            stdout: remove_column(&table.jvm.stdout, 1),
+            ..table.jvm.clone()
         };
-        let verdict = judge(outcome.expect, difference, &outcome.jvm, &outcome.krabka);
-        check!(
-            verdict == want,
-            "row {} against Kafka {KAFKA_VERSION}; declared: {:?}",
-            outcome.name,
-            difference.map(Difference::reason)
-        );
+        check!(matches!(
+            judge(table.expect, None, &expected, &table.krabka),
+            Verdict::Undeclared { .. }
+        ));
     }
+}
 
-    // Every declared difference names a row of the matrix.
-    for (name, _) in EXPECTED_DIFFERENCES {
-        check!(MATRIX.iter().any(|row| row.name == *name), "{name}");
+fn run(command: &str, coverage: &Coverage) {
+    match coverage {
+        Coverage::Matrix(matrix) => {
+            let outcomes = run_matrix(matrix);
+            check_outcomes(command, &outcomes);
+            check_not_vacuous(&outcomes);
+        }
+        Coverage::Topics => topics::run(),
+        Coverage::Format => format::run(),
+        Coverage::NoCounterpart(reason) => panic!("{command} has no JVM counterpart: {reason}"),
     }
+}
 
-    // The harness reports a declared difference as expected, and the same
-    // captures without the declaration as a failure, so the difference is
-    // real and the declaration is what lets it pass.
-    let bogus = outcomes
-        .iter()
-        .find(|outcome| outcome.name == "unknown-flag")
-        .expect("the matrix has the unknown-flag row");
-    check!(
-        judge(
-            bogus.expect,
-            declared(bogus.name),
-            &bogus.jvm,
-            &bogus.krabka
-        ) == Verdict::ExpectedDifference
-    );
-    check!(matches!(
-        judge(bogus.expect, None, &bogus.jvm, &bogus.krabka),
-        Verdict::Undeclared { .. }
-    ));
+/// Declares [`COVERAGE`], with one `#[ignore]`d test per compared command,
+/// so that a coverage entry cannot exist without the test that runs it.
+macro_rules! coverage {
+    (
+        compared { $($test:ident: $command:literal => $coverage:expr,)* }
+        uncompared { $($other:literal => $reason:literal,)* }
+    ) => {
+        /// How every built-in subcommand is compared, by its clap name.
+        const COVERAGE: &[(&str, Coverage)] = &[
+            $(($command, $coverage),)*
+            $(($other, Coverage::NoCounterpart($reason)),)*
+        ];
 
-    // One changed byte in an agreeing row fails the comparison, so the
-    // harness compares what the tools printed rather than passing by
-    // construction.
-    let listed = outcomes
+        $(
+            #[test]
+            #[ignore = "needs a Docker daemon to run the Kafka oracle"]
+            fn $test() {
+                run($command, &$coverage);
+            }
+        )*
+    };
+}
+
+coverage! {
+    compared {
+        acls_matches_kafka_acls: "acls" => Coverage::Matrix(&matrices::ACLS),
+        cluster_matches_kafka_cluster: "cluster" => Coverage::Matrix(&matrices::CLUSTER),
+        configs_matches_kafka_configs: "configs" => Coverage::Matrix(&matrices::CONFIGS),
+        console_consumer_matches_kafka_console_consumer: "console-consumer" => Coverage::Matrix(&matrices::CONSOLE_CONSUMER),
+        console_producer_matches_kafka_console_producer: "console-producer" => Coverage::Matrix(&matrices::CONSOLE_PRODUCER),
+        consumer_groups_matches_kafka_consumer_groups: "consumer-groups" => Coverage::Matrix(&matrices::CONSUMER_GROUPS),
+        delegation_tokens_matches_kafka_delegation_tokens: "delegation-tokens" => Coverage::Matrix(&matrices::DELEGATION_TOKENS),
+        delete_records_matches_kafka_delete_records: "delete-records" => Coverage::Matrix(&matrices::DELETE_RECORDS),
+        features_matches_kafka_features: "features" => Coverage::Matrix(&matrices::FEATURES),
+        format_matches_kafka_storage_format: "format" => Coverage::Format,
+        get_offsets_matches_kafka_get_offsets: "get-offsets" => Coverage::Matrix(&matrices::GET_OFFSETS),
+        leader_election_matches_kafka_leader_election: "leader-election" => Coverage::Matrix(&matrices::LEADER_ELECTION),
+        log_dirs_matches_kafka_log_dirs: "log-dirs" => Coverage::Matrix(&matrices::LOG_DIRS),
+        metadata_quorum_matches_kafka_metadata_quorum: "metadata-quorum" => Coverage::Matrix(&matrices::METADATA_QUORUM),
+        reassign_partitions_matches_kafka_reassign_partitions: "reassign-partitions" => Coverage::Matrix(&matrices::REASSIGN_PARTITIONS),
+        storage_matches_kafka_storage: "storage" => Coverage::Matrix(&matrices::STORAGE),
+        topics_matches_kafka_topics: "topics" => Coverage::Topics,
+        transactions_matches_kafka_transactions: "transactions" => Coverage::Matrix(&matrices::TRANSACTIONS),
+    }
+    uncompared {
+        "gres" => "krabka's own tenant registry and range layout; Kafka ships no such tool",
+    }
+}
+
+/// Every built-in subcommand, as clap's command tree names it, has a
+/// [`COVERAGE`] entry, and every entry names a built-in subcommand.
+#[test]
+fn every_built_in_command_has_a_matrix() {
+    let built_in = krabka_cli::Cli::command()
+        .get_subcommands()
+        .map(|command| command.get_name().to_owned())
+        .filter(|name| name != "help")
+        .collect::<BTreeSet<_>>();
+    let covered = COVERAGE
         .iter()
-        .find(|outcome| outcome.name == "list-regex")
-        .expect("the matrix has the list-regex row");
-    let mut changed = listed.jvm.clone();
-    changed.stdout = changed.stdout.replacen("fx-alpha", "fx-alphb", 1);
-    check!(changed != listed.jvm);
-    check!(matches!(
-        judge(listed.expect, None, &changed, &listed.krabka),
-        Verdict::Undeclared { .. }
-    ));
+        .map(|(name, _)| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    assert!(built_in == covered);
+}
+
+/// Every row name is unique within its matrix, every declared difference
+/// names a row of its matrix, and every matrix drives the `krabka`
+/// subcommand it is registered under.
+#[test]
+fn every_declaration_names_a_row_of_its_matrix() {
+    for (command, coverage) in COVERAGE {
+        let (rows, differences) = match coverage {
+            Coverage::Matrix(matrix) => {
+                check!(matrix.command == *command);
+                (
+                    matrix.rows.iter().map(|row| row.name).collect::<Vec<_>>(),
+                    matrix
+                        .differences
+                        .iter()
+                        .map(|(name, _)| *name)
+                        .collect::<Vec<_>>(),
+                )
+            }
+            Coverage::Topics => (topics::row_names(), topics::declared_names()),
+            Coverage::Format => (format::row_names(), format::declared_names()),
+            Coverage::NoCounterpart(_) => continue,
+        };
+        let unique = rows.iter().collect::<BTreeSet<_>>();
+        check!(unique.len() == rows.len(), "{command} repeats a row name");
+        for name in differences {
+            check!(
+                rows.contains(&name),
+                "{command} declares {name}, which is not a row"
+            );
+        }
+    }
 }

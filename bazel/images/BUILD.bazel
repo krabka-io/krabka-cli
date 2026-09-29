@@ -1,0 +1,62 @@
+"""Container images that the container-driven suites run against.
+
+Bazel pulls each image from a digest that //MODULE.bazel pins, and
+//bazel:docker_test.sh loads its tarball into the local daemon before the
+suite starts. The bytes a test runs against are then the pinned ones, the
+network stays out of the test itself, and the repository cache carries the
+images between CI runs.
+
+`crate_tests(docker = {"<stem>": ["<image>"]})` in //bazel:defs.bzl hands the
+suite `:<image>_tar`.
+"""
+
+load("@rules_img//img:load.bzl", "image_load")
+
+package(default_visibility = ["//visibility:public"])
+
+# The tag each image is loaded under. The suite names it through
+# `KRABKA_ORACLE_IMAGE` (see //crates/krabka-cli:BUILD.bazel) and starts it with
+# `--pull=never`. It is a name of this repository's own, so a stale
+# `apache/kafka:4.3.1` pulled by hand cannot stand in for the pinned bytes.
+ORACLE_TAG = "krabka-cli/conformance-oracle:apache-kafka-4.3.1"
+
+# `apache/kafka:4.3.1`, one platform manifest per CPU, each pinned by digest in
+# //MODULE.bazel. Both manifests belong to the index that
+# crates/krabka-cli/tests/support/oracle.rs pins for a Cargo run, so the two
+# build systems run the same release.
+[
+    image_load(
+        name = "apache_kafka_4_3_1_" + arch,
+        image = "@apache_kafka_4_3_1_" + arch,
+        tag = ORACLE_TAG,
+        tags = ["docker"],
+    )
+    for arch in [
+        "amd64",
+        "arm64",
+    ]
+]
+
+[
+    filegroup(
+        name = "apache_kafka_4_3_1_%s_tarball" % arch,
+        srcs = [":apache_kafka_4_3_1_" + arch],
+        output_group = "tarball",
+        tags = ["docker"],
+    )
+    for arch in [
+        "amd64",
+        "arm64",
+    ]
+]
+
+# The tarball for the host that runs the test: a Docker daemon runs images of
+# its own architecture.
+alias(
+    name = "apache_kafka_4_3_1_tar",
+    actual = select({
+        "@platforms//cpu:aarch64": ":apache_kafka_4_3_1_arm64_tarball",
+        "//conditions:default": ":apache_kafka_4_3_1_amd64_tarball",
+    }),
+    tags = ["docker"],
+)

@@ -46,6 +46,32 @@ bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "rules_img", version = "0.3.20")
 bazel_dep(name = "rules_apko", version = "1.5.56")
 
+# The Kafka oracle that the `conformance` suite drives, one repository per
+# platform manifest of the `apache/kafka:4.3.1` index that
+# crates/krabka-cli/tests/support/oracle.rs pins,
+# sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837.
+# Each is pinned by its own manifest digest, so neither can change under a
+# rerun, and //bazel/images selects the one for the host that runs the test.
+# A platform manifest rather than the index: `image_import` builds every
+# manifest an index holds, attestation manifests of platform `unknown/unknown`
+# among them, and those abort analysis.
+pull_image = use_repo_rule("@rules_img//img:pull.bzl", "pull")
+
+[
+    pull_image(
+        name = name,
+        digest = digest,
+        layer_handling = "eager",
+        registry = "mirror.gcr.io",
+        repository = "apache/kafka",
+        tag = "4.3.1",
+    )
+    for name, digest in [
+        ("apache_kafka_4_3_1_amd64", "sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26"),
+        ("apache_kafka_4_3_1_arm64", "sha256:c2b5172ab20d66381ec1729796a410fd611135821994526d4d42d2f256054af3"),
+    ]
+]
+
 apko_toolchain = use_extension("@rules_apko//apko:extensions.bzl", "apko")
 apko_toolchain.toolchain(apko_version = "v1.2.40")
 use_repo(apko_toolchain, "apko_toolchains")
