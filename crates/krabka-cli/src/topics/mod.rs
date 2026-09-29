@@ -9,9 +9,6 @@
 //! prints on stdout as Kafka prints it, `Error while executing topic command
 //! : <message>`, and the command exits 1. A failure of the command as a whole
 //! goes through the output layer, on stderr, with Kafka's message.
-//!
-//! Some sub-features need admin calls that the pinned `krabka-client-admin`
-//! does not have. Each fails with a message that names the missing call.
 
 mod config;
 mod describe;
@@ -21,8 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use clap::{ArgAction, Args};
 use krabka_client_admin::{
-    AdminClient, AdminError, ConfigResource, CreatePartitionsOp, CreateTopicOutcome,
-    CreateTopicSpec, DeleteTopicOutcome, DescribeConfigsOptions, KafkaError, TopicMetadataEntry,
+    AdminClient, AdminError, ClusterNode, ConfigResource, CreatePartitionsOp, CreateTopicOutcome,
+    CreateTopicSpec, DeleteTopicOutcome, DescribeClusterOptions, DescribeConfigsOptions,
+    DescribeTopicsOptions, KafkaError, TopicDescription, TopicDescriptions, TopicMetadataEntry,
     TopicMutationOptions,
 };
 use krabka_client_core::ClientError;
@@ -31,14 +29,19 @@ use serde_json::{Value, json};
 
 use self::{
     config::{parse_replica_assignment, parse_topic_configs},
-    describe::{Partition, Reassignment, Selector, Selectors, Topic, TopicReport, describe_topic},
+    describe::{
+        Partition, Reassignment, Selector, Selectors, Topic, TopicReport, describe_topic,
+        min_insync_replicas,
+    },
     java::{
-        IncludeList, describe_order, has_collision_chars, is_internal, uuid_from_string,
-        uuid_to_string,
+        IncludeList, describe_order, has_collision_chars, is_internal, non_default_configs,
+        uuid_from_string, uuid_to_string,
     },
 };
 use crate::{
+    compat::KafkaException,
     connection::ConnectionArgs,
+    jvm::{Table, hash_order, integer_hash},
     output::{CommandError, CommandResult, kafka_error},
     safety::{ConfirmArgs, Impact, confirm},
 };
@@ -193,6 +196,9 @@ pub struct Create {
     /// `None` leaves the factor to the cluster default.
     pub replication_factor: Option<i32>,
     pub configs: BTreeMap<String, String>,
+    /// `--replica-assignment`: the broker ids of each partition, by
+    /// partition index. Empty leaves placement to the broker.
+    pub replica_assignment: BTreeMap<i32, Vec<i32>>,
     pub if_not_exists: bool,
 }
 
@@ -216,11 +222,16 @@ pub enum Action {
     Alter {
         selection: Selection,
         partitions: i32,
+        /// `--replica-assignment`: the broker ids of every partition, the
+        /// existing ones included, in partition order.
+        assignment: Option<Vec<Vec<i32>>>,
     },
     Delete(Selection),
     Describe {
         target: Target,
         selectors: Selectors,
+        /// `--partition-size-limit-per-response`, or Kafka's default 2000.
+        partition_limit: i32,
     },
 }
 
@@ -235,14 +246,9 @@ pub struct Plan {
     pub delete_config_notice: bool,
 }
 
-/// The error for a sub-feature that needs an admin call that the pinned
-/// `krabka-client-admin` does not have.
-fn not_supported(feature: &str, needs: &str) -> String {
-    format!(
-        "{feature} is not supported by this build: it needs {needs}, which the pinned \
-         krabka-client-admin does not have"
-    )
-}
+/// `DescribeTopicsOptions.partitionSizeLimitPerResponse` when
+/// `--partition-size-limit-per-response` is not given.
+const DEFAULT_PARTITION_LIMIT: i32 = 2000;
 
 /// Whether a counted flag was given.
 const fn set(count: u8) -> bool {
@@ -338,15 +344,10 @@ impl TopicsArgs {
             Action::Create(self.plan_create()?)
         } else if set(self.alter) {
             let partitions = int_option(&self.partitions, "partitions")?;
-            if self.replica_assignment()?.is_some() {
-                return Err(not_supported(
-                    "--replica-assignment with --alter",
-                    "a replica assignment in CreatePartitionsOp",
-                ));
-            }
             Action::Alter {
                 selection: selection(!self.if_exists),
                 partitions: partitions.unwrap_or_default(),
+                assignment: self.replica_assignment()?,
             }
         } else if set(self.delete) {
             Action::Delete(selection(!self.if_exists))
@@ -479,26 +480,27 @@ impl TopicsArgs {
         if partitions.is_some_and(|count| count < 1) {
             return Err("The partitions must be greater than 0".into());
         }
-        if assignment.is_some() {
-            return Err(not_supported(
-                "--replica-assignment with --create",
-                "a replica assignment in CreateTopicSpec",
-            ));
-        }
         Ok(Create {
             names: self.topic.clone(),
             partitions,
             replication_factor,
             configs,
+            replica_assignment: assignment
+                .unwrap_or_default()
+                .into_iter()
+                .zip(0..)
+                .map(|(brokers, index)| (index, brokers))
+                .collect(),
             if_not_exists: self.if_not_exists,
         })
     }
 
     fn plan_describe(&self, selection: Selection) -> Result<Action, String> {
-        int_option(
+        let partition_limit = int_option(
             &self.partition_size_limit_per_response,
             "partition-size-limit-per-response",
-        )?;
+        )?
+        .unwrap_or(DEFAULT_PARTITION_LIMIT);
         let id = single(&self.topic_id, "topic-id")?
             .map(uuid_from_string)
             .transpose()?
@@ -530,6 +532,7 @@ impl TopicsArgs {
         Ok(Action::Describe {
             target,
             selectors: Selectors(selectors),
+            partition_limit,
         })
     }
 
@@ -548,12 +551,22 @@ impl TopicsArgs {
             Action::Alter {
                 selection,
                 partitions,
-            } => alter(&mut client, &selection, partitions, timeout).await?,
+                assignment,
+            } => alter(&mut client, &selection, partitions, assignment, timeout).await?,
             Action::Delete(selection) => {
                 delete(&mut client, &selection, self.confirm, timeout).await?
             }
-            Action::Describe { target, selectors } => {
-                describe(&mut client, &target, &selectors, timeout).await?
+            Action::Describe {
+                target,
+                selectors,
+                partition_limit,
+            } => {
+                let request = DescribeRequest {
+                    target: &target,
+                    selectors: &selectors,
+                    partition_limit,
+                };
+                describe(&mut client, &request, timeout).await?
             }
         };
         result.human.splice(0..0, plan.notices);
@@ -604,38 +617,31 @@ fn names(entries: &[TopicMetadataEntry]) -> Vec<String> {
 /// The message of the exception that Kafka's admin client raises for a
 /// per-topic error: the broker's message, or the error's default message.
 fn error_message(error: &KafkaError) -> String {
-    if let Some(message) = error.message.as_ref().filter(|message| !message.is_empty()) {
-        return message.clone();
+    error
+        .message
+        .clone()
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| KafkaException::for_code(error.code).message().to_owned())
+}
+
+/// `UNKNOWN_TOPIC_OR_PARTITION`, for a topic that a description lacks.
+const fn unknown_topic() -> KafkaError {
+    KafkaError {
+        code: 3,
+        name: "UNKNOWN_TOPIC_OR_PARTITION",
+        message: None,
     }
-    let default = match error.code {
-        3 => "This server does not host this topic-partition.",
-        7 => "The request timed out.",
-        17 => "The request attempted to perform an operation on an invalid topic.",
-        29 => "Topic authorization failed.",
-        31 => "Cluster authorization failed.",
-        35 => "The version of API is not supported.",
-        36 => "Topic with this name already exists.",
-        37 => "Number of partitions is below 1.",
-        38 => "Replication factor is below 1 or larger than the number of available brokers.",
-        39 => "Replica assignment is invalid.",
-        40 => "Configuration is invalid.",
-        41 => "This is not the correct controller for this cluster.",
-        42 => {
-            "This most likely occurs because of a request being malformed by the client library \
-             or the message was sent to an incompatible broker. See the broker logs for more \
-             details."
-        }
-        44 => "Request parameters do not satisfy the configured policy.",
-        73 => "Topic deletion is disabled.",
-        89 => "The throttling quota has been exceeded.",
-        100 => "This server does not host this topic ID.",
-        _ => error.name,
-    };
-    default.to_owned()
 }
 
 fn failure_line(error: &KafkaError) -> String {
     format!("{ERROR_PREFIX}{}", error_message(error))
+}
+
+/// The report of a command that fails part way, as `TopicCommand` prints
+/// it: what it printed before, then the failure line on stdout, and exit 1.
+fn failed_after(mut human: Vec<String>, values: Vec<Value>, message: &str) -> CommandResult {
+    human.push(format!("{ERROR_PREFIX}{message}"));
+    CommandResult::rows(human, values, true)
 }
 
 async fn list(
@@ -741,7 +747,7 @@ async fn create_topics(
             partitions: create.partitions.unwrap_or(-1),
             replicas: create.replication_factor.unwrap_or(-1),
             configs: create.configs.clone(),
-            replica_assignments: BTreeMap::new(),
+            replica_assignments: create.replica_assignment.clone(),
         })
         .collect::<Vec<_>>();
     let mut outcomes = client
@@ -767,22 +773,77 @@ fn failures_only(rows: Vec<(String, Option<KafkaError>, Value)>) -> CommandResul
     CommandResult::rows(human, values, failed)
 }
 
+/// The replica assignment of the new partitions of each topic, as
+/// `TopicService.topicNewPartitions` computes it: the assignment's rows past
+/// the partitions that the topic has now, in the iteration order of the
+/// `HashMap` that `Collectors.toMap` collects them into, keyed by partition
+/// index.
+///
+/// # Errors
+/// Returns the message that `kafka-topics` prints when the description of a
+/// topic failed: the `ExecutionException` that its `RuntimeException` wraps.
+fn new_assignments(
+    selected: &[String],
+    assignment: &[Vec<i32>],
+    described: &TopicDescriptions<String>,
+) -> Result<BTreeMap<String, Vec<Vec<i32>>>, String> {
+    selected
+        .iter()
+        .map(
+            |name| match described.get(name).unwrap_or(&Err(unknown_topic())) {
+                Ok(description) => {
+                    let rows = (0..)
+                        .zip(assignment)
+                        .skip(description.partitions.len())
+                        .collect::<Vec<(i32, _)>>();
+                    let rows = hash_order(rows, Table::Default, |(index, _)| integer_hash(*index));
+                    Ok((
+                        name.clone(),
+                        rows.into_iter()
+                            .map(|(_, brokers)| brokers.clone())
+                            .collect(),
+                    ))
+                }
+                Err(error) => Err(format!(
+                    "java.util.concurrent.ExecutionException: {}: {}",
+                    KafkaException::for_code(error.code).class(),
+                    error_message(error)
+                )),
+            },
+        )
+        .collect()
+}
+
 async fn alter(
     client: &mut AdminClient,
     selection: &Selection,
     partitions: i32,
+    assignment: Option<Vec<Vec<i32>>>,
     timeout: Time,
 ) -> Result<CommandResult, CommandError> {
     let selected = resolve(&names(&listing(client).await?), selection)?;
     if selected.is_empty() {
         return Ok(CommandResult::success(Vec::new(), Vec::<Value>::new()));
     }
+    // `alterTopic` describes the topics whether or not it reads their
+    // partition counts, which only `--replica-assignment` does.
+    let refs = selected.iter().map(String::as_str).collect::<Vec<_>>();
+    let described = client
+        .describe_topics(&refs, DescribeTopicsOptions::default())
+        .await;
+    let mut assignments = match &assignment {
+        Some(assignment) => match new_assignments(&selected, assignment, &described) {
+            Ok(assignments) => assignments,
+            Err(message) => return Ok(failed_after(Vec::new(), Vec::new(), &message)),
+        },
+        None => BTreeMap::new(),
+    };
     let ops = selected
         .iter()
         .map(|name| CreatePartitionsOp {
             name: name.clone(),
             new_total_count: partitions,
-            assignments: None,
+            assignments: assignments.remove(name),
         })
         .collect::<Vec<_>>();
     let outcomes = client
@@ -927,77 +988,129 @@ fn described(entries: &[TopicMetadataEntry], target: &Target) -> Result<Vec<Stri
     }
 }
 
+/// What `--describe` asks for.
+struct DescribeRequest<'a> {
+    target: &'a Target,
+    selectors: &'a Selectors,
+    partition_limit: i32,
+}
+
+fn node_ids(nodes: &[ClusterNode]) -> Vec<i32> {
+    nodes.iter().map(|node| node.id).collect()
+}
+
+/// Kafka's `TopicDescription`, as `kafka-topics` reads it. `elr_known` is
+/// whether the description came from `DescribeTopicPartitions`, whose
+/// partitions carry the ELR, rather than from `Metadata`, for which Kafka's
+/// `TopicPartitionInfo` holds `null` and `kafka-topics` prints `N/A`.
+fn topic_from(description: TopicDescription, elr_known: bool) -> Topic {
+    let mut partitions = description
+        .partitions
+        .into_iter()
+        .map(|partition| Partition {
+            index: partition.partition,
+            leader: partition.leader.map(|leader| leader.id),
+            replicas: node_ids(&partition.replicas),
+            isr: node_ids(&partition.isr),
+            elr: elr_known.then(|| node_ids(&partition.elr)),
+            last_known_elr: elr_known.then(|| node_ids(&partition.last_known_elr)),
+        })
+        .collect::<Vec<_>>();
+    partitions.sort_by_key(|partition| partition.index);
+    Topic {
+        name: description.name,
+        id: description.topic_id.map(|id| *id.as_bytes()),
+        partitions,
+    }
+}
+
+/// The descriptions of `ordered`, in that order, as
+/// `DescribeTopicsResult.allTopicNames` or `allTopicIds` gives them.
+///
+/// # Errors
+/// Returns the first topic's error, which fails the whole call as `all()`
+/// does.
+async fn descriptions(
+    client: &AdminClient,
+    request: &DescribeRequest<'_>,
+    ordered: &[String],
+) -> Result<Vec<Topic>, KafkaError> {
+    if let Target::Id { id, .. } = request.target {
+        let id = uuid::Uuid::from_bytes(*id);
+        // `describeTopics` by ID reads `Metadata`, which has no ELR.
+        let found = client
+            .describe_topics_by_id(&[id], DescribeTopicsOptions::default())
+            .await;
+        return found
+            .into_values()
+            .map(|result| result.map(|description| topic_from(description, false)))
+            .collect();
+    }
+    let refs = ordered.iter().map(String::as_str).collect::<Vec<_>>();
+    let options = DescribeTopicsOptions {
+        partition_size_limit_per_response: request.partition_limit,
+        ..DescribeTopicsOptions::default()
+    };
+    let mut found = client.describe_topics(&refs, options).await;
+    ordered
+        .iter()
+        .map(|name| {
+            let result = found.remove(name).unwrap_or_else(|| Err(unknown_topic()));
+            result.map(|description| topic_from(description, true))
+        })
+        .collect()
+}
+
+/// Kafka's `TopicService.describeTopic`: the descriptions, then every
+/// topic's configs, the live brokers and the ongoing reassignments, then
+/// each topic's lines in turn.
+///
+/// A topic error prints on stdout where Kafka's exception stops the output,
+/// after the lines already printed. A call that fails as a whole goes
+/// through the output layer.
 async fn describe(
     client: &mut AdminClient,
-    target: &Target,
-    selectors: &Selectors,
+    request: &DescribeRequest<'_>,
     timeout: Time,
 ) -> Result<CommandResult, CommandError> {
     let entries = listing(client).await?;
-    let ordered = described(&entries, target)?;
+    let ordered = described(&entries, request.target)?;
     if ordered.is_empty() {
         return Ok(CommandResult::success(Vec::new(), Vec::<Value>::new()));
     }
-    if !selectors.has(Selector::TopicsWithOverrides) {
-        return Err(not_supported(
-            "--describe with per-partition Leader, Isr and Elr lines",
-            "AdminClient::describe_topics, and AdminClient::describe_cluster for \
-             --unavailable-partitions",
-        )
-        .into());
-    }
-    // `--topics-with-overrides` prints the summary line alone, which needs
-    // each partition's replicas and no leader, ISR or ELR.
-    let refs = ordered.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut partitions = BTreeMap::<String, Vec<Partition>>::new();
-    for assignment in client.describe_partition_assignments(&refs).await? {
-        partitions
-            .entry(assignment.topic)
-            .or_default()
-            .push(Partition {
-                index: assignment.partition,
-                leader: None,
-                replicas: assignment.replicas,
-                isr: Vec::new(),
-                elr: None,
-                last_known_elr: None,
-            });
-    }
-    let topics = ordered
+    let topics = match descriptions(client, request, &ordered).await {
+        Ok(topics) => topics,
+        Err(error) => return Ok(failed_after(Vec::new(), Vec::new(), &error_message(&error))),
+    };
+    let resources = topics
         .iter()
-        .map(|name| {
-            let mut partitions = partitions.remove(name).unwrap_or_default();
-            partitions.sort_by_key(|partition| partition.index);
-            Topic {
-                name: name.clone(),
-                id: entries
-                    .iter()
-                    .find(|entry| &entry.name == name)
-                    .and_then(|entry| entry.topic_id.map(|id| *id.as_bytes())),
-                partitions,
-            }
-        })
+        .map(|topic| ConfigResource::topic(&topic.name))
         .collect::<Vec<_>>();
-    let resources = ordered
-        .iter()
-        .map(ConfigResource::topic)
-        .collect::<Vec<_>>();
-    let configs = client
+    let mut configs = client
         .describe_configs(&resources, DescribeConfigsOptions::default())
+        .await?;
+    let live_brokers = client
+        .describe_cluster(DescribeClusterOptions::default())
         .await?
-        .into_iter()
-        .map(|(resource, config)| {
-            let overrides = config
-                .map_err(|error| CommandError::from(failure_line(&error)))?
-                .dynamic_overrides(&resource);
-            Ok((resource.name, overrides))
-        })
-        .collect::<Result<BTreeMap<_, _>, CommandError>>()?;
+        .nodes
+        .iter()
+        .map(|node| node.id)
+        .collect::<BTreeSet<_>>();
     let reassignments = reassignments(client, &topics, timeout).await?;
-    let empty = BTreeMap::new();
     let mut human = Vec::new();
     let mut values = Vec::new();
     for topic in &topics {
+        let config = configs
+            .remove(&ConfigResource::topic(&topic.name))
+            .unwrap_or(Err(KafkaError {
+                code: -1,
+                name: "UNKNOWN_SERVER_ERROR",
+                message: None,
+            }));
+        let config = match config {
+            Ok(config) => config,
+            Err(error) => return Ok(failed_after(human, values, &error_message(&error))),
+        };
         let topic_reassignments = reassignments
             .iter()
             .filter(|((name, _), _)| name == &topic.name)
@@ -1005,16 +1118,20 @@ async fn describe(
             .collect();
         let report = TopicReport {
             topic,
-            configs: configs.get(&topic.name).unwrap_or(&empty),
-            min_isr: Err(not_supported(
-                "min.insync.replicas",
-                "AdminClient::describe_topics",
-            )),
+            configs: &non_default_configs(&config),
+            min_isr: min_insync_replicas(&config),
             reassignments: &topic_reassignments,
         };
-        if let Some((lines, value)) = describe_topic(&report, selectors, &BTreeSet::new())? {
-            human.extend(lines);
-            values.push(value);
+        match describe_topic(&report, request.selectors, &live_brokers) {
+            Ok(Some((lines, value))) => {
+                human.extend(lines);
+                values.push(value);
+            }
+            Ok(None) => {}
+            Err(failure) => {
+                human.extend(failure.printed);
+                return Ok(failed_after(human, values, &failure.message));
+            }
         }
     }
     Ok(CommandResult::success(human, values))
