@@ -22,9 +22,9 @@ use std::{
 };
 
 use clap::Args;
-use krabka_client_admin::{AdminClient, TopicMetadataEntry};
-use krabka_client_core::ConnectionOptions;
-use krabka_client_producer::{Acks, Compression, Producer, ProducerError, ProducerRecord};
+use krabka_client_producer::{
+    Acks, Compression, Producer, ProducerError, ProducerRecord, RecordSizeLimit,
+};
 use serde_json::json;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -44,7 +44,6 @@ use crate::{
 const COMMAND: &str = "krabka console-producer";
 const NOT_SUPPORTED: &str = "not supported by this build";
 const LINE_READER: &str = "org.apache.kafka.tools.LineMessageReader";
-const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 
 /// The flags of `kafka-console-producer`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
@@ -171,8 +170,15 @@ struct Settings {
     request_timeout_ms: u64,
     retries: i32,
     retry_backoff_ms: u64,
+    retry_backoff_max_ms: u64,
     max_block_ms: u64,
     delivery_timeout_ms: u64,
+    buffer_memory: u64,
+    max_request_size: u64,
+    max_in_flight: u64,
+    metadata_max_age_ms: u64,
+    metadata_max_idle_ms: u64,
+    enable_metrics_push: bool,
 }
 
 /// The command line, checked and resolved.
@@ -188,21 +194,10 @@ struct Plan {
     warnings: Vec<String>,
 }
 
-/// The producer properties whose default krabka has, but whose other values
-/// it cannot apply, and the builder parameter each needs.
-const FIXED: [(&str, i64, &str); 3] = [
-    ("send.buffer.bytes", 102_400, "a socket send-buffer option"),
-    (
-        "buffer.memory",
-        33_554_432,
-        "Producer::builder().buffer_memory",
-    ),
-    (
-        "metadata.max.age.ms",
-        300_000,
-        "Producer::builder().metadata_max_age",
-    ),
-];
+/// `send.buffer.bytes` as `ConsoleProducerOptions` defaults it. The
+/// producer's client keeps the operating system's socket send buffer, and
+/// `Producer::builder()` has no parameter to set another one.
+const SEND_BUFFER_BYTES: i64 = 102_400;
 
 impl ConsoleProducerArgs {
     /// Checks the command line as `ConsoleProducerOptions.checkArgs` does.
@@ -426,13 +421,12 @@ fn has_port(address: &str) -> bool {
 impl Settings {
     /// Reads and validates the settings, as `new KafkaProducer` does.
     fn from_properties(properties: &Properties) -> Result<Self, String> {
-        for (key, default, needs) in FIXED {
-            let value = number_property(properties, key, "LONG", default)?;
-            if value != default {
-                return Err(format!(
-                    "{key}={value} is {NOT_SUPPORTED}: krabka uses the default {default}; another value needs {needs} from a newer krabka-client-producer"
-                ));
-            }
+        let send_buffer =
+            number_property(properties, "send.buffer.bytes", "INT", SEND_BUFFER_BYTES)?;
+        if send_buffer != SEND_BUFFER_BYTES {
+            return Err(format!(
+                "send.buffer.bytes={send_buffer} is {NOT_SUPPORTED}: the producer needs a send_buffer parameter on krabka-client-producer's Producer::builder()"
+            ));
         }
         if properties.get("transactional.id").is_some() {
             return Err(
@@ -482,11 +476,39 @@ impl Settings {
         let request_timeout_ms =
             at_least("request.timeout.ms", int("request.timeout.ms", 30_000)?, 0)?;
         let retry_backoff_ms = at_least("retry.backoff.ms", long("retry.backoff.ms", 100)?, 0)?;
+        let retry_backoff_max_ms = at_least(
+            "retry.backoff.max.ms",
+            long("retry.backoff.max.ms", 1_000)?,
+            0,
+        )?;
         let max_block_ms = at_least("max.block.ms", long("max.block.ms", 60_000)?, 0)?;
         let delivery_timeout_ms = at_least(
             "delivery.timeout.ms",
             int("delivery.timeout.ms", 120_000)?,
             0,
+        )?;
+        let buffer_memory = at_least("buffer.memory", long("buffer.memory", 33_554_432)?, 0)?;
+        let max_request_size =
+            at_least("max.request.size", int("max.request.size", 1_048_576)?, 0)?;
+        let max_in_flight = at_least(
+            "max.in.flight.requests.per.connection",
+            int("max.in.flight.requests.per.connection", 5)?,
+            1,
+        )?;
+        if enable_idempotence && max_in_flight > 5 {
+            return Err(format!(
+                "To use the idempotent producer, max.in.flight.requests.per.connection must be set to at most 5. Current value is {max_in_flight}."
+            ));
+        }
+        let metadata_max_age_ms = at_least(
+            "metadata.max.age.ms",
+            long("metadata.max.age.ms", 300_000)?,
+            0,
+        )?;
+        let metadata_max_idle_ms = at_least(
+            "metadata.max.idle.ms",
+            long("metadata.max.idle.ms", 300_000)?,
+            5_000,
         )?;
         Ok(Self {
             compression,
@@ -499,8 +521,15 @@ impl Settings {
             request_timeout_ms,
             retries,
             retry_backoff_ms,
+            retry_backoff_max_ms,
             max_block_ms,
             delivery_timeout_ms,
+            buffer_memory,
+            max_request_size,
+            max_in_flight,
+            metadata_max_age_ms,
+            metadata_max_idle_ms,
+            enable_metrics_push: bool_property(properties, "enable.metrics.push", true)?,
         })
     }
 }
@@ -582,19 +611,29 @@ async fn produce(
             Ok(options) => options,
             Err(error) => return fail(COMMAND, &error.to_string(), format),
         };
-    let retry_backoff = Duration::from_millis(settings.retry_backoff_ms);
+    let millis = Duration::from_millis;
+    let size = |bytes: u64| usize::try_from(bytes).unwrap_or(usize::MAX);
     let started = Producer::builder()
         .bootstrap(plan.bootstrap.join(","))
         .client_id(options.client_id.clone())
         .compression(settings.compression)
         .enable_idempotence(settings.enable_idempotence)
         .acks(settings.acks)
-        .linger(Duration::from_millis(settings.linger_ms))
+        .linger(millis(settings.linger_ms))
         .batch_size(settings.batch_size)
-        .request_timeout(Duration::from_millis(settings.request_timeout_ms))
+        .request_timeout(millis(settings.request_timeout_ms))
         .retries(settings.retries)
-        .retry_backoff(retry_backoff)
-        .flush_timeout(Duration::from_millis(settings.delivery_timeout_ms.max(1)))
+        .retry_backoff(millis(settings.retry_backoff_ms))
+        .retry_backoff_max(millis(settings.retry_backoff_max_ms))
+        .delivery_timeout(millis(settings.delivery_timeout_ms))
+        .flush_timeout(millis(settings.delivery_timeout_ms.max(1)))
+        .max_block(millis(settings.max_block_ms))
+        .buffer_memory(size(settings.buffer_memory))
+        .max_request_size(size(settings.max_request_size))
+        .max_in_flight_per_connection(size(settings.max_in_flight))
+        .metadata_max_age(millis(settings.metadata_max_age_ms))
+        .metadata_max_idle(millis(settings.metadata_max_idle_ms))
+        .enable_metrics_push(settings.enable_metrics_push)
         .maybe_security(options.security.clone().map(|security| *security))
         .build();
     let producer = tokio::select! {
@@ -608,10 +647,8 @@ async fn produce(
     let counts = Arc::new(Counts::default());
     let mut reader = plan.reader.clone();
     let mut pending = tokio::task::JoinSet::new();
-    let max_block = Duration::from_millis(settings.max_block_ms);
     let mut failure = None;
     let mut cancelled = false;
-    let mut topic_ready = false;
     'read: loop {
         if prompt {
             print!(">");
@@ -638,25 +675,13 @@ async fn produce(
                     break 'read;
                 }
             };
-            if !topic_ready {
-                if let Err(message) = wait_for_topic(&plan, &options, &settings, cancel).await {
-                    if cancel.is_cancelled() {
-                        cancelled = true;
-                    } else {
-                        failure = Some(message);
-                    }
-                    break 'read;
-                }
-                topic_ready = true;
-            }
             let described = describe(&record);
-            let sent = tokio::time::timeout(max_block, producer.send(record)).await;
-            let Ok(receiver) = sent else {
-                failure = Some(format!(
-                    "Topic {} not present in metadata after {} ms.",
-                    plan.topic, settings.max_block_ms
-                ));
-                break 'read;
+            // `send` waits up to `max.block.ms` for metadata that holds the
+            // topic, as `KafkaProducer.waitOnMetadata` does, and fails the
+            // record when it times out.
+            let receiver = tokio::select! {
+                receiver = producer.send(record) => receiver,
+                () = cancel.cancelled() => { cancelled = true; break 'read; }
             };
             if plan.sync {
                 if let Err(message) = delivered(receiver.await, &counts) {
@@ -706,61 +731,6 @@ async fn produce(
     Exit::Success
 }
 
-/// Waits, as the JVM producer's first `send` does, until the topic is in the
-/// cluster metadata, and fails after `max.block.ms` with the JVM message.
-///
-/// The JVM producer asks for the topic with `allow_auto_topic_creation`, so a
-/// broker with `auto.create.topics.enable` creates it. The pinned
-/// `AdminClient::metadata` asks without, so krabka waits for a topic that
-/// someone else creates.
-async fn wait_for_topic(
-    plan: &Plan,
-    options: &ConnectionOptions,
-    settings: &Settings,
-    cancel: &CancellationToken,
-) -> Result<(), String> {
-    let max_block = Duration::from_millis(settings.max_block_ms);
-    let not_present = || {
-        format!(
-            "Topic {} not present in metadata after {} ms.",
-            plan.topic, settings.max_block_ms
-        )
-    };
-    let wait = async {
-        let mut admin = AdminClient::connect_with_options(&plan.bootstrap, options.clone())
-            .await
-            .map_err(|error| error.to_string())?;
-        loop {
-            let metadata = admin
-                .metadata(&[plan.topic.as_str()])
-                .await
-                .map_err(|error| error.to_string())?;
-            match metadata
-                .topics
-                .iter()
-                .find(|topic| topic.name == plan.topic)
-            {
-                Some(topic) if topic.error.is_none() && topic.partition_count > 0 => {
-                    return Ok(());
-                }
-                Some(TopicMetadataEntry {
-                    error: Some(error), ..
-                }) if error.code != UNKNOWN_TOPIC_OR_PARTITION => {
-                    return Err(format!("{} ({})", error.name, error.code));
-                }
-                _ => {
-                    tokio::time::sleep(Duration::from_millis(settings.retry_backoff_ms.max(1)))
-                        .await;
-                }
-            }
-        }
-    };
-    tokio::select! {
-        waited = tokio::time::timeout(max_block, wait) => waited.unwrap_or_else(|_| Err(not_present())),
-        () = cancel.cancelled() => Err("cancelled".to_owned()),
-    }
-}
-
 /// The record as `ErrorLoggingCallback` describes it: sizes, not contents.
 fn describe(record: &ProducerRecord) -> String {
     let size = |bytes: Option<&[u8]>| {
@@ -803,6 +773,20 @@ fn producer_error(error: &ProducerError) -> String {
             Some(name) => format!("{name} ({code})"),
             None => format!("broker error code {code}"),
         },
+        // `KafkaProducer.ensureValidRecordSize` names the configs as Kafka
+        // spells them.
+        ProducerError::RecordTooLarge {
+            record_size,
+            limit: RecordSizeLimit::MaxRequestSize(max),
+        } => format!(
+            "The message is {record_size} bytes when serialized which is larger than {max}, which is the value of the max.request.size configuration."
+        ),
+        ProducerError::RecordTooLarge {
+            record_size,
+            limit: RecordSizeLimit::BufferMemory,
+        } => format!(
+            "The message is {record_size} bytes when serialized which is larger than the total memory buffer you have configured with the buffer.memory configuration."
+        ),
         other => other.to_string(),
     }
 }

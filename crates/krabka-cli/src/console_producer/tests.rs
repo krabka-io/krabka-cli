@@ -296,9 +296,52 @@ fn settings_follow_the_console_producer_defaults() {
                 request_timeout_ms: 1_500,
                 retries: 3,
                 retry_backoff_ms: 100,
+                retry_backoff_max_ms: 1_000,
                 max_block_ms: 60_000,
                 delivery_timeout_ms: 120_000,
+                buffer_memory: 33_554_432,
+                max_request_size: 1_048_576,
+                max_in_flight: 5,
+                metadata_max_age_ms: 300_000,
+                metadata_max_idle_ms: 300_000,
+                enable_metrics_push: true,
             })
+    );
+}
+
+/// The memory, metadata and timing flags reach the producer settings, as
+/// `producerProps` merges them into `buffer.memory`, `metadata.max.age.ms`
+/// and `max.block.ms`.
+#[test]
+fn memory_and_metadata_flags_reach_the_producer_settings() {
+    let argv = [
+        "--bootstrap-server",
+        "h:1",
+        "--topic",
+        "t",
+        "--max-memory-bytes",
+        "1048576",
+        "--metadata-expiry-ms",
+        "9000",
+        "--max-block-ms",
+        "250",
+        "--command-property",
+        "max.request.size=4096",
+        "--command-property",
+        "delivery.timeout.ms=5000",
+        "--command-property",
+        "retry.backoff.max.ms=300",
+    ];
+    let settings = Settings::from_properties(&parse(&argv).plan().unwrap().properties).unwrap();
+    assert!(
+        (
+            settings.buffer_memory,
+            settings.metadata_max_age_ms,
+            settings.max_block_ms,
+            settings.max_request_size,
+            settings.delivery_timeout_ms,
+            settings.retry_backoff_max_ms,
+        ) == (1_048_576, 9_000, 250, 4_096, 5_000, 300)
     );
 }
 
@@ -358,7 +401,7 @@ fn acks_and_compression_map_to_the_client_values() {
 
 #[test]
 fn unusable_producer_properties_are_refused() {
-    let cases: [(&[(&str, &str)], &str); 9] = [
+    let cases: [(&[(&str, &str)], &str); 11] = [
         (
             &[("acks", "2")],
             "Invalid value 2 for configuration acks: String must be one of: all, -1, 0, 1",
@@ -388,12 +431,20 @@ fn unusable_producer_properties_are_refused() {
             "Cannot perform a 'send' before completing a call to initTransactions when transactions are enabled.",
         ),
         (
-            &[("buffer.memory", "1024")],
-            "buffer.memory=1024 is not supported by this build: krabka uses the default 33554432; another value needs Producer::builder().buffer_memory from a newer krabka-client-producer",
+            &[("buffer.memory", "-1")],
+            "Invalid value -1 for configuration buffer.memory: Value must be at least 0",
         ),
         (
-            &[("metadata.max.age.ms", "1")],
-            "metadata.max.age.ms=1 is not supported by this build: krabka uses the default 300000; another value needs Producer::builder().metadata_max_age from a newer krabka-client-producer",
+            &[("metadata.max.idle.ms", "10")],
+            "Invalid value 10 for configuration metadata.max.idle.ms: Value must be at least 5000",
+        ),
+        (
+            &[("max.in.flight.requests.per.connection", "6")],
+            "To use the idempotent producer, max.in.flight.requests.per.connection must be set to at most 5. Current value is 6.",
+        ),
+        (
+            &[("send.buffer.bytes", "65536")],
+            "send.buffer.bytes=65536 is not supported by this build: the producer needs a send_buffer parameter on krabka-client-producer's Producer::builder()",
         ),
     ];
     for (pairs, expected) in cases {

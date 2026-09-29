@@ -1,5 +1,6 @@
 use assert2::assert;
 use clap::Parser as _;
+use krabka_client_consumer::TimestampType;
 
 use super::*;
 use crate::{Cli, Command};
@@ -370,89 +371,194 @@ fn isolation_levels_map_to_the_client_variants() {
     );
 }
 
+/// The settings with every property at Kafka's default.
+fn default_settings() -> ClientSettings {
+    ClientSettings {
+        group_id: "g".into(),
+        auto_offset_reset: AutoOffsetReset::Latest,
+        isolation_level: IsolationLevel::ReadUncommitted,
+        group_protocol: GroupProtocol::Classic,
+        group_remote_assignor: None,
+        enable_auto_commit: true,
+        auto_commit_interval_ms: 5_000,
+        session_timeout_ms: 45_000,
+        heartbeat_interval_ms: 3_000,
+        max_poll_interval_ms: 300_000,
+        max_poll_records: 500,
+        fetch_min_bytes: 1,
+        fetch_max_bytes: 52_428_800,
+        max_partition_fetch_bytes: 1_048_576,
+        fetch_max_wait_ms: 500,
+        metadata_max_age_ms: 300_000,
+        default_api_timeout_ms: 60_000,
+        topics: TopicSettings {
+            exclude_internal: true,
+            allow_auto_create: true,
+        },
+        enable_metrics_push: true,
+        group_instance_id: None,
+        client_rack: None,
+        assignors: Assignor::DEFAULT_LIST.to_vec(),
+    }
+}
+
 #[test]
 fn client_settings_read_the_consumer_properties() {
-    let set = properties(&[
-        ("auto.offset.reset", "none"),
-        ("isolation.level", "read_committed"),
-        ("enable.auto.commit", "FALSE"),
-        ("auto.commit.interval.ms", "100"),
-        ("session.timeout.ms", "10000"),
-        ("heartbeat.interval.ms", "1000"),
-        ("max.poll.interval.ms", "20000"),
-        ("fetch.min.bytes", "2"),
-        ("fetch.max.bytes", "4096"),
-        ("max.partition.fetch.bytes", "1024"),
-        ("fetch.max.wait.ms", "250"),
-        ("group.instance.id", "i-1"),
-        ("client.rack", "r1"),
+    let cases: [(&[(&str, &str)], ClientSettings); 4] = [
+        (&[], default_settings()),
         (
-            "partition.assignment.strategy",
-            "org.apache.kafka.clients.consumer.CooperativeStickyAssignor, org.apache.kafka.clients.consumer.RangeAssignor",
-        ),
-        ("group.protocol", "CLASSIC"),
-    ]);
-    assert!(
-        ClientSettings::from_properties(&set, "g".into())
-            == Ok(ClientSettings {
-                group_id: "g".into(),
-                auto_offset_reset: OffsetReset::None,
+            &[
+                ("auto.offset.reset", "none"),
+                ("isolation.level", "read_committed"),
+                ("enable.auto.commit", "FALSE"),
+                ("auto.commit.interval.ms", "100"),
+                ("session.timeout.ms", "10000"),
+                ("heartbeat.interval.ms", "1000"),
+                ("max.poll.interval.ms", "20000"),
+                ("max.poll.records", "7"),
+                ("fetch.min.bytes", "2"),
+                ("fetch.max.bytes", "4096"),
+                ("max.partition.fetch.bytes", "1024"),
+                ("fetch.max.wait.ms", "250"),
+                ("metadata.max.age.ms", "900"),
+                ("default.api.timeout.ms", "800"),
+                ("exclude.internal.topics", "false"),
+                ("allow.auto.create.topics", "false"),
+                ("enable.metrics.push", "false"),
+                ("group.instance.id", "i-1"),
+                ("client.rack", "r1"),
+                (
+                    "partition.assignment.strategy",
+                    "org.apache.kafka.clients.consumer.CooperativeStickyAssignor, org.apache.kafka.clients.consumer.RangeAssignor",
+                ),
+                ("group.protocol", "CLASSIC"),
+            ],
+            ClientSettings {
+                auto_offset_reset: AutoOffsetReset::None,
                 isolation_level: IsolationLevel::ReadCommitted,
                 enable_auto_commit: false,
                 auto_commit_interval_ms: 100,
                 session_timeout_ms: 10_000,
                 heartbeat_interval_ms: 1_000,
-                rebalance_timeout_ms: 20_000,
+                max_poll_interval_ms: 20_000,
+                max_poll_records: 7,
                 fetch_min_bytes: 2,
                 fetch_max_bytes: 4_096,
                 max_partition_fetch_bytes: 1_024,
                 fetch_max_wait_ms: 250,
+                metadata_max_age_ms: 900,
+                default_api_timeout_ms: 800,
+                topics: TopicSettings {
+                    exclude_internal: false,
+                    allow_auto_create: false,
+                },
+                enable_metrics_push: false,
                 group_instance_id: Some("i-1".into()),
                 client_rack: Some("r1".into()),
                 assignors: vec![Assignor::CooperativeSticky, Assignor::Range],
-            })
-    );
+                ..default_settings()
+            },
+        ),
+        (
+            &[("auto.offset.reset", "by_duration:P1DT2H30M")],
+            ClientSettings {
+                auto_offset_reset: AutoOffsetReset::ByDuration(std::time::Duration::from_mins(
+                    1_590,
+                )),
+                ..default_settings()
+            },
+        ),
+        (
+            &[
+                ("group.protocol", "Consumer"),
+                ("group.remote.assignor", "uniform"),
+            ],
+            ClientSettings {
+                group_protocol: GroupProtocol::Consumer,
+                group_remote_assignor: Some("uniform".into()),
+                ..default_settings()
+            },
+        ),
+    ];
+    for (pairs, expected) in cases {
+        assert!(
+            ClientSettings::from_properties(&properties(pairs), "g".into()) == Ok(expected),
+            "{pairs:?}"
+        );
+    }
 }
 
 #[test]
 fn unusable_consumer_properties_are_refused() {
-    let cases = [
+    let invalid_reset = |value: &str| {
+        format!(
+            "Invalid value {value} for configuration auto.offset.reset: Invalid value `{value}` for configuration auto.offset.reset. The value must be either 'earliest', 'latest', 'none' or of the format 'by_duration:<PnDTnHnMn.nS.>'."
+        )
+    };
+    let cases: [(&[(&str, &str)], String); 10] = [
+        (&[("auto.offset.reset", "sometimes")], invalid_reset("sometimes")),
+        (&[("auto.offset.reset", "by_duration")], invalid_reset("by_duration")),
+        (&[("auto.offset.reset", "by_duration:-PT1H")], invalid_reset("by_duration:-PT1H")),
+        (&[("auto.offset.reset", "by_duration:1H")], invalid_reset("by_duration:1H")),
         (
-            ("auto.offset.reset", "sometimes"),
-            "Invalid value sometimes for configuration auto.offset.reset: Invalid value `sometimes` for configuration auto.offset.reset. The value must be either 'earliest', 'latest', 'none' or of the format 'by_duration:<PnDTnHnMn.nS.>'.",
+            &[("group.protocol", "other")],
+            "Invalid value other for configuration group.protocol: String must be one of (case insensitive): CLASSIC, CONSUMER".into(),
         ),
         (
-            ("auto.offset.reset", "by_duration:PT1H"),
-            "auto.offset.reset=by_duration:PT1H is not supported by this build: the by_duration strategy (KIP-1106) needs AutoOffsetReset::ByDuration from a newer krabka-client-consumer",
+            &[("group.remote.assignor", "uniform")],
+            "group.remote.assignor cannot be set when group.protocol=CLASSIC".into(),
         ),
         (
-            ("group.protocol", "consumer"),
-            "group.protocol=consumer is not supported by this build: the KIP-848 consumer protocol needs a newer krabka-client-consumer",
+            &[
+                ("group.protocol", "consumer"),
+                ("session.timeout.ms", "10000"),
+                ("partition.assignment.strategy", "range"),
+            ],
+            "partition.assignment.strategy, session.timeout.ms cannot be set when group.protocol=CONSUMER".into(),
         ),
         (
-            ("group.protocol", "other"),
-            "Invalid value other for configuration group.protocol: String must be one of (case insensitive): CLASSIC, CONSUMER",
+            &[("session.timeout.ms", "soon")],
+            "Invalid value soon for configuration session.timeout.ms: Not a number of type INT".into(),
         ),
         (
-            ("session.timeout.ms", "soon"),
-            "Invalid value soon for configuration session.timeout.ms: Not a number of type INT",
+            &[("enable.auto.commit", "yes")],
+            "Invalid value yes for configuration enable.auto.commit: Expected value to be either true or false".into(),
         ),
         (
-            ("enable.auto.commit", "yes"),
-            "Invalid value yes for configuration enable.auto.commit: Expected value to be either true or false",
-        ),
-        (
-            ("partition.assignment.strategy", "com.example.Mine"),
-            "partition.assignment.strategy=com.example.Mine is not supported; krabka implements RangeAssignor, RoundRobinAssignor, StickyAssignor and CooperativeStickyAssignor",
+            &[("partition.assignment.strategy", "com.example.Mine")],
+            "partition.assignment.strategy=com.example.Mine is not supported; krabka implements RangeAssignor, RoundRobinAssignor, StickyAssignor and CooperativeStickyAssignor".into(),
         ),
     ];
-    for ((key, value), expected) in cases {
+    for (pairs, expected) in cases {
         assert!(
-            ClientSettings::from_properties(&properties(&[(key, value)]), "g".into())
-                == Err(expected.to_owned()),
-            "{key}={value}"
+            ClientSettings::from_properties(&properties(pairs), "g".into()) == Err(expected),
+            "{pairs:?}"
         );
     }
+}
+
+#[test]
+fn unconsumed_records_reset_each_partition_to_its_smallest_offset() {
+    let at = |topic: &str, partition, offset| Record {
+        topic: topic.into(),
+        partition,
+        offset,
+        timestamp: 0,
+        timestamp_type: TimestampType::CreateTime,
+        key: None,
+        value: None,
+        headers: Vec::new(),
+    };
+    let buffered = VecDeque::from([at("b", 0, 7), at("a", 1, 3), at("b", 0, 8), at("a", 0, 5)]);
+    assert!(
+        unconsumed(&buffered)
+            == [
+                ("a".to_owned(), 0, 5),
+                ("a".to_owned(), 1, 3),
+                ("b".to_owned(), 0, 7),
+            ]
+    );
+    assert!(unconsumed(&VecDeque::new()).is_empty());
 }
 
 #[test]
@@ -484,6 +590,7 @@ fn json_output_is_one_data_line_per_record() {
         partition: 1,
         offset: 5,
         timestamp: 7,
+        timestamp_type: TimestampType::LogAppendTime,
         key: None,
         value: Some(b"v".to_vec()),
         headers: vec![("h".into(), Some(b"x".to_vec()))],
