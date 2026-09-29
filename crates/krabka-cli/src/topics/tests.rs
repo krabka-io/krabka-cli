@@ -98,9 +98,13 @@ fn every_kafka_topics_flag_parses_into_the_whole_args_struct() {
 
 #[test]
 fn accepted_invocations_plan_the_request_kafka_topics_sends() {
-    let describe = |target, selectors: &[Selector]| Action::Describe {
+    let describe_limited = |target, selectors: &[Selector], partition_limit| Action::Describe {
         target,
         selectors: Selectors(selectors.iter().copied().collect()),
+        partition_limit,
+    };
+    let describe = |target, selectors: &[Selector]| {
+        describe_limited(target, selectors, DEFAULT_PARTITION_LIMIT)
     };
     let cases: Vec<(Vec<&str>, Plan)> = vec![
         (
@@ -122,6 +126,7 @@ fn accepted_invocations_plan_the_request_kafka_topics_sends() {
                 partitions: None,
                 replication_factor: None,
                 configs: BTreeMap::new(),
+                replica_assignment: BTreeMap::new(),
                 if_not_exists: false,
             })),
         ),
@@ -143,6 +148,7 @@ fn accepted_invocations_plan_the_request_kafka_topics_sends() {
                 partitions: Some(3),
                 replication_factor: Some(2),
                 configs: BTreeMap::from([("retention.ms".into(), "5".into())]),
+                replica_assignment: BTreeMap::new(),
                 if_not_exists: true,
             })),
         ),
@@ -158,6 +164,7 @@ fn accepted_invocations_plan_the_request_kafka_topics_sends() {
             plain(Action::Alter {
                 selection: selection(&["orders"], false, false),
                 partitions: 4,
+                assignment: None,
             }),
         ),
         (
@@ -180,7 +187,7 @@ fn accepted_invocations_plan_the_request_kafka_topics_sends() {
                 "--partition-size-limit-per-response",
                 "5",
             ],
-            plain(describe(
+            plain(describe_limited(
                 Target::Names(selection(&["orders"], false, true)),
                 &[
                     Selector::UnderReplicated,
@@ -188,6 +195,7 @@ fn accepted_invocations_plan_the_request_kafka_topics_sends() {
                     Selector::UnderMinIsr,
                     Selector::AtMinIsr,
                 ],
+                5,
             )),
         ),
         (
@@ -247,6 +255,7 @@ fn accepted_invocations_plan_the_request_kafka_topics_sends() {
                 partitions: None,
                 replication_factor: None,
                 configs: BTreeMap::new(),
+                replica_assignment: BTreeMap::new(),
                 if_not_exists: false,
             })),
         ),
@@ -257,10 +266,15 @@ fn accepted_invocations_plan_the_request_kafka_topics_sends() {
                 partitions: None,
                 replication_factor: None,
                 configs: BTreeMap::new(),
+                replica_assignment: BTreeMap::new(),
                 if_not_exists: false,
             })),
         ),
     ];
+    check_plans(cases);
+}
+
+fn check_plans(cases: Vec<(Vec<&str>, Plan)>) {
     for (args, expected) in cases {
         let argv = BOOTSTRAP
             .iter()
@@ -269,6 +283,63 @@ fn accepted_invocations_plan_the_request_kafka_topics_sends() {
             .collect::<Vec<_>>();
         check!(plan(&argv) == Ok(expected), "{args:?}");
     }
+}
+
+#[test]
+fn replica_assignments_plan_the_assignment_kafka_topics_sends() {
+    let cases: Vec<(Vec<&str>, Plan)> = vec![
+        (
+            vec![
+                "--alter",
+                "--topic",
+                "orders",
+                "--partitions",
+                "3",
+                "--replica-assignment",
+                "1:2,2:3,3:1",
+            ],
+            plain(Action::Alter {
+                selection: selection(&["orders"], false, true),
+                partitions: 3,
+                assignment: Some(vec![vec![1, 2], vec![2, 3], vec![3, 1]]),
+            }),
+        ),
+        // An empty assignment is no assignment, as in Kafka.
+        (
+            vec![
+                "--alter",
+                "--topic",
+                "orders",
+                "--partitions",
+                "3",
+                "--replica-assignment",
+                "",
+            ],
+            plain(Action::Alter {
+                selection: selection(&["orders"], false, true),
+                partitions: 3,
+                assignment: None,
+            }),
+        ),
+        (
+            vec![
+                "--create",
+                "--topic",
+                "orders",
+                "--replica-assignment",
+                "1:2, 2:3",
+            ],
+            plain(Action::Create(Create {
+                names: vec!["orders".into()],
+                partitions: None,
+                replication_factor: None,
+                configs: BTreeMap::new(),
+                replica_assignment: BTreeMap::from([(0, vec![1, 2]), (1, vec![2, 3])]),
+                if_not_exists: false,
+            })),
+        ),
+    ];
+    check_plans(cases);
 }
 
 #[test]
@@ -471,13 +542,6 @@ fn rejected_option_values_fail_with_the_kafka_topics_message() {
             "--dry-run is only valid with --create or --delete".into(),
         ),
         (
-            vec!["--create", "--topic", "t", "--replica-assignment", "1,2"],
-            not_supported(
-                "--replica-assignment with --create",
-                "a replica assignment in CreateTopicSpec",
-            ),
-        ),
-        (
             vec![
                 "--alter",
                 "--topic",
@@ -485,12 +549,9 @@ fn rejected_option_values_fail_with_the_kafka_topics_message() {
                 "--partitions",
                 "3",
                 "--replica-assignment",
-                "1,2,3",
+                "1,2:3",
             ],
-            not_supported(
-                "--replica-assignment with --alter",
-                "a replica assignment in CreatePartitionsOp",
-            ),
+            "Partition 1 has different replication factor: [2, 3]".into(),
         ),
     ];
     for (args, expected) in cases {
@@ -587,9 +648,12 @@ fn a_per_topic_error_prints_the_kafka_exception_message() {
             error(37, "INVALID_PARTITIONS", Some("")),
             "Error while executing topic command : Number of partitions is below 1.",
         ),
+        // `Errors.forCode` maps a code it does not know to
+        // `UNKNOWN_SERVER_ERROR`.
         (
             error(999, "UNKNOWN", None),
-            "Error while executing topic command : UNKNOWN",
+            "Error while executing topic command : The server experienced an unexpected error \
+             when processing the request.",
         ),
     ];
     for (error, expected) in cases {

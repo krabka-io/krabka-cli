@@ -6,9 +6,10 @@ use std::{
     fmt::Write as _,
 };
 
-use serde_json::{Value, json};
+use krabka_client_admin::Config;
+use serde_json::{Map, Value, json};
 
-use super::java::{config_order, uuid_to_string};
+use super::java::{parse_int, uuid_to_string};
 
 /// One partition as `kafka-topics` sees it: Kafka's `TopicPartitionInfo`,
 /// with node ids for nodes.
@@ -85,26 +86,51 @@ pub fn is_unavailable(partition: &Partition, live_brokers: &BTreeSet<i32>) -> bo
         .is_none_or(|leader| !live_brokers.contains(&leader))
 }
 
+/// The number of in-sync replicas, as Java's `List.size()` gives it.
+fn isr_count(partition: &Partition) -> i64 {
+    i64::try_from(partition.isr.len()).unwrap_or(i64::MAX)
+}
+
 /// `--under-min-isr-partitions`: no leader, or fewer in-sync replicas than
 /// `min.insync.replicas`. As in Kafka, the minimum is read only for a
 /// partition that has a leader.
 pub fn is_under_min_isr(
     partition: &Partition,
-    min_isr: impl FnOnce() -> Result<usize, String>,
+    min_isr: impl FnOnce() -> Result<i32, String>,
 ) -> Result<bool, String> {
     if partition.leader.is_none() {
         return Ok(true);
     }
-    Ok(partition.isr.len() < min_isr()?)
+    Ok(isr_count(partition) < i64::from(min_isr()?))
 }
 
 /// `--at-min-isr-partitions`: exactly `min.insync.replicas` in-sync
 /// replicas.
 pub fn is_at_min_isr(
     partition: &Partition,
-    min_isr: impl FnOnce() -> Result<usize, String>,
+    min_isr: impl FnOnce() -> Result<i32, String>,
 ) -> Result<bool, String> {
-    Ok(min_isr()? == partition.isr.len())
+    Ok(i64::from(min_isr()?) == isr_count(partition))
+}
+
+/// Kafka's `PartitionDescription.minIsrCount`:
+/// `Integer.parseInt(config.get("min.insync.replicas").value())`, with the
+/// messages of the exceptions it throws on a JDK 21.
+///
+/// # Errors
+/// Returns the message of the `NullPointerException` for a config without
+/// the entry, and of the `NumberFormatException` for a value that is not an
+/// `int`.
+pub fn min_insync_replicas(config: &Config) -> Result<i32, String> {
+    let entry = config.get("min.insync.replicas").ok_or_else(|| {
+        "Cannot invoke \"org.apache.kafka.clients.admin.ConfigEntry.value()\" because the return \
+         value of \"org.apache.kafka.clients.admin.Config.get(String)\" is null"
+            .to_owned()
+    })?;
+    match &entry.value {
+        Some(value) => parse_int(value),
+        None => Err("Cannot parse null string: null".to_owned()),
+    }
 }
 
 /// One of `kafka-topics --describe`'s filters.
@@ -149,13 +175,27 @@ impl Selectors {
 /// Everything `--describe` needs about one topic.
 pub struct TopicReport<'a> {
     pub topic: &'a Topic,
-    /// The topic's non-default configs, by name.
-    pub configs: &'a BTreeMap<String, String>,
-    /// The effective `min.insync.replicas`, or why it is not known.
-    pub min_isr: Result<usize, String>,
+    /// The topic's non-default configs, in the order that `kafka-topics`
+    /// prints them.
+    pub configs: &'a [(String, String)],
+    /// The effective `min.insync.replicas`, or the message of the exception
+    /// that reading it throws.
+    pub min_isr: Result<i32, String>,
     /// The ongoing reassignments, by partition.
     pub reassignments: &'a BTreeMap<i32, Reassignment>,
 }
+
+/// A topic whose description throws part way, as Kafka's does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    /// The lines that `kafka-topics` printed of the topic before it threw.
+    pub printed: Vec<String>,
+    /// The message of the exception.
+    pub message: String,
+}
+
+/// `List.get(0)` of an empty list.
+const NO_FIRST_PARTITION: &str = "Index 0 out of bounds for length 0";
 
 fn joined(ids: &[i32]) -> String {
     ids.iter().map(i32::to_string).collect::<Vec<_>>().join(",")
@@ -234,48 +274,66 @@ fn partition_json(partition: &Partition, reassignment: Option<&Reassignment>) ->
 ///
 /// This is Kafka's `printDescribeConfig` followed by
 /// `printPartitionDescription`.
+///
+/// # Errors
+/// Returns the lines printed so far and the message of the exception where
+/// Kafka's description throws: at a topic without partitions, or where a
+/// selector reads a `min.insync.replicas` that it cannot parse.
 pub fn describe_topic(
     report: &TopicReport<'_>,
     selectors: &Selectors,
     live_brokers: &BTreeSet<i32>,
-) -> Result<Option<(Vec<String>, Value)>, String> {
+) -> Result<Option<(Vec<String>, Value)>, Failure> {
     let topic = report.topic;
     let mut lines = Vec::new();
     let first = topic.partitions.first();
     let replication_factor = first.map_or(0, |partition| {
         replication_factor(partition, report.reassignments.get(&partition.index))
     });
-    let configs = config_order(
-        report
-            .configs
-            .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect(),
-    );
     if selectors.describe_configs()
-        && (!selectors.has(Selector::TopicsWithOverrides) || !configs.is_empty())
+        && (!selectors.has(Selector::TopicsWithOverrides) || !report.configs.is_empty())
     {
-        lines.push(summary_line(topic, replication_factor, &configs));
+        if first.is_none() {
+            return Err(Failure {
+                printed: lines,
+                message: NO_FIRST_PARTITION.to_owned(),
+            });
+        }
+        lines.push(summary_line(topic, replication_factor, report.configs));
     }
     let mut partitions = Vec::new();
     if selectors.describe_partitions() {
         for partition in &topic.partitions {
             let reassignment = report.reassignments.get(&partition.index);
-            if should_print(partition, reassignment, report, selectors, live_brokers)? {
-                lines.push(partition_line(&topic.name, partition, reassignment));
-                partitions.push(partition_json(partition, reassignment));
+            match should_print(partition, reassignment, report, selectors, live_brokers) {
+                Ok(true) => {
+                    lines.push(partition_line(&topic.name, partition, reassignment));
+                    partitions.push(partition_json(partition, reassignment));
+                }
+                Ok(false) => {}
+                Err(message) => {
+                    return Err(Failure {
+                        printed: lines,
+                        message,
+                    });
+                }
             }
         }
     }
     if lines.is_empty() {
         return Ok(None);
     }
+    let configs = report
+        .configs
+        .iter()
+        .map(|(name, value)| (name.clone(), Value::String(value.clone())))
+        .collect::<Map<_, _>>();
     let value = json!({
         "topic": topic.name,
         "topic_id": topic.id.as_ref().map(uuid_to_string),
         "partition_count": topic.partitions.len(),
         "replication_factor": replication_factor,
-        "configs": report.configs,
+        "configs": configs,
         "partitions": partitions,
     });
     Ok(Some((lines, value)))
@@ -302,12 +360,21 @@ fn should_print(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use krabka_client_admin::{ConfigEntry, ConfigSource, ConfigType};
 
     use super::*;
 
     // Under replicated, unavailable, under min ISR, at min ISR.
     type Predicates = (bool, bool, Result<bool, String>, Result<bool, String>);
-    type Rendered = Result<Option<String>, String>;
+    type Rendered = Result<Option<String>, Failure>;
+    // Name, topic, selectors, min ISR, and the expected failure.
+    type FailureCase<'a> = (
+        &'static str,
+        &'a Topic,
+        &'static [Selector],
+        Result<i32, String>,
+        Failure,
+    );
 
     fn partition(index: i32, leader: Option<i32>, replicas: &[i32], isr: &[i32]) -> Partition {
         Partition {
@@ -410,11 +477,11 @@ mod tests {
 
     fn render(
         topic: &Topic,
-        configs: &BTreeMap<String, String>,
-        min_isr: Result<usize, String>,
+        configs: &[(String, String)],
+        min_isr: Result<i32, String>,
         reassignments: &BTreeMap<i32, Reassignment>,
         selectors: &[Selector],
-    ) -> Result<Option<String>, String> {
+    ) -> Rendered {
         let report = TopicReport {
             topic,
             configs,
@@ -431,10 +498,10 @@ mod tests {
     #[test]
     fn describe_renders_the_jvm_tab_delimited_shape() {
         let topic = orders();
-        let configs = BTreeMap::from([
-            ("retention.ms".to_owned(), "1000".to_owned()),
+        let configs = [
             ("min.insync.replicas".to_owned(), "2".to_owned()),
-        ]);
+            ("retention.ms".to_owned(), "1000".to_owned()),
+        ];
         let reassignments = BTreeMap::from([(
             2,
             Reassignment {
@@ -491,7 +558,11 @@ mod tests {
             id: None,
             partitions: vec![partition(0, Some(1), &[1], &[1])],
         };
-        let empty = BTreeMap::new();
+        let empty = [];
+        let unknown = || Failure {
+            printed: Vec::new(),
+            message: "unknown".to_owned(),
+        };
         let cases: [(&[Selector], Rendered); 4] = [
             (&[Selector::TopicsWithOverrides], Ok(None)),
             (&[Selector::UnderReplicated], Ok(None)),
@@ -505,7 +576,7 @@ mod tests {
                 )),
             ),
             // The minimum is needed and unknown, so the selector fails.
-            (&[Selector::AtMinIsr], Err("unknown".to_owned())),
+            (&[Selector::AtMinIsr], Err(unknown())),
         ];
         for (selectors, expected) in cases {
             assert!(
@@ -524,7 +595,7 @@ mod tests {
     #[test]
     fn the_json_rendering_carries_the_printed_partitions() {
         let topic = orders();
-        let configs = BTreeMap::from([("retention.ms".to_owned(), "1000".to_owned())]);
+        let configs = [("retention.ms".to_owned(), "1000".to_owned())];
         let reassignments = BTreeMap::new();
         let report = TopicReport {
             topic: &topic,
@@ -556,5 +627,111 @@ mod tests {
                     }],
                 })
         );
+    }
+
+    #[test]
+    fn a_failing_topic_keeps_the_lines_printed_before_it() {
+        let topic = orders();
+        let empty_topic = Topic {
+            name: "empty".into(),
+            id: None,
+            partitions: Vec::new(),
+        };
+        let p0 = "\tTopic: orders\tPartition: 0\tLeader: 1\tReplicas: 1,2\tIsr: 1,2\tElr: N/A\t\
+                  LastKnownElr: N/A";
+        let p1 = "\tTopic: orders\tPartition: 1\tLeader: none\tReplicas: 2,1\tIsr: \tElr: \t\
+                  LastKnownElr: 2";
+        let bad = || Err("For input string: \"x\"".to_owned());
+        let failure = |printed: &[&str], message: &str| Failure {
+            printed: printed.iter().map(|line| (*line).to_owned()).collect(),
+            message: message.to_owned(),
+        };
+        let cases: Vec<FailureCase<'_>> = vec![
+            // Broker 1 is not live, so partitions 0 and 1 print as
+            // unavailable without the minimum, and partition 2, led by live
+            // broker 2, is the first that reads it.
+            (
+                "under min isr reads the minimum where the leader is live",
+                &topic,
+                &[Selector::Unavailable, Selector::UnderMinIsr],
+                bad(),
+                failure(&[p0, p1], "For input string: \"x\""),
+            ),
+            (
+                "at min isr reads it for the first partition",
+                &topic,
+                &[Selector::AtMinIsr],
+                bad(),
+                failure(&[], "For input string: \"x\""),
+            ),
+            (
+                "a topic without partitions has no first partition",
+                &empty_topic,
+                &[],
+                Ok(1),
+                failure(&[], NO_FIRST_PARTITION),
+            ),
+        ];
+        for (name, topic, selectors, min_isr, expected) in cases {
+            let report = TopicReport {
+                topic,
+                configs: &[],
+                min_isr,
+                reassignments: &BTreeMap::new(),
+            };
+            let selectors = Selectors(selectors.iter().copied().collect());
+            assert!(
+                describe_topic(&report, &selectors, &BTreeSet::from([2]))
+                    .map(|found| found.map(|(lines, _)| lines))
+                    == Err(expected),
+                "{name}"
+            );
+        }
+    }
+
+    fn entry(name: &str, value: Option<&str>) -> (String, ConfigEntry) {
+        (
+            name.to_owned(),
+            ConfigEntry {
+                name: name.to_owned(),
+                value: value.map(str::to_owned),
+                source: ConfigSource::DefaultConfig,
+                is_sensitive: false,
+                is_read_only: false,
+                synonyms: Vec::new(),
+                config_type: ConfigType::Int,
+                documentation: None,
+            },
+        )
+    }
+
+    #[test]
+    fn min_insync_replicas_is_read_as_kafka_parses_it() {
+        let config = |entries: Vec<(String, ConfigEntry)>| Config {
+            entries: entries.into_iter().collect(),
+        };
+        let cases = [
+            (config(vec![entry("min.insync.replicas", Some("2"))]), Ok(2)),
+            (
+                config(vec![entry("min.insync.replicas", Some(" 2"))]),
+                Err("For input string: \" 2\"".to_owned()),
+            ),
+            (
+                config(vec![entry("min.insync.replicas", None)]),
+                Err("Cannot parse null string: null".to_owned()),
+            ),
+            (
+                config(vec![entry("retention.ms", Some("1"))]),
+                Err(
+                    "Cannot invoke \"org.apache.kafka.clients.admin.ConfigEntry.value()\" \
+                     because the return value of \
+                     \"org.apache.kafka.clients.admin.Config.get(String)\" is null"
+                        .to_owned(),
+                ),
+            ),
+        ];
+        for (config, expected) in cases {
+            assert!(min_insync_replicas(&config) == expected, "{config:?}");
+        }
     }
 }

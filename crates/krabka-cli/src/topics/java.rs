@@ -6,11 +6,12 @@
 //! `java.util.regex` pattern. Byte-level agreement with its stdout needs each
 //! of these reproduced.
 
+use krabka_client_admin::Config;
 use krabka_ids::KafkaUuid;
 use regex::Regex;
 
 pub use crate::jvm::parse_int;
-use crate::jvm::{Table, hash_order, order_in_table, string_hash};
+use crate::jvm::{Table, default_capacity, hash_order, order_in_table, string_hash};
 
 /// The order in which `kafka-topics --describe` prints the topics it
 /// resolved by name, given them in sorted order.
@@ -32,23 +33,27 @@ pub fn default_order(names: Vec<String>) -> Vec<String> {
     hash_order(names, Table::Default, |name| string_hash(name))
 }
 
-/// How many entries a Kafka 4.3.1 broker returns for one topic's
-/// `DescribeConfigs`, which fixes the table capacity of the `Config` map
-/// that `kafka-topics` iterates.
-const TOPIC_CONFIG_ENTRIES: usize = 33;
-
-/// The order in which `kafka-topics --describe` prints topic config
-/// overrides after `Configs:`.
+/// The non-default configs of a topic, as `kafka-topics --describe` prints
+/// them after `Configs:`: each entry whose source is not the built-in
+/// default, with Java's `null` for a withheld value.
 ///
 /// `Config` keeps every entry of the `DescribeConfigs` answer in a default
-/// `HashMap`, and the overrides print in its iteration order. The broker
-/// answers every topic config, so the table capacity is that of 33 entries.
-/// Two overrides that share a bucket print in the broker's answer order,
-/// which this approximates with name order.
-pub fn config_order(sorted_overrides: Vec<(String, String)>) -> Vec<(String, String)> {
+/// `HashMap`, and the entries print in its iteration order, so the table has
+/// grown for all of them. Two entries that share a bucket print in the
+/// broker's answer order, which this approximates with name order.
+pub fn non_default_configs(config: &Config) -> Vec<(String, String)> {
+    let non_default = config
+        .entries
+        .values()
+        .filter(|entry| !entry.is_default())
+        .map(|entry| {
+            let value = entry.value.clone().unwrap_or_else(|| "null".to_owned());
+            (entry.name.clone(), value)
+        })
+        .collect();
     order_in_table(
-        sorted_overrides,
-        crate::jvm::default_capacity(TOPIC_CONFIG_ENTRIES),
+        non_default,
+        default_capacity(config.entries.len()),
         |(name, _)| string_hash(name),
     )
 }
