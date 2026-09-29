@@ -91,6 +91,19 @@ pub struct CommandResult {
     /// for a command whose stdout must stay byte-identical to the Kafka
     /// tool's own dry-run report.
     pub marker_on_stderr: bool,
+    /// How the human rendering ends its last line.
+    pub last_line: LastLine,
+}
+
+/// How the human rendering of a [`CommandResult`] ends its last line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LastLine {
+    /// With a newline, as every other line.
+    #[default]
+    Newline,
+    /// With no newline, where the Kafka tool writes that line with `printf`
+    /// and no `%n`.
+    Bare,
 }
 
 impl CommandResult {
@@ -116,6 +129,16 @@ impl CommandResult {
             dry_run: false,
             notices: Vec::new(),
             marker_on_stderr: false,
+            last_line: LastLine::Newline,
+        }
+    }
+
+    /// Ends the human rendering without a newline after its last line.
+    #[must_use]
+    pub fn without_final_newline(self) -> Self {
+        Self {
+            last_line: LastLine::Bare,
+            ..self
         }
     }
 
@@ -153,8 +176,12 @@ impl Emit for CommandResult {
         if self.dry_run && !self.marker_on_stderr {
             writeln!(writer, "{DRY_RUN_MARKER}")?;
         }
-        for line in &self.human {
-            writeln!(writer, "{line}")?;
+        for (index, line) in self.human.iter().enumerate() {
+            if self.last_line == LastLine::Bare && index + 1 == self.human.len() {
+                write!(writer, "{line}")?;
+            } else {
+                writeln!(writer, "{line}")?;
+            }
         }
         Ok(())
     }
