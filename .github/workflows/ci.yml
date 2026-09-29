@@ -98,6 +98,24 @@ jobs:
           name: rustdoc
           path: bazel-bin/crates/**/*.rustdoc
           if-no-files-found: error
+  # The container-driven suites: `conformance` compares every krabka command with
+  # the `kafka-*` tool it copies, against a digest-pinned Kafka oracle. Nightly
+  # only, beside the mutation sweep: it starts one Kafka container per command,
+  # which is too slow to gate a pull request. `.bazelrc` filters the `docker`
+  # tag out of every other `bazel test`, so this is the one job that runs them.
+  container:
+    name: container suites
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-container
+          repository-cache: true
+      - run: bazel test --config=docker //...
   # A mutation sweep rebuilds and re-runs a crate's unit tests once per mutant,
   # so it is far too slow to gate a pull request.
   #

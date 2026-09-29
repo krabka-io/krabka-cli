@@ -35,8 +35,15 @@ crate_tests(
     # on the compile action, which is where `env!` reads it.
     data = [":krabka"],
     lib = "krabka-cli",
-    # `conformance` starts a Kafka container through the Docker CLI, which a
-    # Bazel test sandbox does not have. Its cases are `#[ignore]`d under cargo
-    # for the same reason.
-    manual = ["conformance"],
+    # `conformance` compares every command with its `kafka-*` tool against a
+    # Kafka container. Its comparison cases are `#[ignore]`d, so the plain
+    # `conformance_test` runs only what needs no daemon -- the check that every
+    # built-in command has a matrix, and the harness's own unit tests -- and
+    # `conformance_docker_test` runs the rest after loading the digest-pinned
+    # oracle image. `.bazelrc` keeps the latter, tagged `docker`, out of a plain
+    # `bazel test //...`; `--config=docker` selects it.
+    docker = {"conformance": ["apache_kafka_4_3_1"]},
+    # The tag //bazel/images loads the oracle under, which the suite starts
+    # with `--pull=never`. Under Cargo the suite pulls the pinned digest.
+    env = {"KRABKA_ORACLE_IMAGE": "krabka-cli/conformance-oracle:apache-kafka-4.3.1"},
 )
