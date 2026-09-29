@@ -34,7 +34,6 @@ crate_tests(
     # `CARGO_BIN_EXE_<output basename>` for every bin crate named in `data`,
     # on the compile action, which is where `env!` reads it.
     data = [":krabka"],
-    lib = "krabka-cli",
     # `conformance` compares every command with its `kafka-*` tool against a
     # Kafka container. Its comparison cases are `#[ignore]`d, so the plain
     # `conformance_test` runs only what needs no daemon -- the check that every
@@ -46,4 +45,5 @@ crate_tests(
     # The tag //bazel/images loads the oracle under, which the suite starts
     # with `--pull=never`. Under Cargo the suite pulls the pinned digest.
     env = {"KRABKA_ORACLE_IMAGE": "krabka-cli/conformance-oracle:apache-kafka-4.3.1"},
+    lib = "krabka-cli",
 )
