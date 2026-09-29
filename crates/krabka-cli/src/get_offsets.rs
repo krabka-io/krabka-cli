@@ -7,20 +7,21 @@
 //! `topic:partition:offset` line per partition, ordered as the JVM tool orders
 //! them, and leaves out a partition with no such offset.
 //!
-//! The offset lookup is `ListOffsets`, behind [`OffsetLookup`]. The pinned
-//! `krabka-client-rs` has no `AdminClient::list_offsets`, so the lookup is
-//! [`Unavailable`] and, after the selection resolves, the command fails with
-//! a "not supported by this build" error. Parsing, selection and rendering
-//! are complete.
+//! The offset lookup is `AdminClient::list_offsets`, behind
+//! [`OffsetLookup`], with the `READ_UNCOMMITTED` isolation of the default
+//! `ListOffsetsOptions` that `GetOffsetShell` passes.
 
 use std::{cmp::Ordering, collections::BTreeMap};
 
 use clap::Args;
+use krabka_client_admin::{
+    AdminClient, DescribeTopicsOptions, IsolationLevel, ListTopicsOptions, OffsetSpec,
+};
 use regex::Regex;
 use serde_json::json;
 
 use crate::{
-    compat::{KafkaException, not_supported},
+    compat::KafkaException,
     connection::ConnectionArgs,
     output::{CommandError, CommandResult},
 };
@@ -59,34 +60,6 @@ pub struct GetOffsetsArgs {
     exclude_internal_topics: bool,
 }
 
-/// Which offset of a partition to look up, as Kafka's `OffsetSpec`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OffsetSpec {
-    Earliest,
-    Latest,
-    MaxTimestamp,
-    EarliestLocal,
-    LatestTiered,
-    EarliestPendingUpload,
-    Timestamp(i64),
-}
-
-impl OffsetSpec {
-    /// The `timestamp` that `ListOffsets` carries for this spec.
-    #[must_use]
-    pub const fn wire_timestamp(self) -> i64 {
-        match self {
-            Self::Latest => -1,
-            Self::Earliest => -2,
-            Self::MaxTimestamp => -3,
-            Self::EarliestLocal => -4,
-            Self::LatestTiered => -5,
-            Self::EarliestPendingUpload => -6,
-            Self::Timestamp(timestamp) => timestamp,
-        }
-    }
-}
-
 /// `GetOffsetShell.parseOffsetSpec`.
 pub fn parse_offset_spec(value: &str) -> Result<OffsetSpec, String> {
     Ok(match value {
@@ -103,7 +76,7 @@ pub fn parse_offset_spec(value: &str) -> Result<OffsetSpec, String> {
             Ok(-4) => OffsetSpec::EarliestLocal,
             Ok(-5) => OffsetSpec::LatestTiered,
             Ok(-6) => OffsetSpec::EarliestPendingUpload,
-            Ok(timestamp) => OffsetSpec::Timestamp(timestamp),
+            Ok(timestamp) => OffsetSpec::ForTimestamp(timestamp),
             Err(_) => {
                 return Err(format!(
                     "Malformed time argument {value}. Please use -1 or latest / -2 or earliest / -3 or max-timestamp / -4 or earliest-local / -5 or latest-tiered / -6 or earliest-pending-upload, or a specified long format timestamp"
@@ -291,11 +264,8 @@ pub fn select_partitions(
 pub type PartitionOffset = Result<i64, i16>;
 
 /// Where log offsets come from: `ListOffsets`, as Kafka's `Admin.listOffsets`
-/// sends it to each partition's leader.
-///
-/// This is the seam for `AdminClient::list_offsets`, which the pinned
-/// `krabka-client-rs` revision does not have. [`Unavailable`] stands in for
-/// it until the pin moves.
+/// sends it to each partition's leader. [`ListOffsets`] is the lookup of the
+/// commands; tests substitute fixed tables.
 pub trait OffsetLookup {
     /// The offset that `spec` names for each of `partitions`. A partition
     /// the answer leaves out has an unknown offset.
@@ -306,24 +276,93 @@ pub trait OffsetLookup {
     ) -> Result<BTreeMap<(String, i32), PartitionOffset>, CommandError>;
 }
 
-/// The lookup of the pinned `krabka-client-rs`, which has no `list_offsets`:
-/// every lookup fails with [`CommandError::Unsupported`].
-pub struct Unavailable;
+/// The lookup through `AdminClient::list_offsets` with one isolation level.
+pub struct ListOffsets<'a> {
+    client: &'a AdminClient,
+    isolation_level: IsolationLevel,
+}
 
-impl OffsetLookup for Unavailable {
-    fn offsets(
-        &self,
-        _partitions: &[(String, i32)],
-        spec: OffsetSpec,
-    ) -> impl Future<Output = Result<BTreeMap<(String, i32), PartitionOffset>, CommandError>> {
-        std::future::ready(Err(not_supported(
-            &format!(
-                "reading log offsets (ListOffsets timestamp {})",
-                spec.wire_timestamp()
-            ),
-            "list_offsets",
-        )))
+impl<'a> ListOffsets<'a> {
+    /// A lookup through `client` with the `READ_UNCOMMITTED` isolation of
+    /// Kafka's default `ListOffsetsOptions`.
+    #[must_use]
+    pub const fn new(client: &'a AdminClient) -> Self {
+        Self {
+            client,
+            isolation_level: IsolationLevel::ReadUncommitted,
+        }
     }
+}
+
+impl OffsetLookup for ListOffsets<'_> {
+    async fn offsets(
+        &self,
+        partitions: &[(String, i32)],
+        spec: OffsetSpec,
+    ) -> Result<BTreeMap<(String, i32), PartitionOffset>, CommandError> {
+        let specs = partitions
+            .iter()
+            .map(|partition| (partition.clone(), spec))
+            .collect();
+        Ok(self
+            .client
+            .list_offsets(&specs, self.isolation_level)
+            .await
+            .into_iter()
+            .map(|(partition, answer)| {
+                (
+                    partition,
+                    answer
+                        .map(|listed| listed.offset)
+                        .map_err(|error| error.code),
+                )
+            })
+            .collect())
+    }
+}
+
+/// `listPartitionInfos`: the topics of `listTopics` that `selection` allows,
+/// internal topics left out under `exclude_internal`, and the partitions of
+/// each as `describeTopics` names them. A topic that cannot be described
+/// fails the command, as `allTopicNames().get()` does.
+async fn list_partitions(
+    client: &AdminClient,
+    selection: &Selection,
+    exclude_internal: bool,
+) -> Result<Vec<(String, i32)>, CommandError> {
+    let topics = client
+        .list_topics(ListTopicsOptions {
+            list_internal: !exclude_internal,
+        })
+        .await?;
+    let allowed = topics
+        .keys()
+        .filter(|topic| selection.allows_topic(topic))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if allowed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut partitions = Vec::new();
+    for (topic, description) in client
+        .describe_topics(&allowed, DescribeTopicsOptions::default())
+        .await
+    {
+        let description = description.map_err(|error| {
+            let exception = KafkaException::for_code(error.code);
+            CommandError::Other(match error.message {
+                Some(message) if !message.is_empty() => format!("{}: {message}", exception.class()),
+                _ => exception.to_java_string(),
+            })
+        })?;
+        partitions.extend(
+            description
+                .partitions
+                .iter()
+                .map(|partition| (topic.clone(), partition.partition)),
+        );
+    }
+    Ok(partitions)
 }
 
 /// `TopicPartition.toString()` order, which `GetOffsetShell` sorts by.
@@ -378,18 +417,13 @@ impl GetOffsetsArgs {
             self.partitions.as_deref(),
         )?;
         let spec = parse_offset_spec(&self.time)?;
-        let mut client = self.connection.connect("get-offsets").await?;
-        let cluster = client
-            .describe_partition_assignments(&[])
-            .await?
-            .into_iter()
-            .map(|assignment| (assignment.topic, assignment.partition))
-            .collect::<Vec<_>>();
+        let client = self.connection.connect("get-offsets").await?;
+        let cluster = list_partitions(&client, &selection, self.exclude_internal_topics).await?;
         let partitions = select_partitions(&cluster, &selection, self.exclude_internal_topics);
         if partitions.is_empty() {
             return Err("Could not match any topic-partitions with the specified filters".into());
         }
-        let answers = Unavailable.offsets(&partitions, spec).await?;
+        let answers = ListOffsets::new(&client).offsets(&partitions, spec).await?;
         Ok(offsets_result(answers.into_iter().collect()))
     }
 }
@@ -408,30 +442,33 @@ mod tests {
             ))
         };
         let cases = [
-            ("-1", Ok(-1)),
-            ("latest", Ok(-1)),
-            ("-2", Ok(-2)),
-            ("earliest", Ok(-2)),
-            ("-3", Ok(-3)),
-            ("max-timestamp", Ok(-3)),
-            ("-4", Ok(-4)),
-            ("earliest-local", Ok(-4)),
-            ("-5", Ok(-5)),
-            ("latest-tiered", Ok(-5)),
-            ("-6", Ok(-6)),
-            ("earliest-pending-upload", Ok(-6)),
-            ("1700000000000", Ok(1_700_000_000_000)),
-            ("0", Ok(0)),
-            ("-7", Ok(-7)),
+            ("-1", Ok(OffsetSpec::Latest)),
+            ("latest", Ok(OffsetSpec::Latest)),
+            ("-2", Ok(OffsetSpec::Earliest)),
+            ("earliest", Ok(OffsetSpec::Earliest)),
+            ("-3", Ok(OffsetSpec::MaxTimestamp)),
+            ("max-timestamp", Ok(OffsetSpec::MaxTimestamp)),
+            ("-4", Ok(OffsetSpec::EarliestLocal)),
+            ("earliest-local", Ok(OffsetSpec::EarliestLocal)),
+            ("-5", Ok(OffsetSpec::LatestTiered)),
+            ("latest-tiered", Ok(OffsetSpec::LatestTiered)),
+            ("-6", Ok(OffsetSpec::EarliestPendingUpload)),
+            (
+                "earliest-pending-upload",
+                Ok(OffsetSpec::EarliestPendingUpload),
+            ),
+            (
+                "1700000000000",
+                Ok(OffsetSpec::ForTimestamp(1_700_000_000_000)),
+            ),
+            ("0", Ok(OffsetSpec::ForTimestamp(0))),
+            ("-7", Ok(OffsetSpec::ForTimestamp(-7))),
             ("9223372036854775808", malformed("9223372036854775808")),
             ("bogus", malformed("bogus")),
             ("Latest", malformed("Latest")),
         ];
         for (value, expected) in cases {
-            check!(
-                parse_offset_spec(value).map(OffsetSpec::wire_timestamp) == expected,
-                "{value}"
-            );
+            check!(parse_offset_spec(value) == expected, "{value}");
         }
     }
 

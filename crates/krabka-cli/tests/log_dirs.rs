@@ -15,7 +15,7 @@ use std::{
 
 use assert2::check;
 use krabka_protocol::{
-    Encode,
+    Decode, Encode,
     owned::{
         api_versions_request,
         api_versions_response::{ApiVersion, ApiVersionsResponse},
@@ -25,6 +25,10 @@ use krabka_protocol::{
         describe_log_dirs_response::{
             DescribeLogDirsPartition, DescribeLogDirsResponse, DescribeLogDirsResult,
             DescribeLogDirsTopic,
+        },
+        list_offsets_request::{self, ListOffsetsRequest},
+        list_offsets_response::{
+            ListOffsetsPartitionResponse, ListOffsetsResponse, ListOffsetsTopicResponse,
         },
         metadata_request,
         metadata_response::{
@@ -40,6 +44,7 @@ use self::support::{MockBroker, Reply, respond};
 const METADATA_VERSION: i16 = 12;
 const DESCRIBE_LOG_DIRS_VERSION: i16 = 4;
 const DESCRIBE_CLUSTER_VERSION: i16 = 1;
+const LIST_OFFSETS_VERSION: i16 = 7;
 
 struct Run {
     code: Option<i32>,
@@ -84,7 +89,8 @@ fn metadata(brokers: &[(i32, u16)], topics: &[(&str, i32)]) -> Reply {
                     partitions: (0..*partitions)
                         .map(|partition_index| MetadataResponsePartition {
                             partition_index,
-                            replica_nodes: vec![1],
+                            leader_id: partition_index + 1,
+                            replica_nodes: vec![partition_index + 1],
                             ..Default::default()
                         })
                         .collect(),
@@ -152,6 +158,43 @@ fn cluster_description(brokers: &[(i32, u16)]) -> Reply {
     )
 }
 
+/// Broker 1's `ListOffsets` answer: each partition's offset is its
+/// `-timestamp` for the sentinels -1 to -3, and no offset for a timestamp.
+fn list_offsets(frame: &[u8]) -> Reply {
+    let client_id = usize::try_from(i16::from_be_bytes([frame[0], frame[1]]).max(0)).unwrap();
+    let flexible = LIST_OFFSETS_VERSION >= list_offsets_request::FLEXIBLE_MIN;
+    let mut body = &frame[2 + client_id + usize::from(flexible)..];
+    let request = ListOffsetsRequest::decode(&mut body, LIST_OFFSETS_VERSION).unwrap();
+    respond(
+        &ListOffsetsResponse {
+            topics: request
+                .topics
+                .into_iter()
+                .map(|topic| ListOffsetsTopicResponse {
+                    name: topic.name,
+                    partitions: topic
+                        .partitions
+                        .iter()
+                        .map(|partition| ListOffsetsPartitionResponse {
+                            partition_index: partition.partition_index,
+                            offset: if partition.timestamp < 0 {
+                                -partition.timestamp
+                            } else {
+                                -1
+                            },
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        },
+        LIST_OFFSETS_VERSION,
+        list_offsets_request::FLEXIBLE_MIN,
+    )
+}
+
 /// A port with nothing listening on it.
 fn refused_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -208,10 +251,15 @@ async fn cluster() -> (Bootstrap, MockBroker) {
     let own_port = Arc::new(Mutex::new(0_u16));
     let relay = Arc::clone(&own_port);
     let refused = refused_port();
-    let first = krabka_client_core::MockBroker::start(move |api_key, version, _, _| {
+    let first = krabka_client_core::MockBroker::start(move |api_key, version, _, frame| {
         let port = *relay.lock().unwrap();
         let reply = match (api_key, version) {
-            (api_versions_request::API_KEY, _) => return Some(api_versions(&advertised)),
+            (api_versions_request::API_KEY, _) => {
+                let mut own = advertised.to_vec();
+                own.push((list_offsets_request::API_KEY, 1, LIST_OFFSETS_VERSION));
+                return Some(api_versions(&own));
+            }
+            (list_offsets_request::API_KEY, LIST_OFFSETS_VERSION) => list_offsets(frame),
             (metadata_request::API_KEY, METADATA_VERSION) => metadata(
                 &[(1, port), (2, second_port), (3, refused)],
                 &[("orders", 2), ("events", 1)],
@@ -409,7 +457,7 @@ async fn alter_refuses_without_confirmation_and_dry_run_moves_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn get_offsets_selects_partitions_then_needs_list_offsets() {
+async fn get_offsets_prints_each_listed_offset_and_fails_a_failed_partition() {
     let (first, second) = cluster().await;
     let run = |extra: &[&str]| {
         ["get-offsets", "--bootstrap-server", &first.address()]
@@ -418,32 +466,57 @@ async fn get_offsets_selects_partitions_then_needs_list_offsets() {
             .map(|arg| (*arg).to_owned())
             .collect::<Vec<_>>()
     };
-    let unmatched = krabka(run(&["--topic", "nope"])).await;
+    // Broker 1 leads orders-0 and events-0 and answers ListOffsets. Broker 2
+    // leads orders-1 and does not advertise ListOffsets, so the client fails
+    // that partition with UNSUPPORTED_VERSION, as Kafka's does.
+    let cases: [(&[&str], i32, &str, &str); 6] = [
+        (
+            &["--topic", "nope"],
+            1,
+            "",
+            "krabka get-offsets: Could not match any topic-partitions with the specified filters\n",
+        ),
+        (
+            &["--topic-partitions", "orders:0,events", "--time", "-2"],
+            0,
+            "events:0:2\norders:0:2\n",
+            "",
+        ),
+        (
+            &["--topic", "orders", "--partitions", "0", "--time", "-3"],
+            0,
+            "orders:0:3\n",
+            "",
+        ),
+        (&["--topic", "events", "--time", "1700000000000"], 0, "", ""),
+        (
+            &["--topic", "ev.*", "--time", "latest"],
+            0,
+            "events:0:1\n",
+            "",
+        ),
+        (
+            &["--time", "soon"],
+            1,
+            "",
+            "krabka get-offsets: Malformed time argument soon. Please use -1 or latest / -2 or earliest / -3 or max-timestamp / -4 or earliest-local / -5 or latest-tiered / -6 or earliest-pending-upload, or a specified long format timestamp\n",
+        ),
+    ];
+    for (extra, code, stdout, stderr) in cases {
+        let out = krabka(run(extra)).await;
+        check!(
+            (out.code, out.stdout.as_str(), out.stderr.as_str()) == (Some(code), stdout, stderr),
+            "{extra:?}"
+        );
+    }
+    let failed = krabka(run(&["--topic", "orders"])).await;
     check!(
-        (unmatched.code, unmatched.stderr.as_str())
+        (failed.code, failed.stdout.as_str(), failed.stderr.as_str())
             == (
                 Some(1),
-                "krabka get-offsets: Could not match any topic-partitions with the specified filters\n"
+                "orders:0:1\n",
+                "Skip getting offsets for topic-partition orders-1 due to error: org.apache.kafka.common.errors.UnsupportedVersionException: The version of API is not supported.\n"
             )
-    );
-    let deferred = krabka(run(&[
-        "--topic-partitions",
-        "orders:1-",
-        "--time",
-        "earliest",
-    ]))
-    .await;
-    check!(deferred.code == Some(1));
-    check!(
-        deferred.stderr
-            == "krabka get-offsets: reading log offsets (ListOffsets timestamp -2) is not supported by this build: it needs AdminClient::list_offsets, which the pinned krabka-client-rs revision does not have\n"
-    );
-    let malformed = krabka(run(&["--time", "soon"])).await;
-    check!(malformed.code == Some(1));
-    check!(
-        malformed
-            .stderr
-            .starts_with("krabka get-offsets: Malformed time argument soon.")
     );
     first.stop();
     second.stop();
