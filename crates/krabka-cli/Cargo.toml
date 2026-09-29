@@ -34,16 +34,35 @@ crabka-gres-control = { git = "https://github.com/krabka-io/gres", rev = "b664ac
 crabka-security = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
 crabka-units = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
 krabka-client-admin = { version = "0.4.0" }
+krabka-client-consumer = { version = "0.4.0" }
 krabka-client-core = { version = "0.4.0" }
-krabka-format = { version = "0.4.0" }
+krabka-client-producer = { version = "0.4.0" }
+krabka-format = { version = "0.6.1" }
+# `KafkaUuid`, Kafka's base64url form of a cluster, topic or directory id.
+krabka-ids = { version = "0.4.0" }
+# The KIP-584 feature registry and the `metadata.version` table that
+# `krabka features` and `krabka storage` read.
+krabka-metadata = { version = "0.4.0" }
+# `Record`, the envelope `krabka_metadata::from_kafka_record` decodes a
+# bootstrap record from, for `krabka storage info`, and the topic id of the
+# fetch that `console-consumer --partition` sends.
+krabka-protocol = { version = "0.4.0" }
 krabka-security = { workspace = true }
 krabka-units = { workspace = true }
+# `console-consumer --include`, the `headers.separator` of `console-producer`,
+# and the topic patterns of `get-offsets` and `consumer-groups
+# --validate-regex` are Java regular expressions.
+regex = "1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "io-std", "io-util", "process", "signal"] }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# The type of the ids that krabka-client-admin reports, which `KafkaUuid`
+# wraps.
+uuid = { workspace = true }
 
 # Forwards SIGTERM to a delegated plugin through a safe wrapper; the crate
 # forbids `unsafe`.
@@ -61,8 +80,6 @@ krabka-protocol = { version = "0.4.0" }
 krabka-units = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
-# Names each qualification run in tests/candidate_broker.rs.
-uuid = { workspace = true }
 
 # tests/delegation.rs and tests/cancel.rs signal `krabka` and the plugin it
 # runs.

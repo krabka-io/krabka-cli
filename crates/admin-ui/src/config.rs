@@ -7,7 +7,7 @@ use std::{
 };
 
 use clap::Parser;
-use krabka_client_core::security::TlsConnectorConfig;
+use krabka_client_core::security::{KeyStore, TlsConnectorConfig, TrustStore};
 use krabka_security::ListenerProtocol;
 use krabka_units::{parse, prelude::*};
 use thiserror::Error;
@@ -231,11 +231,24 @@ impl BrokerSecurityConfig {
                 trust_roots_pem,
                 server_name,
                 client_identity,
-            } => Some(TlsConnectorConfig {
-                trust_roots_pem: trust_roots_pem.clone(),
-                server_name: server_name.clone(),
-                client_identity: client_identity.clone(),
-            }),
+            } => {
+                // `TlsConnectorConfig` caches its built rustls config in a
+                // private field, so it is built from its default.
+                let mut config = TlsConnectorConfig::default();
+                config.trust_store = trust_roots_pem
+                    .clone()
+                    .map_or(TrustStore::Platform, TrustStore::PemFile);
+                config.key_store =
+                    client_identity
+                        .clone()
+                        .map(|(certificate_chain, private_key)| KeyStore::PemFiles {
+                            certificate_chain,
+                            private_key,
+                            key_password: None,
+                        });
+                config.server_name.clone_from(server_name);
+                Some(config)
+            }
         }
     }
 }

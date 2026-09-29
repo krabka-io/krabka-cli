@@ -12,7 +12,7 @@ use krabka_admin_ui::{
     session::{SessionId, SessionStore},
 };
 use krabka_client_admin::{AclEntry, AclOperation, PatternType, PermissionType, ResourceType};
-use krabka_client_core::security::SaslCredentials;
+use krabka_client_core::security::{KeyStore, SaslCredentials, TrustStore};
 use krabka_security::{ListenerProtocol, SaslMechanism};
 use krabka_units::secs;
 
@@ -53,10 +53,15 @@ fn build_security_preserves_sasl_ssl_tls_material() {
     let tls = security.tls.expect("SASL_SSL carries TLS config");
 
     assert!(security.protocol == ListenerProtocol::SaslSsl);
-    assert!(tls.trust_roots_pem == Some(PathBuf::from("ca.pem")));
+    assert!(tls.trust_store == TrustStore::PemFile(PathBuf::from("ca.pem")));
     assert!(tls.server_name == "broker.example.test");
     assert!(
-        tls.client_identity == Some((PathBuf::from("client.crt"), PathBuf::from("client.key")))
+        tls.key_store
+            == Some(KeyStore::PemFiles {
+                certificate_chain: PathBuf::from("client.crt"),
+                private_key: PathBuf::from("client.key"),
+                key_password: None,
+            })
     );
     assert!(security.sasl_host.is_none());
     assert_scram_sha512_credentials(security.sasl.as_ref(), "carol", SCRAM_SSL_PASSWORD);
@@ -148,6 +153,7 @@ fn assert_scram_sha512_credentials(
         mechanism,
         username,
         password,
+        delegation_token: false,
     }) = credentials
     else {
         panic!("expected SCRAM credentials");

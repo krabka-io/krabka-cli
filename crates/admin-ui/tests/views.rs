@@ -436,6 +436,7 @@ fn quota_page_renders_the_lookup_form_with_the_requested_entity() {
 fn log_dir_rows_show_the_broker_error_instead_of_sentinel_values() {
     let rendered = render_page(&RoutePage::log_dirs(ReadRouteState::Rows(vec![
         LogDirRow {
+            broker_id: 1,
             log_dir: "/var/lib/krabka".to_string(),
             topic: String::new(),
             partition: -1,
@@ -450,7 +451,9 @@ fn log_dir_rows_show_the_broker_error_instead_of_sentinel_values() {
         },
     ])));
 
-    assert!(rendered.contains("/var/lib/krabka error=KAFKA_STORAGE_ERROR (57): disk offline"));
+    assert!(
+        rendered.contains("broker 1 /var/lib/krabka error=KAFKA_STORAGE_ERROR (57): disk offline")
+    );
     assert!(!rendered.contains("/-1-0"));
 }
 
@@ -458,6 +461,7 @@ fn log_dir_rows_show_the_broker_error_instead_of_sentinel_values() {
 fn a_readable_log_dir_row_still_shows_its_partition() {
     let rendered = render_page(&RoutePage::log_dirs(ReadRouteState::Rows(vec![
         LogDirRow {
+            broker_id: 1,
             log_dir: "/var/lib/krabka".to_string(),
             topic: "orders".to_string(),
             partition: 0,
@@ -468,7 +472,7 @@ fn a_readable_log_dir_row_still_shows_its_partition() {
         },
     ])));
 
-    assert!(rendered.contains("/var/lib/krabka orders/0-10"));
+    assert!(rendered.contains("broker 1 /var/lib/krabka orders/0-10"));
 }
 
 #[test]

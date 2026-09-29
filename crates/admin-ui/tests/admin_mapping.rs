@@ -5,15 +5,15 @@ use krabka_admin_ui::{
     admin::{acl_rows, group_rows, log_dir_rows, quota_rows, resource_outcome_rows, topic_rows},
     dto::{
         AclRow, ConfigEntryDto, CreateTopicRequestDto, KafkaErrorDto, LogDirMoveRequestDto,
-        ResourceOutcome, ScramUserUpsertDto,
+        LogDirRow, ResourceOutcome, ScramUserUpsertDto,
     },
     error::UiError,
 };
 use krabka_client_admin::{
-    AclEntry, AclOperation, AdminError, AlterReplicaLogDirOutcome, CreatePartitionsOutcome,
-    DeleteAclFilterOutcome, DeleteTopicOutcome, KafkaError, LogDirInfo, LogDirPartitionInfo,
-    LogDirTopicInfo, PatternType, PermissionType, ResourceType, ScramUserOutcome, TopicMetadata,
-    TopicMetadataEntry, UserScramCredential, UserScramCredentials,
+    AclEntry, AclOperation, AdminError, CreatePartitionsOutcome, DeleteAclFilterOutcome,
+    DeleteTopicOutcome, KafkaError, LogDirInfo, LogDirPartitionInfo, LogDirTopicInfo, PatternType,
+    PermissionType, ResourceType, ScramUserOutcome, TopicMetadata, TopicMetadataEntry,
+    TopicPartitionReplica, UserScramCredential, UserScramCredentials,
 };
 
 #[test]
@@ -116,6 +116,7 @@ fn log_dir_move_request_rejects_nonsensical_fields() {
     let request = LogDirMoveRequestDto {
         topic: "orders".to_string(),
         partition: -1,
+        broker_id: -1,
         destination_log_dir: " ".to_string(),
     };
 
@@ -328,20 +329,25 @@ fn maps_mutation_outcomes_preserving_kafka_errors() {
     let delete_topic_rows = resource_outcome_rows(vec![DeleteTopicOutcome {
         name: "orders".to_string(),
         error: Some(error.clone()),
+        throttle_time: None,
     }]);
     let partition_rows = resource_outcome_rows(vec![CreatePartitionsOutcome {
         name: "payments".to_string(),
         error: None,
+        throttle_time: None,
     }]);
     let scram_rows = resource_outcome_rows(vec![ScramUserOutcome {
         username: "alice".to_string(),
         error: Some(error.clone()),
     }]);
-    let log_dir_rows = resource_outcome_rows(vec![AlterReplicaLogDirOutcome {
-        topic: "orders".to_string(),
-        partition: 1,
-        error: None,
-    }]);
+    let log_dir_rows = resource_outcome_rows(vec![(
+        TopicPartitionReplica {
+            topic: "orders".to_string(),
+            partition: 1,
+            broker_id: 2,
+        },
+        Ok(()),
+    )]);
     let delete_acl_rows = resource_outcome_rows(vec![DeleteAclFilterOutcome {
         error: Some(error),
         matched: Vec::new(),
@@ -357,83 +363,109 @@ fn maps_mutation_outcomes_preserving_kafka_errors() {
 
 #[test]
 fn maps_log_dir_info_to_partition_rows_with_directory_errors() {
-    let log_dirs = vec![LogDirInfo {
-        log_dir: "/var/lib/krabka-0".to_string(),
-        error: Some(KafkaError {
-            code: 57,
-            name: "KAFKA_STORAGE_ERROR",
-            message: Some("disk offline".to_string()),
-        }),
-        topics: vec![LogDirTopicInfo {
-            name: "orders".to_string(),
-            partitions: vec![
-                LogDirPartitionInfo {
-                    partition_index: 0,
+    let storage_error = KafkaError {
+        code: 57,
+        name: "KAFKA_STORAGE_ERROR",
+        message: Some("disk offline".to_string()),
+    };
+    let log_dirs = BTreeMap::from([(
+        1,
+        Ok(vec![LogDirInfo {
+            log_dir: "/var/lib/krabka-0".to_string(),
+            error: Some(storage_error.clone()),
+            topics: vec![LogDirTopicInfo {
+                name: "orders".to_string(),
+                partitions: vec![
+                    LogDirPartitionInfo {
+                        partition_index: 0,
+                        partition_size: 1024,
+                        offset_lag: 0,
+                        is_future_key: false,
+                    },
+                    LogDirPartitionInfo {
+                        partition_index: 1,
+                        partition_size: 2048,
+                        offset_lag: 7,
+                        is_future_key: true,
+                    },
+                ],
+            }],
+            total: None,
+            usable: None,
+            is_cordoned: false,
+        }]),
+    )]);
+    let error = Some(KafkaErrorDto::from(&storage_error));
+
+    assert!(
+        log_dir_rows(log_dirs)
+            == vec![
+                LogDirRow {
+                    broker_id: 1,
+                    log_dir: "/var/lib/krabka-0".to_string(),
+                    topic: "orders".to_string(),
+                    partition: 0,
                     partition_size: 1024,
                     offset_lag: 0,
                     is_future_key: false,
+                    error: error.clone(),
                 },
-                LogDirPartitionInfo {
-                    partition_index: 1,
+                LogDirRow {
+                    broker_id: 1,
+                    log_dir: "/var/lib/krabka-0".to_string(),
+                    topic: "orders".to_string(),
+                    partition: 1,
                     partition_size: 2048,
                     offset_lag: 7,
                     is_future_key: true,
+                    error,
                 },
-            ],
-        }],
-    }];
-
-    let rows = log_dir_rows(log_dirs);
-
-    assert!(rows.len() == 2);
-    assert!(rows[0].log_dir == "/var/lib/krabka-0");
-    assert!(rows[0].topic == "orders");
-    assert!(rows[0].partition == 0);
-    assert!(rows[0].partition_size == 1024);
-    assert!(rows[0].offset_lag == 0);
-    assert!(!rows[0].is_future_key);
-    assert!(rows[1].partition == 1);
-    assert!(rows[1].partition_size == 2048);
-    assert!(rows[1].offset_lag == 7);
-    assert!(rows[1].is_future_key);
-    assert!(
-        rows[0].error
-            == Some(KafkaErrorDto {
-                code: 57,
-                name: "KAFKA_STORAGE_ERROR".to_string(),
-                message: Some("disk offline".to_string()),
-            })
+            ]
     );
-    assert!(rows[1].error == rows[0].error);
 }
 
 #[test]
-fn maps_errored_empty_log_dir_to_sentinel_row() {
-    let log_dirs = vec![LogDirInfo {
-        log_dir: "/var/lib/krabka-offline".to_string(),
-        error: Some(KafkaError {
-            code: 57,
-            name: "KAFKA_STORAGE_ERROR",
-            message: Some("disk offline".to_string()),
-        }),
-        topics: Vec::new(),
-    }];
+fn maps_errored_log_dirs_and_brokers_to_sentinel_rows() {
+    let storage_error = KafkaError {
+        code: 57,
+        name: "KAFKA_STORAGE_ERROR",
+        message: Some("disk offline".to_string()),
+    };
+    let timed_out = KafkaError {
+        code: 7,
+        name: "REQUEST_TIMED_OUT",
+        message: None,
+    };
+    let log_dirs = BTreeMap::from([
+        (
+            1,
+            Ok(vec![LogDirInfo {
+                log_dir: "/var/lib/krabka-offline".to_string(),
+                error: Some(storage_error.clone()),
+                topics: Vec::new(),
+                total: None,
+                usable: None,
+                is_cordoned: false,
+            }]),
+        ),
+        (2, Err(timed_out.clone())),
+    ]);
+    let sentinel = |broker_id, log_dir: &str, error: &KafkaError| LogDirRow {
+        broker_id,
+        log_dir: log_dir.to_string(),
+        topic: String::new(),
+        partition: -1,
+        partition_size: 0,
+        offset_lag: 0,
+        is_future_key: false,
+        error: Some(KafkaErrorDto::from(error)),
+    };
 
-    let rows = log_dir_rows(log_dirs);
-
-    assert!(rows.len() == 1);
-    assert!(rows[0].log_dir == "/var/lib/krabka-offline");
-    assert!(rows[0].topic == "");
-    assert!(rows[0].partition == -1);
-    assert!(rows[0].partition_size == 0);
-    assert!(rows[0].offset_lag == 0);
-    assert!(!rows[0].is_future_key);
     assert!(
-        rows[0].error
-            == Some(KafkaErrorDto {
-                code: 57,
-                name: "KAFKA_STORAGE_ERROR".to_string(),
-                message: Some("disk offline".to_string()),
-            })
+        log_dir_rows(log_dirs)
+            == vec![
+                sentinel(1, "/var/lib/krabka-offline", &storage_error),
+                sentinel(2, "", &timed_out),
+            ]
     );
 }

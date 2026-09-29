@@ -17,10 +17,10 @@
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 
 use clap::Args;
-use krabka_client_admin::{AdminClient, AdminError};
+use krabka_client_admin::{AdminClient, AdminClientConfig, AdminError};
 use krabka_client_core::{
-    ConnectionOptions,
-    security::{ClientSecurity, SaslCredentials, TlsConnectorConfig},
+    ConnectionOptions, OAuthBearerTokenSource,
+    security::{ClientSecurity, KeyStore, SaslCredentials, TlsConnectorConfig, TrustStore},
 };
 use krabka_security::{ListenerProtocol, SaslMechanism};
 use krabka_units::{Time, convert::TimeExt as _};
@@ -34,7 +34,7 @@ use thiserror::Error;
 pub const KDC_URL_ENV: &str = "SSPI_KDC_URL";
 
 /// Connection flags, with the names that the JVM tools use.
-#[derive(Debug, Args, Clone)]
+#[derive(Debug, Args, Clone, PartialEq)]
 pub struct ConnectionArgs {
     /// The brokers to bootstrap from, `host:port`. Comma-separated, and the
     /// flag can repeat.
@@ -65,12 +65,17 @@ pub struct ConnectionArgs {
     /// `request.timeout.ms` in the command config.
     #[arg(long)]
     pub request_timeout_ms: Option<i64>,
-    /// The deadline of the whole command, for example `30s` or `2m`.
+    /// The deadline of the whole command, for example `30s` or `2m`. A bare
+    /// number is milliseconds, as the `--timeout` of `kafka-consumer-groups`
+    /// reads it.
     #[arg(long, env = "KRABKA_TIMEOUT", default_value = "30s", value_parser = parse_time)]
     pub timeout: Time,
 }
 
 fn parse_time(value: &str) -> Result<Time, String> {
+    if let Ok(millis) = value.parse::<i64>() {
+        return Ok(Time::from_millis(millis));
+    }
     if let Ok(time) = value.parse() {
         return Ok(time);
     }
@@ -234,8 +239,28 @@ impl Properties {
         self.0.get(key).map(|value| value.trim())
     }
 
+    /// Every key and its value as the file wrote it, untrimmed, in key order.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
     fn contains(&self, key: &str) -> bool {
         self.0.contains_key(key)
+    }
+
+    /// Sets `key` to `value`, replacing an earlier value, as a
+    /// `--command-property key=value` overrides the command config.
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.0.insert(key.into(), value.into());
+    }
+
+    /// Every key and its untrimmed value, in key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
     }
 }
 
@@ -635,7 +660,7 @@ fn tls(properties: &Properties, bootstrap_host: &str) -> Result<TlsConnectorConf
             "a PEM trust store has no password",
         ));
     }
-    let client_identity = match properties.get("ssl.keystore.location") {
+    let key_store = match properties.get("ssl.keystore.location") {
         None => None,
         Some(key_store) => {
             require_pem(properties, "ssl.keystore.type")?;
@@ -653,7 +678,10 @@ fn tls(properties: &Properties, bootstrap_host: &str) -> Result<TlsConnectorConf
             }
             // A Kafka PEM key store is one file that holds the private key
             // and the certificate chain. The client reads each from it.
-            Some((PathBuf::from(key_store), PathBuf::from(key_store)))
+            Some(KeyStore::PemFile {
+                path: PathBuf::from(key_store),
+                key_password: None,
+            })
         }
     };
     match properties
@@ -675,14 +703,16 @@ fn tls(properties: &Properties, bootstrap_host: &str) -> Result<TlsConnectorConf
             ));
         }
     }
-    Ok(TlsConnectorConfig {
-        trust_roots_pem: Some(PathBuf::from(trust_store)),
-        server_name: properties
-            .get("ssl.server.name")
-            .unwrap_or(bootstrap_host)
-            .to_owned(),
-        client_identity,
-    })
+    // `TlsConnectorConfig` caches its built rustls config in a private
+    // field, so it is built from its default rather than a struct literal.
+    let mut config = TlsConnectorConfig::default();
+    config.trust_store = TrustStore::PemFile(PathBuf::from(trust_store));
+    config.key_store = key_store;
+    properties
+        .get("ssl.server.name")
+        .unwrap_or(bootstrap_host)
+        .clone_into(&mut config.server_name);
+    Ok(config)
 }
 
 fn sasl(properties: &Properties, kdc_url: Option<&str>) -> Result<SaslCredentials, ConfigError> {
@@ -707,15 +737,11 @@ fn sasl(properties: &Properties, kdc_url: Option<&str>) -> Result<SaslCredential
     match mechanism {
         "PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512" => {
             expect_module(&[PLAIN_LOGIN_MODULE, SCRAM_LOGIN_MODULE])?;
-            if jaas
+            // Kafka's `ScramLoginModule` logs in with a delegation token
+            // (KIP-48) when `tokenauth=true`; `PlainLoginModule` ignores it.
+            let delegation_token = jaas
                 .option("tokenauth")
-                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-            {
-                return Err(ConfigError::unsupported(
-                    SASL_JAAS_CONFIG,
-                    "delegation-token login (tokenauth=true) needs krabka-client-core support",
-                ));
-            }
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"));
             let username = jaas.required("username")?;
             let password = Secret::new(jaas.required("password")?);
             Ok(match mechanism {
@@ -727,11 +753,13 @@ fn sasl(properties: &Properties, kdc_url: Option<&str>) -> Result<SaslCredential
                     mechanism: SaslMechanism::ScramSha256,
                     username,
                     password: password.expose(),
+                    delegation_token,
                 },
                 _ => SaslCredentials::Scram {
                     mechanism: SaslMechanism::ScramSha512,
                     username,
                     password: password.expose(),
+                    delegation_token,
                 },
             })
         }
@@ -752,7 +780,8 @@ fn sasl(properties: &Properties, kdc_url: Option<&str>) -> Result<SaslCredential
                 ));
             }
             Ok(SaslCredentials::OAuthBearer {
-                token_path: oauthbearer_token_file(properties)?,
+                token: OAuthBearerTokenSource::File(oauthbearer_token_file(properties)?),
+                extensions: BTreeMap::new(),
             })
         }
         other => Err(ConfigError::invalid(
@@ -882,18 +911,64 @@ impl ConnectionArgs {
     /// command config, and [`ConnectionError::Admin`] when the client cannot
     /// connect.
     pub async fn connect(&self, command: &str) -> Result<AdminClient, ConnectionError> {
-        let options = self.options(command).await?;
+        let properties = self.properties().await?;
+        let kdc_url = std::env::var(KDC_URL_ENV).ok();
+        let config = self.admin_config(&properties, command, kdc_url.as_deref())?;
         if !self.bootstrap_controller.is_empty() {
-            return Ok(AdminClient::connect_controller_with_options(
+            return Ok(AdminClient::connect_controller_with_config(
                 &self.bootstrap_controller,
-                options,
+                config,
             )
             .await?);
         }
         if self.bootstrap_server.is_empty() {
             return Err(ConnectionError::MissingBootstrap);
         }
-        Ok(AdminClient::connect_with_options(&self.bootstrap_server, options).await?)
+        Ok(AdminClient::connect_with_config(&self.bootstrap_server, config).await?)
+    }
+
+    /// The admin client settings of `command`: the connection options, and
+    /// the call deadline and retry backoff of Kafka's `AdminClientConfig`
+    /// (`default.api.timeout.ms`, `retry.backoff.ms`, `retry.backoff.max.ms`)
+    /// from the command config.
+    fn admin_config(
+        &self,
+        properties: &Properties,
+        command: &str,
+        kdc_url: Option<&str>,
+    ) -> Result<AdminClientConfig, ConfigError> {
+        let options = self.options_from(properties, command, kdc_url)?;
+        let mut config = AdminClientConfig {
+            client_id: Some(options.client_id),
+            request_timeout: options.request_timeout,
+            socket_connection_setup_timeout: options.socket_connection_setup_timeout,
+            security: options.security.map(|security| *security),
+            default_api_timeout: positive_millis(properties, "default.api.timeout.ms")?,
+            ..AdminClientConfig::default()
+        };
+        if let Some(backoff) = positive_millis(properties, "retry.backoff.ms")? {
+            config.retry_backoff = backoff;
+        }
+        if let Some(backoff) = positive_millis(properties, "retry.backoff.max.ms")? {
+            config.retry_backoff_max = backoff;
+        }
+        Ok(config)
+    }
+
+    async fn properties(&self) -> Result<Properties, ConnectionError> {
+        match &self.command_config {
+            Some(path) => {
+                let bytes =
+                    tokio::fs::read(path)
+                        .await
+                        .map_err(|source| ConnectionError::Read {
+                            path: path.clone(),
+                            source,
+                        })?;
+                Ok(Properties::parse(&bytes)?)
+            }
+            None => Ok(Properties::default()),
+        }
     }
 
     /// The connection options for `command`: the command config, the flags
@@ -903,19 +978,7 @@ impl ConnectionArgs {
     /// Returns [`ConnectionError::Read`] when the command config cannot be
     /// read, and [`ConnectionError::Config`] when it cannot be used.
     pub async fn options(&self, command: &str) -> Result<ConnectionOptions, ConnectionError> {
-        let properties = match &self.command_config {
-            Some(path) => {
-                let bytes =
-                    tokio::fs::read(path)
-                        .await
-                        .map_err(|source| ConnectionError::Read {
-                            path: path.clone(),
-                            source,
-                        })?;
-                Properties::parse(&bytes)?
-            }
-            None => Properties::default(),
-        };
+        let properties = self.properties().await?;
         let kdc_url = std::env::var(KDC_URL_ENV).ok();
         Ok(self.options_from(&properties, command, kdc_url.as_deref())?)
     }
@@ -953,7 +1016,7 @@ impl ConnectionArgs {
             options.request_timeout = timeout;
         }
         if let Some(timeout) = positive_millis(properties, "socket.connection.setup.timeout.ms")? {
-            options.connect_timeout = timeout;
+            options.socket_connection_setup_timeout = timeout;
         }
         let context = Context {
             bootstrap_host: self.bootstrap_host(),
@@ -961,6 +1024,36 @@ impl ConnectionArgs {
         };
         options.security = security(properties, context)?.map(Box::new);
         Ok(options)
+    }
+
+    /// The connection options of a data-plane tool, such as
+    /// `console-consumer`, that merges its own client properties:
+    /// `properties` is that merged set, `bootstrap` is `--bootstrap-server`,
+    /// and `default_client_id` is the `client.id` that the Kafka tool sets
+    /// when `properties` sets none, such as `console-consumer`.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] for a property that cannot be used, as
+    /// [`ConnectionArgs::options`] does.
+    pub fn client_options(
+        properties: &Properties,
+        bootstrap: &[String],
+        default_client_id: &str,
+    ) -> Result<ConnectionOptions, ConfigError> {
+        let client_id = properties
+            .get("client.id")
+            .filter(|id| !id.is_empty())
+            .unwrap_or(default_client_id);
+        let args = Self {
+            bootstrap_server: bootstrap.to_vec(),
+            bootstrap_controller: Vec::new(),
+            command_config: None,
+            client_id: Some(client_id.to_owned()),
+            request_timeout_ms: None,
+            timeout: Time::from_secs(30),
+        };
+        let kdc_url = std::env::var(KDC_URL_ENV).ok();
+        args.options_from(properties, default_client_id, kdc_url.as_deref())
     }
 
     fn bootstrap_host(&self) -> &str {

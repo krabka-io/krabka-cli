@@ -9,7 +9,7 @@ use krabka_cli::connection::{ConnectionArgs, ConnectionError};
 use krabka_client_admin::AdminError;
 use krabka_client_core::ClientError;
 use krabka_protocol::owned::{
-    describe_cluster_request,
+    api_versions_request, describe_cluster_request,
     describe_cluster_response::{DescribeClusterBroker, DescribeClusterResponse},
     metadata_request,
     metadata_response::{MetadataResponse, MetadataResponseTopic},
@@ -68,9 +68,10 @@ async fn connect_reaches_the_broker_and_carries_per_topic_errors() {
     check!(
         broker.received()
             == [
+                // Kafka's client opens with the latest ApiVersions version.
                 Received {
-                    api_key: 18,
-                    version: 0
+                    api_key: api_versions_request::API_KEY,
+                    version: api_versions_request::MAX_VERSION
                 },
                 Received {
                     api_key: metadata_request::API_KEY,

@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
 use krabka_client_admin::{
-    AclEntry, AclEntryFilter, AdminClient, AdminError, AlterConfigsOutcome,
-    AlterReplicaLogDirOutcome, CreateAclOutcome, CreatePartitionsOutcome, CreateTopicOutcome,
-    DeleteAclFilterOutcome, DeleteTopicOutcome, KafkaError, LogDirInfo, ScramUserOutcome,
-    TopicMetadata, UserQuotaConfig, UserScramCredential, UserScramCredentials,
+    AclEntry, AclEntryFilter, AdminClient, AdminError, BrokerResult, ConfigResource,
+    CreateAclOutcome, CreatePartitionsOutcome, CreateTopicOutcome, DeleteAclFilterOutcome,
+    DeleteTopicOutcome, DescribeClusterOptions, KafkaError, LogDirInfo, ScramUserOutcome,
+    TopicMetadata, TopicPartitionReplica, UserQuotaConfig, UserScramCredential,
+    UserScramCredentials, groups::ListGroupsOptions,
 };
 
 use crate::dto::{
@@ -39,7 +40,14 @@ impl AdminFacade {
     /// # Errors
     /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub async fn groups(&mut self) -> Result<Vec<GroupRow>, AdminError> {
-        let groups = self.client.list_groups().await?;
+        let groups = self
+            .client
+            .list_groups(&ListGroupsOptions::default())
+            .await?
+            .valid
+            .into_iter()
+            .map(|listing| listing.group_id)
+            .collect();
 
         Ok(group_rows(groups))
     }
@@ -48,7 +56,15 @@ impl AdminFacade {
     /// # Errors
     /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub async fn log_dirs(&mut self) -> Result<Vec<LogDirRow>, AdminError> {
-        let log_dirs = self.client.describe_log_dirs(None).await?;
+        let brokers = self
+            .client
+            .describe_cluster(DescribeClusterOptions::default())
+            .await?
+            .nodes
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        let log_dirs = self.client.describe_log_dirs(&brokers, None).await;
 
         Ok(log_dir_rows(log_dirs))
     }
@@ -179,20 +195,39 @@ pub fn quota_mutation_outcome(
     kafka_error_outcome(format!("{username}:{quota_type}"), error)
 }
 
+/// One row for each partition of each log dir of each broker. A broker that
+/// failed, and a log dir that failed with no partitions, each give one row
+/// that carries the error.
 #[must_use]
-pub fn log_dir_rows(log_dirs: Vec<LogDirInfo>) -> Vec<LogDirRow> {
+pub fn log_dir_rows(log_dirs: BTreeMap<i32, BrokerResult<Vec<LogDirInfo>>>) -> Vec<LogDirRow> {
     log_dirs
         .into_iter()
-        .flat_map(log_dir_partition_rows)
+        .flat_map(|(broker_id, result)| match result {
+            Ok(dirs) => dirs
+                .into_iter()
+                .flat_map(|dir| log_dir_partition_rows(broker_id, dir))
+                .collect::<Vec<_>>(),
+            Err(error) => vec![LogDirRow {
+                broker_id,
+                log_dir: String::new(),
+                topic: String::new(),
+                partition: -1,
+                partition_size: 0,
+                offset_lag: 0,
+                is_future_key: false,
+                error: Some(KafkaErrorDto::from(&error)),
+            }],
+        })
         .collect()
 }
 
-fn log_dir_partition_rows(log_dir: LogDirInfo) -> Vec<LogDirRow> {
+fn log_dir_partition_rows(broker_id: i32, log_dir: LogDirInfo) -> Vec<LogDirRow> {
     let log_dir_name = log_dir.log_dir;
     let log_dir_error = log_dir.error.as_ref().map(KafkaErrorDto::from);
 
     if log_dir.topics.is_empty() && log_dir_error.is_some() {
         return vec![LogDirRow {
+            broker_id,
             log_dir: log_dir_name,
             topic: String::new(),
             partition: -1,
@@ -214,6 +249,7 @@ fn log_dir_partition_rows(log_dir: LogDirInfo) -> Vec<LogDirRow> {
                 .partitions
                 .into_iter()
                 .map(move |partition| LogDirRow {
+                    broker_id,
                     log_dir: log_dir_name.clone(),
                     topic: topic.name.clone(),
                     partition: partition.partition_index,
@@ -267,9 +303,9 @@ impl IntoResourceOutcomeDto for CreatePartitionsOutcome {
     }
 }
 
-impl IntoResourceOutcomeDto for AlterConfigsOutcome {
+impl IntoResourceOutcomeDto for (ConfigResource, Result<(), KafkaError>) {
     fn into_resource_outcome(self) -> ResourceOutcome {
-        kafka_error_outcome(self.topic, self.error)
+        kafka_error_outcome(self.0.name, self.1.err())
     }
 }
 
@@ -291,9 +327,12 @@ impl IntoResourceOutcomeDto for ScramUserOutcome {
     }
 }
 
-impl IntoResourceOutcomeDto for AlterReplicaLogDirOutcome {
+impl IntoResourceOutcomeDto for (TopicPartitionReplica, BrokerResult<()>) {
     fn into_resource_outcome(self) -> ResourceOutcome {
-        kafka_error_outcome(format!("{}-{}", self.topic, self.partition), self.error)
+        kafka_error_outcome(
+            format!("{}-{}", self.0.topic, self.0.partition),
+            self.1.err(),
+        )
     }
 }
 

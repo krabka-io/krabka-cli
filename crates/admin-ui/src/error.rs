@@ -44,9 +44,7 @@ impl From<&KafkaError> for KafkaErrorDto {
 impl From<AdminError> for UiError {
     fn from(error: AdminError) -> Self {
         match error {
-            AdminError::Connect { tried } => {
-                Self::BrokerConnection(format!("no bootstrap address was reachable: tried {tried}"))
-            }
+            error @ AdminError::Connect { .. } => Self::BrokerConnection(error.to_string()),
             AdminError::Broker {
                 api,
                 code,

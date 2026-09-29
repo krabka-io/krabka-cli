@@ -12,18 +12,38 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use tokio_util::sync::CancellationToken;
 
 mod acls;
+mod cluster;
 mod common;
+mod compat;
 mod configs;
 pub mod connection;
+mod console;
+mod console_consumer;
+mod console_producer;
 mod consumer_groups;
+mod delegation_tokens;
+mod delete_records;
 pub mod exit;
 pub mod external;
+mod fan_out;
+mod feature_catalog;
 mod features;
+mod get_offsets;
 mod gres;
+mod jvm;
+mod kafka_errors;
+mod kafka_json;
+mod leader_election;
+mod log_dirs;
+mod metadata_quorum;
 pub mod output;
 mod reassign_partitions;
+mod replica_placer;
 pub mod safety;
+mod storage;
+mod topic_partition;
 mod topics;
+mod transactions;
 
 use self::{
     exit::Exit,
@@ -73,23 +93,57 @@ enum Command {
     /// Create, delete, list and describe topics.
     Topics(topics::TopicsArgs),
 
-    /// Describe and alter topic configuration.
+    /// Describe and alter entity configs, quotas and SCRAM credentials.
     Configs(configs::ConfigsArgs),
 
     /// List, add and remove access-control entries.
     Acls(acls::AclsArgs),
 
-    /// Inspect consumer-group offsets.
+    /// List, describe, delete and reset consumer groups and their offsets.
     ConsumerGroups(consumer_groups::ConsumerGroupsArgs),
 
-    /// Inspect supported features or update metadata.version.
+    /// Describe the log directories of brokers, or move replicas between them.
+    LogDirs(log_dirs::LogDirsArgs),
+
+    /// Print the offsets of topic partitions.
+    GetOffsets(get_offsets::GetOffsetsArgs),
+
+    /// Describe, upgrade, downgrade and disable feature flags (KIP-584,
+    /// KIP-1022), as `kafka-features` does.
     Features(features::FeaturesArgs),
 
-    /// Execute or verify replication-factor reassignment.
+    /// Report on and format log directories, as `kafka-storage` does.
+    Storage(storage::StorageArgs),
+
+    /// Describe the `KRaft` metadata quorum, and add or remove controllers.
+    MetadataQuorum(metadata_quorum::MetadataQuorumArgs),
+
+    /// Get the cluster ID, unregister a broker, or list endpoints.
+    Cluster(cluster::ClusterArgs),
+
+    /// Elect the preferred or an unclean leader for partitions.
+    LeaderElection(leader_election::LeaderElectionArgs),
+
+    /// Generate, execute, verify, cancel or list partition reassignments.
     ReassignPartitions(reassign_partitions::ReassignPartitionsArgs),
 
     /// Operate the Gres tenant registry and range layout.
     Gres(gres::GresArgs),
+
+    /// List, describe, abort and force-terminate transactions.
+    Transactions(transactions::TransactionsArgs),
+
+    /// Create, renew, expire and describe delegation tokens.
+    DelegationTokens(delegation_tokens::DelegationTokensArgs),
+
+    /// Delete the records of partitions below an offset.
+    DeleteRecords(delete_records::DeleteRecordsArgs),
+
+    /// Read records from topics and write them to stdout.
+    ConsoleConsumer(console_consumer::ConsoleConsumerArgs),
+
+    /// Read lines from stdin and produce each as a record.
+    ConsoleProducer(console_producer::ConsoleProducerArgs),
 
     /// Anything not built in, delegated to `krabka-<name>` on `PATH`.
     #[command(external_subcommand)]
@@ -112,7 +166,13 @@ const fn default_filter(verbose: u8, quiet: u8) -> &'static str {
 /// Parses the command line, installs logging, and runs the command.
 pub async fn run() -> Exit {
     let cli = Cli::parse();
-    let default_filter = default_filter(cli.verbose, cli.quiet);
+    // `kafka-consumer-groups --verbose` selects more columns, not more logs.
+    let log_verbosity = if matches!(cli.command, Command::ConsumerGroups(_)) {
+        0
+    } else {
+        cli.verbose
+    };
+    let default_filter = default_filter(log_verbosity, cli.quiet);
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
     match cli.log_format {
@@ -129,15 +189,46 @@ pub async fn run() -> Exit {
     let output = cli.output.output;
     match cli.command {
         Command::Format(args) => Exit::Passthrough(krabka_format::run(args).await),
-        Command::Topics(args) => run_admin("topics", args.run(), output).await,
-        Command::Configs(args) => run_admin("configs", args.run(), output).await,
-        Command::Acls(args) => run_admin("acls", args.run(), output).await,
-        Command::ConsumerGroups(args) => run_admin("consumer-groups", args.run(), output).await,
-        Command::Features(args) => run_admin("features", args.run(), output).await,
-        Command::ReassignPartitions(args) => {
-            run_admin("reassign-partitions", args.run(), output).await
+        Command::Topics(args) => run_admin("topics", Box::pin(args.run()), output).await,
+        Command::Configs(args) => run_admin("configs", Box::pin(args.run()), output).await,
+        Command::Acls(args) => run_admin("acls", Box::pin(args.run()), output).await,
+        Command::ConsumerGroups(args) => {
+            run_admin(
+                "consumer-groups",
+                Box::pin(args.run(cli.verbose > 0)),
+                output,
+            )
+            .await
         }
-        Command::Gres(args) => run_admin("gres", gres_run(args), output).await,
+        Command::MetadataQuorum(args) => {
+            run_admin("metadata-quorum", Box::pin(args.run()), output).await
+        }
+        Command::Cluster(args) => run_admin("cluster", Box::pin(args.run()), output).await,
+        Command::LeaderElection(args) => {
+            run_admin("leader-election", Box::pin(args.run()), output).await
+        }
+        Command::LogDirs(args) => run_admin("log-dirs", Box::pin(args.run()), output).await,
+        Command::GetOffsets(args) => run_admin("get-offsets", Box::pin(args.run()), output).await,
+        Command::Features(args) => run_admin("features", Box::pin(args.run()), output).await,
+        Command::Storage(args) => match args.into_format() {
+            Ok(format) => Exit::Passthrough(krabka_format::run(format).await),
+            Err(args) => run_admin("storage", Box::pin(args.run()), output).await,
+        },
+        Command::ReassignPartitions(args) => {
+            run_admin("reassign-partitions", Box::pin(args.run()), output).await
+        }
+        Command::Gres(args) => run_admin("gres", Box::pin(gres_run(args)), output).await,
+        Command::Transactions(args) => {
+            run_admin("transactions", Box::pin(args.run()), output).await
+        }
+        Command::DelegationTokens(args) => {
+            run_admin("delegation-tokens", Box::pin(args.run()), output).await
+        }
+        Command::DeleteRecords(args) => {
+            run_admin("delete-records", Box::pin(args.run()), output).await
+        }
+        Command::ConsoleConsumer(args) => Box::pin(console_consumer::run(args, output)).await,
+        Command::ConsoleProducer(args) => Box::pin(console_producer::run(args, output)).await,
         Command::External(argv) => external::run(&argv).await,
     }
 }
@@ -342,33 +433,54 @@ mod tests {
                 "--group",
                 "workers",
                 "--topic",
-                "orders",
-                "--partition",
-                "0",
+                "orders:0",
                 "--to-offset",
                 "42",
-                "--yes",
+                "--execute",
                 "--bootstrap-server",
                 "host:9092",
             ],
             vec![
                 "krabka",
-                "features",
+                "log-dirs",
                 "--describe",
+                "--broker-list",
+                "0,1",
+                "--topic-list",
+                "orders",
+                "--bootstrap-server",
+                "host:9092",
+            ],
+            vec![
+                "krabka",
+                "get-offsets",
+                "--topic-partitions",
+                "orders:0-2",
+                "--time",
+                "-2",
                 "--bootstrap-server",
                 "host:9092",
             ],
             vec![
                 "krabka",
                 "features",
-                "--upgrade",
+                "--bootstrap-server",
+                "host:9092",
+                "describe",
+            ],
+            vec![
+                "krabka",
+                "features",
+                "--bootstrap-controller",
+                "controller:9093",
+                "upgrade",
                 "--feature",
                 "metadata.version=20",
                 "--feature",
                 "kraft.version=1",
-                "--bootstrap-controller",
-                "controller:9093",
             ],
+            vec!["krabka", "storage", "version-mapping", "-r", "4.0"],
+            vec!["krabka", "storage", "info", "-c", "server.properties"],
             vec![
                 "krabka",
                 "reassign-partitions",
@@ -379,6 +491,44 @@ mod tests {
                 "1",
                 "--bootstrap-server",
                 "host:9092",
+            ],
+            vec![
+                "krabka",
+                "reassign-partitions",
+                "--bootstrap-server",
+                "host:9092",
+                "--execute",
+                "--reassignment-json-file",
+                "plan.json",
+                "--throttle",
+                "50000000",
+                "--additional",
+            ],
+            vec![
+                "krabka",
+                "metadata-quorum",
+                "--bootstrap-controller",
+                "controller:9093",
+                "describe",
+                "--replication",
+                "--human-readable",
+            ],
+            vec![
+                "krabka",
+                "cluster",
+                "list-endpoints",
+                "-b",
+                "host:9092",
+                "--include-fenced-brokers",
+            ],
+            vec![
+                "krabka",
+                "leader-election",
+                "--bootstrap-server",
+                "host:9092",
+                "--election-type",
+                "preferred",
+                "--all-topic-partitions",
             ],
         ];
 
@@ -404,50 +554,33 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_acl_principals_are_rejected() {
-        assert!(
-            Cli::try_parse_from([
+    fn conflicting_feature_actions_are_rejected() {
+        let refused: &[&[&str]] = &[
+            &["krabka", "features", "--bootstrap-server", "host:9092"],
+            &[
                 "krabka",
-                "acls",
-                "--list",
-                "--allow-principal",
-                "User:alice",
-                "--deny-principal",
-                "User:bob",
+                "features",
                 "--bootstrap-server",
                 "host:9092",
-            ])
-            .is_err()
-        );
+                "describe",
+                "--feature",
+                "metadata.version=20",
+            ],
+            &["krabka", "storage", "info"],
+        ];
+        for argv in refused {
+            check!(Cli::try_parse_from(*argv).is_err(), "{argv:?}");
+        }
     }
 
     #[test]
-    fn conflicting_feature_actions_are_rejected() {
-        assert!(
-            Cli::try_parse_from([
-                "krabka",
-                "features",
-                "--describe",
-                "--upgrade",
-                "--feature",
-                "metadata.version=20",
-                "--bootstrap-server",
-                "host:9092",
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "krabka",
-                "features",
-                "--describe",
-                "--feature",
-                "metadata.version=20",
-                "--bootstrap-server",
-                "host:9092",
-            ])
-            .is_err()
-        );
+    fn storage_format_takes_the_formatter_flags() {
+        let cli = Cli::try_parse_from(["krabka", "storage", "format", "--log-dir", "/tmp/x"])
+            .expect("storage format parses");
+        let Command::Storage(args) = cli.command else {
+            panic!("expected the storage arm");
+        };
+        check!(args.into_format().is_ok());
     }
 
     #[test]
@@ -459,12 +592,10 @@ mod tests {
             "--group",
             "workers",
             "--topic",
-            "orders",
-            "--partition",
-            "-1",
+            "orders:-1",
             "--to-offset",
             "-1",
-            "--yes",
+            "--execute",
             "--bootstrap-server",
             "host:9092",
         ])
@@ -473,8 +604,15 @@ mod tests {
 
     #[tokio::test]
     async fn destructive_and_read_only_admin_misuse_fails_before_connecting() {
-        let cli =
-            Cli::try_parse_from(["krabka", "acls", "--remove", "--yes"]).expect("valid syntax");
+        let cli = Cli::try_parse_from([
+            "krabka",
+            "acls",
+            "--remove",
+            "--yes",
+            "--bootstrap-server",
+            "host:9092",
+        ])
+        .expect("valid syntax");
         let Command::Acls(args) = cli.command else {
             panic!("expected ACL command")
         };
@@ -483,7 +621,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("scope filter")
+                .contains("You must provide at least one resource")
         );
 
         let cli =

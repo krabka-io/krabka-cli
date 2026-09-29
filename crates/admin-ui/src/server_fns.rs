@@ -3,11 +3,11 @@
 use std::{collections::BTreeMap, future::Future, pin::Pin};
 
 use krabka_client_admin::{
-    AclEntry, AclEntryFilter, AclOperation, AdminClient, CreatePartitionsOp, CreateTopicSpec,
-    IncrementalAlterOp, PatternType, PermissionType, QuotaOp, ResourceType, ScramDeletion,
-    ScramUpsertion,
+    AclEntry, AclEntryFilter, AclOperation, AdminClient, AlterConfigOp, ConfigResource,
+    CreatePartitionsOp, CreateTopicSpec, IncrementalAlterConfigsOptions, PatternType,
+    PermissionType, QuotaOp, ResourceType, ScramDeletion, ScramUpsertion, TopicMutationOptions,
+    TopicPartitionReplica,
 };
-use krabka_units::Time;
 use serde::{Deserialize, Serialize};
 
 pub use crate::dto::{AclRow, QuotaRow, UserRow};
@@ -30,8 +30,8 @@ use crate::{
 /// The broker gets this much time to finish a UI-issued topic mutation. After that
 /// time, the broker answers with a timeout error. `CreateTopics`, `DeleteTopics`,
 /// and `CreatePartitions` carry the value as Kafka's `timeout_ms` field.
-fn mutation_timeout(cfg: &AdminUiConfig) -> Time {
-    cfg.topic_mutation_timeout
+fn mutation_timeout(cfg: &AdminUiConfig) -> TopicMutationOptions {
+    TopicMutationOptions::with_timeout(cfg.topic_mutation_timeout)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -760,6 +760,7 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
                         partitions: request.partitions,
                         replicas: request.replicas,
                         configs,
+                        replica_assignments: BTreeMap::new(),
                     }],
                     mutation_timeout(&self.0.cfg),
                 )
@@ -796,6 +797,7 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
                     &[CreatePartitionsOp {
                         name: request.topic,
                         new_total_count: request.total_count,
+                        assignments: None,
                     }],
                     mutation_timeout(&self.0.cfg),
                 )
@@ -815,15 +817,15 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
             let ops = request
                 .configs
                 .into_iter()
-                .map(|config| IncrementalAlterOp::Set {
-                    topic: request.resource_name.clone(),
-                    key: config.name,
-                    value: config.value,
-                })
+                .map(|config| AlterConfigOp::set(config.name, config.value))
                 .collect::<Vec<_>>();
-            let outcomes = facade.client_mut().incremental_alter_configs(&ops).await?;
+            let changes = BTreeMap::from([(ConfigResource::topic(request.resource_name), ops)]);
+            let outcomes = facade
+                .client_mut()
+                .incremental_alter_configs(&changes, IncrementalAlterConfigsOptions::default())
+                .await?;
 
-            Ok(resource_outcome_rows(outcomes))
+            Ok(resource_outcome_rows(outcomes.into_iter().collect()))
         })
     }
 
@@ -953,15 +955,19 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
         Box::pin(async move {
             let mut facade = self.0.facade().await?;
             let assignments = BTreeMap::from([(
+                TopicPartitionReplica {
+                    topic: request.topic,
+                    partition: request.partition,
+                    broker_id: request.broker_id,
+                },
                 request.destination_log_dir,
-                vec![(request.topic, vec![request.partition])],
             )]);
             let outcomes = facade
                 .client_mut()
                 .alter_replica_log_dirs(&assignments)
-                .await?;
+                .await;
 
-            Ok(resource_outcome_rows(outcomes))
+            Ok(resource_outcome_rows(outcomes.into_iter().collect()))
         })
     }
 }

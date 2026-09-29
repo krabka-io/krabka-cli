@@ -57,6 +57,7 @@ pub fn build_scram_sha512_security(
             mechanism: SaslMechanism::ScramSha512,
             username: username.to_string(),
             password: password.to_string(),
+            delegation_token: false,
         }),
         sasl_host: None,
     }

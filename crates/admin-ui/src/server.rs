@@ -237,7 +237,7 @@ where
 {
     let (context, _) = match authenticated_mutation_body(&state, any_capability, request).await {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     if server_fns::logout(&context).is_err() {
@@ -452,7 +452,7 @@ where
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     mutation_result_response(server_fns::create_topic(&context, request).await)
@@ -477,7 +477,7 @@ where
         .await
         {
             Ok(parsed) => parsed,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
 
     mutation_result_response(server_fns::delete_topic(&context, request).await)
@@ -501,7 +501,7 @@ where
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     mutation_result_response(server_fns::create_partitions(&context, request).await)
@@ -525,7 +525,7 @@ where
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     mutation_result_response(server_fns::alter_configs(&context, request).await)
@@ -549,7 +549,7 @@ where
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     mutation_result_response(server_fns::create_acl(&context, request).await)
@@ -573,7 +573,7 @@ where
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     mutation_result_response(server_fns::delete_acl(&context, request).await)
@@ -597,7 +597,7 @@ where
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     mutation_result_response(server_fns::upsert_scram_sha512_user(&context, request).await)
@@ -621,7 +621,7 @@ where
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     mutation_result_response(server_fns::delete_scram_user(&context, request).await)
@@ -645,7 +645,7 @@ where
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     mutation_result_response(server_fns::upsert_quota(&context, request).await)
@@ -669,7 +669,7 @@ where
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     mutation_result_response(server_fns::delete_quota(&context, request).await)
@@ -694,7 +694,7 @@ where
         .await
         {
             Ok(parsed) => parsed,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
 
     mutation_result_response(server_fns::move_log_dir(&context, request).await)
@@ -711,19 +711,19 @@ async fn authenticated_mutation_body<F, B>(
     state: &AdminRouterState<F, B>,
     required_capability: fn(Capabilities) -> bool,
     request: Request<Body>,
-) -> Result<(ServerFunctionContext<'_, F>, MutationBody), axum::response::Response> {
+) -> Result<(ServerFunctionContext<'_, F>, MutationBody), Box<axum::response::Response>> {
     let Some((context, record)) = authenticated_session(state, request.headers()) else {
-        return Err(mutation_error_response(
+        return Err(Box::new(mutation_error_response(
             StatusCode::UNAUTHORIZED,
             "not authenticated",
-        ));
+        )));
     };
 
     if !required_capability(record.capabilities) {
-        return Err(mutation_error_response(
+        return Err(Box::new(mutation_error_response(
             StatusCode::FORBIDDEN,
             "not permitted",
-        ));
+        )));
     }
 
     let content_type = request_content_type(request.headers());
@@ -740,23 +740,26 @@ async fn authenticated_mutation_body<F, B>(
     )
     .await
     .map_err(|_| {
-        mutation_error_response(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+        Box::new(mutation_error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body too large",
+        ))
     })?;
 
     let body = match content_type.as_deref() {
         Some("application/json") => {
             if !record.csrf_token.matches(&header_token) {
-                return Err(csrf_error_response());
+                return Err(Box::new(csrf_error_response()));
             }
 
             MutationBody::Json(body)
         }
         Some("application/x-www-form-urlencoded") => {
             let Ok(fields) = serde_urlencoded::from_bytes::<Vec<(String, String)>>(&body) else {
-                return Err(mutation_error_response(
+                return Err(Box::new(mutation_error_response(
                     StatusCode::BAD_REQUEST,
                     "invalid form request",
-                ));
+                )));
             };
             let supplied = fields
                 .iter()
@@ -764,7 +767,7 @@ async fn authenticated_mutation_body<F, B>(
                 .map_or("", |(_, value)| value.as_str());
 
             if !record.csrf_token.matches(supplied) {
-                return Err(csrf_error_response());
+                return Err(Box::new(csrf_error_response()));
             }
 
             let remaining: Vec<(String, String)> = fields
@@ -772,19 +775,19 @@ async fn authenticated_mutation_body<F, B>(
                 .filter(|(name, _)| name != CSRF_FIELD_NAME)
                 .collect();
             let Ok(encoded) = serde_urlencoded::to_string(&remaining) else {
-                return Err(mutation_error_response(
+                return Err(Box::new(mutation_error_response(
                     StatusCode::BAD_REQUEST,
                     "invalid form request",
-                ));
+                )));
             };
 
             MutationBody::Form(encoded)
         }
         _ => {
-            return Err(mutation_error_response(
+            return Err(Box::new(mutation_error_response(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "mutations take application/json or application/x-www-form-urlencoded",
-            ));
+            )));
         }
     };
 
@@ -795,7 +798,7 @@ async fn parse_authenticated_mutation_request<T, F, B>(
     state: &AdminRouterState<F, B>,
     required_capability: fn(Capabilities) -> bool,
     request: Request<Body>,
-) -> Result<(ServerFunctionContext<'_, F>, T::Request), axum::response::Response>
+) -> Result<(ServerFunctionContext<'_, F>, T::Request), Box<axum::response::Response>>
 where
     T: MutationForm,
 {
@@ -803,15 +806,22 @@ where
 
     let request = match body {
         MutationBody::Json(bytes) => parse_json_request::<T::Request>(&bytes).map_err(|_| {
-            mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request")
+            Box::new(mutation_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid JSON request",
+            ))
         })?,
         MutationBody::Form(encoded) => {
             let form = serde_urlencoded::from_str::<T>(&encoded).map_err(|_| {
-                mutation_error_response(StatusCode::BAD_REQUEST, "invalid form request")
+                Box::new(mutation_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid form request",
+                ))
             })?;
 
-            form.into_request()
-                .map_err(|reason| mutation_error_response(StatusCode::BAD_REQUEST, &reason))?
+            form.into_request().map_err(|reason| {
+                Box::new(mutation_error_response(StatusCode::BAD_REQUEST, &reason))
+            })?
         }
     };
 

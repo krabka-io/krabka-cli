@@ -97,12 +97,18 @@ fn admin_errors_render_one_line_with_the_kafka_error_name() {
             "DeleteTopics failed: UNKNOWN_TOPIC_OR_PARTITION (3)",
         ),
         (
-            AdminError::Connect { tried: 2 },
-            "no bootstrap address was reachable: tried 2",
+            AdminError::Connect {
+                tried: 2,
+                source: None,
+            },
+            "no bootstrap address connected: tried 2",
         ),
         (
-            AdminError::NotControllerExhausted,
-            "controller routing failed after retry",
+            AdminError::Connect {
+                tried: 1,
+                source: Some(Box::new(AdminError::Protocol("bad frame".into()))),
+            },
+            "no bootstrap address connected: tried 1; last error: protocol: bad frame",
         ),
         (
             AdminError::Transport(ClientError::Timeout(Time::from_millis(300))),

@@ -109,11 +109,10 @@ async fn a_failed_row_is_printed_with_the_others_and_the_command_exits_1() {
         krabka(
             &[
                 "topics",
-                "--describe",
+                "--delete",
                 "--topic",
-                "orders",
-                "--topic",
-                "missing",
+                "orders|missing",
+                "--dry-run",
                 "--bootstrap-server",
                 &address,
             ],
@@ -125,14 +124,14 @@ async fn a_failed_row_is_printed_with_the_others_and_the_command_exits_1() {
     check!(out.code == Some(1));
     check!(
         out.stdout
-            == "Topic: orders\tPartitionCount: 0\tReplicationFactor: 0\nmissing\tERROR\tUNKNOWN_TOPIC_OR_PARTITION (3)\n"
+            == "DRY RUN: no change was made.\nmissing\norders\nError while executing topic command : This server does not host this topic-partition.\n"
     );
     check!(out.stderr.is_empty());
     broker.stop();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_injected_timeout_logs_to_stderr_and_ends_with_the_error_envelope() {
+async fn an_injected_timeout_logs_to_stderr_before_the_error_envelope() {
     let broker = MockBroker::start(
         &[(metadata_request::API_KEY, 0, METADATA_VERSION)],
         BTreeMap::from([((metadata_request::API_KEY, METADATA_VERSION), Reply::Silent)]),
@@ -158,11 +157,22 @@ async fn an_injected_timeout_logs_to_stderr_and_ends_with_the_error_envelope() {
     .unwrap();
     check!(out.code == Some(1));
     check!(out.stdout.is_empty());
-    let mut lines = out.stderr.lines().collect::<Vec<_>>();
-    let envelope: Value = serde_json::from_str(lines.pop().unwrap()).unwrap();
+    // The client's background telemetry task may log at debug after the
+    // command ends, so the envelope is found by its shape, not its position.
+    let lines = out.stderr.lines().collect::<Vec<_>>();
+    let envelope_at = lines
+        .iter()
+        .rposition(|line| serde_json::from_str::<Value>(line).is_ok())
+        .expect("an error envelope on stderr");
+    let envelope: Value = serde_json::from_str(lines[envelope_at]).unwrap();
     check!(envelope["error"]["code"] == json!(1));
     // The client's instrumented request logs its failure before the envelope.
-    check!(!lines.is_empty(), "no log line on stderr");
+    check!(
+        lines[..envelope_at]
+            .iter()
+            .any(|line| line.contains("request timed out")),
+        "no log line on stderr before the envelope"
+    );
     broker.stop();
 }
 

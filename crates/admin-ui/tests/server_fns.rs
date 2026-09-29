@@ -928,6 +928,7 @@ impl AdminReadSeam for RecordingAdminReadSeam {
         Box::pin(async move {
             self.log_dirs.fetch_add(1, Ordering::SeqCst);
             Ok(vec![LogDirRow {
+                broker_id: 1,
                 log_dir: "/var/lib/krabka".to_string(),
                 topic: "orders".to_string(),
                 partition: 0,
@@ -1389,6 +1390,7 @@ fn log_dir_move_request() -> LogDirMoveRequestDto {
     LogDirMoveRequestDto {
         topic: "orders".to_string(),
         partition: 0,
+        broker_id: 1,
         destination_log_dir: "/var/lib/krabka-1".to_string(),
     }
 }
