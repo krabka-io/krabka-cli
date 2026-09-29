@@ -1,5 +1,5 @@
 use assert2::check;
-use krabka_client_admin::KafkaError;
+use krabka_client_admin::{KafkaError, ReplicaLogDir};
 
 use super::*;
 
@@ -271,50 +271,127 @@ fn execute_and_cancel_lines_match_kafka() {
 }
 
 #[test]
-fn partition_errors_are_sorted_with_their_messages() {
-    let outcome = |topic: &str, partition, error: Option<KafkaError>| PartitionAssignmentOutcome {
-        topic: topic.into(),
-        partition,
-        error,
+fn partition_errors_are_sorted_with_kafkas_exception_messages() {
+    let error = |code, name, message: Option<&str>| KafkaError {
+        code,
+        name,
+        message: message.map(ToOwned::to_owned),
     };
-    let outcomes = [
-        outcome("foo", 1, None),
-        outcome(
-            "foo",
-            0,
-            Some(KafkaError {
-                code: 85,
-                name: "NO_REASSIGNMENT_IN_PROGRESS",
-                message: None,
-            }),
+    let errors = BTreeMap::from([
+        (tp("foo", 0), error(85, "NO_REASSIGNMENT_IN_PROGRESS", None)),
+        (
+            tp("bar", 3),
+            error(
+                38,
+                "INVALID_REPLICATION_FACTOR",
+                Some("Replica 7 is not alive"),
+            ),
         ),
-        outcome(
-            "bar",
-            3,
-            Some(KafkaError {
-                code: 38,
-                name: "INVALID_REPLICATION_FACTOR",
-                message: Some("Replica 7 is not alive".into()),
-            }),
-        ),
-    ];
+    ]);
     check!(
-        partition_errors(&outcomes)
+        partition_errors(&errors)
             == vec![
                 "bar-3: Replica 7 is not alive",
-                "foo-0: NO_REASSIGNMENT_IN_PROGRESS (85)",
+                "foo-0: No partition reassignment is in progress.",
             ]
     );
 }
 
 #[test]
+fn log_dir_moves_are_classified_and_reported_as_kafka_does() {
+    let dir = |path: &str| ReplicaLogDir {
+        path: path.into(),
+        offset_lag: 0,
+    };
+    let info = |current: Option<&str>, future: Option<&str>| ReplicaLogDirInfo {
+        current: current.map(dir),
+        future: future.map(dir),
+    };
+    let replica = |broker, partition| Replica {
+        broker,
+        topic: "foo".into(),
+        partition,
+    };
+    let cases = [
+        (
+            replica(1, 0),
+            info(None, None),
+            MoveState::MissingLogDir,
+            false,
+            "Partition foo-0 is not found in any live log dir on broker 1. There is likely an \
+             offline log directory on the broker.",
+        ),
+        (
+            replica(1, 1),
+            info(Some("/a"), Some("/b")),
+            MoveState::Active {
+                current: "/a".into(),
+                target: "/b".into(),
+                future: "/b".into(),
+            },
+            false,
+            "Reassignment of replica foo-1-1 is still in progress.",
+        ),
+        (
+            replica(1, 2),
+            info(Some("/a"), Some("/c")),
+            MoveState::Active {
+                current: "/a".into(),
+                target: "/b".into(),
+                future: "/c".into(),
+            },
+            false,
+            "Partition foo-2 on broker 1 is being moved to log dir /c instead of /b.",
+        ),
+        (
+            replica(2, 0),
+            info(Some("/a"), None),
+            MoveState::Cancelled {
+                current: "/a".into(),
+                target: "/b".into(),
+            },
+            true,
+            "Partition foo-0 on broker 2 is not being moved from log dir /a to /b.",
+        ),
+        (
+            replica(2, 1),
+            info(Some("/b"), None),
+            MoveState::Completed,
+            true,
+            "Reassignment of replica foo-1-2 completed successfully.",
+        ),
+    ];
+    let mut states = BTreeMap::new();
+    let mut lines = Vec::new();
+    for (replica, info, expected, done, line) in cases {
+        let state = MoveState::new(&info, "/b");
+        check!((&state, state.done()) == (&expected, done));
+        states.insert(replica, state);
+        lines.push(line.to_owned());
+    }
+    check!(move_state_lines(&states) == lines);
+}
+
+#[test]
+fn clearing_lines_name_one_or_many() {
+    check!(
+        clearing_line("broker", "broker", &["1".to_owned()])
+            == "Clearing broker-level throttles on broker 1"
+    );
+    check!(
+        clearing_line("topic", "topic", &["a".to_owned(), "b".to_owned()])
+            == "Clearing topic-level throttles on topics a,b"
+    );
+}
+
+#[test]
 fn usable_brokers_honour_rack_awareness() {
-    let node = |id, rack: Option<&str>| Node {
+    let node = |id, rack: Option<&str>| ClusterNode {
         id,
         host: "h".into(),
         port: 9092,
         rack: rack.map(Into::into),
-        fenced: false,
+        is_fenced: false,
     };
     let nodes = [node(1, Some("a")), node(2, None), node(3, Some("b"))];
     check!(

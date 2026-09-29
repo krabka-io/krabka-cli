@@ -258,10 +258,12 @@ fn results_render_as_kafka_leader_election_prints_them() {
                 "Successfully completed leader election (UNCLEAN) for partitions bar-1, foo-0",
                 "Valid replica already elected for partitions foo-1",
                 "Error completing leader election (UNCLEAN) for partition: nope-0: \
-                 UNKNOWN_TOPIC_OR_PARTITION (3): No such topic as nope",
+                 org.apache.kafka.common.errors.UnknownTopicOrPartitionException: No such topic \
+                 as nope",
             ]
     );
     check!(report.failed);
+    check!(report.notices == vec!["1 replica(s) could not be elected"]);
     check!(
         report.data[3]
             == json!({
@@ -289,4 +291,36 @@ fn election_not_needed_is_not_a_failure() {
     );
     let empty = election_report(ElectionType::Preferred, &ElectionResults::new());
     check!((empty.human, empty.failed) == (Vec::<String>::new(), false));
+}
+
+#[test]
+fn a_timeout_or_a_refused_authorization_prints_kafkas_line() {
+    let broker = |code, name| AdminError::Broker {
+        api: "ElectLeaders",
+        code,
+        name,
+        message: None,
+    };
+    for (error, line) in [
+        (
+            broker(7, "REQUEST_TIMED_OUT"),
+            "Timeout waiting for election results",
+        ),
+        (
+            broker(31, "CLUSTER_AUTHORIZATION_FAILED"),
+            "Not authorized to perform leader election",
+        ),
+    ] {
+        let result = call_failure(error).expect("a report");
+        check!(
+            (result.human, result.notices, result.failed)
+                == (vec![line.to_owned()], vec![line.to_owned()], true)
+        );
+    }
+    check!(
+        call_failure(broker(41, "NOT_CONTROLLER"))
+            .err()
+            .map(|error| error.to_string())
+            == Some("ElectLeaders failed: NOT_CONTROLLER (41)".to_owned())
+    );
 }

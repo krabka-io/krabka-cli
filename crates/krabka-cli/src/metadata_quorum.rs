@@ -11,13 +11,12 @@ use std::{
 };
 
 use clap::{Args, Subcommand};
-use krabka_client_admin::{MetadataQuorum, QuorumReplica};
+use krabka_client_admin::{MetadataQuorum, QuorumReplica, RaftVoterEndpoint};
 use krabka_ids::KafkaUuid;
 use serde_json::{Value, json};
 
 use crate::{
     cluster,
-    common::unsupported,
     connection::{ConnectionArgs, Properties},
     output::{CommandError, CommandResult},
     safety::{ConfirmArgs, Impact, confirm},
@@ -120,9 +119,8 @@ async fn describe(
             let mut client = connection.connect("metadata-quorum").await?;
             // `kafka-metadata-quorum describe --status` reads the cluster ID
             // from `DescribeCluster` before it reads the quorum.
-            let cluster_id = cluster::cluster_id(&mut client, "metadata-quorum describe --status")?;
+            let cluster_id = cluster::cluster_id(&client).await?;
             let quorum = client.describe_metadata_quorum().await?;
-            let cluster_id = cluster_id.unwrap_or_else(|| "null".into());
             let human = status_lines(&cluster_id, &quorum, &NodeEndpoints::new())?;
             Ok(CommandResult::success(
                 human,
@@ -375,6 +373,21 @@ struct VoterEndpoint {
     port: i32,
 }
 
+impl VoterEndpoint {
+    /// The client's endpoint, with the refusals of Kafka's
+    /// `RaftVoterEndpoint` constructor.
+    fn to_raft(&self) -> Result<RaftVoterEndpoint, CommandError> {
+        // Java's `int` port is not range-checked; the wire field is a `uint16`.
+        let port = u16::try_from(self.port).map_err(|_| {
+            CommandError::Other(format!(
+                "Invalid port {} for listener {}",
+                self.port, self.listener
+            ))
+        })?;
+        Ok(RaftVoterEndpoint::new(&self.listener, &self.host, port)?)
+    }
+}
+
 impl std::fmt::Display for VoterEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.host.contains(':') {
@@ -421,9 +434,23 @@ async fn add_controller(
             CommandResult::success(vec![added_line(&controller, true)], data).into_dry_run(),
         );
     }
-    Err(unsupported(
-        "metadata-quorum add-controller",
-        "AdminClient::add_raft_voter",
+    let endpoints = controller
+        .endpoints
+        .iter()
+        .map(VoterEndpoint::to_raft)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut client = connection.connect("metadata-quorum").await?;
+    client
+        .add_raft_voter(
+            None,
+            controller.id,
+            controller.directory_id.get(),
+            &endpoints,
+        )
+        .await?;
+    Ok(CommandResult::success(
+        vec![added_line(&controller, false)],
+        data,
     ))
 }
 
@@ -617,7 +644,7 @@ fn controller_endpoints(properties: &Properties) -> Result<Vec<VoterEndpoint>, S
 }
 
 async fn remove_controller(
-    _connection: &ConnectionArgs,
+    connection: &ConnectionArgs,
     args: RemoveControllerArgs,
 ) -> Result<CommandResult, CommandError> {
     let (id, directory_id) = removal(args.controller_id, &args.controller_directory_id)?;
@@ -637,12 +664,14 @@ async fn remove_controller(
         },
     )
     .await?;
-    // `kafka-metadata-quorum` sends no cluster ID; the pinned
-    // `remove_raft_voter` needs one, and only `describe_cluster` can supply it.
-    Err(unsupported(
-        "metadata-quorum remove-controller",
-        "AdminClient::remove_raft_voter with an optional cluster ID (or \
-         AdminClient::describe_cluster)",
+    // `kafka-metadata-quorum` sends no cluster ID.
+    let mut client = connection.connect("metadata-quorum").await?;
+    client
+        .remove_raft_voter(None, id, directory_id.get())
+        .await?;
+    Ok(CommandResult::success(
+        vec![removed_line(id, directory_id, false)],
+        data,
     ))
 }
 

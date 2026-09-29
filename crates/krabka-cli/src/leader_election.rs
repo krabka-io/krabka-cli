@@ -9,12 +9,13 @@ use std::{
 };
 
 use clap::Args;
-use krabka_client_admin::{AdminClient, KafkaError};
+use krabka_client_admin::{AdminClient, AdminError, KafkaError};
 use serde_json::json;
 
 use crate::{
-    common::unsupported,
+    common::java_exception,
     connection::ConnectionArgs,
+    jvm::hash_set_order,
     kafka_json,
     output::{CommandError, CommandResult, kafka_error},
     topic_partition::{TopicPartition, join},
@@ -23,6 +24,11 @@ use crate::{
 /// `ELECTION_NOT_NEEDED`: the partition already has the leader that the
 /// election would choose.
 const ELECTION_NOT_NEEDED: i16 = 84;
+/// `REQUEST_TIMED_OUT`, which Kafka's admin client raises as a
+/// `TimeoutException`.
+const REQUEST_TIMED_OUT: i16 = 7;
+/// `CLUSTER_AUTHORIZATION_FAILED`.
+const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
 
 #[derive(Debug, Args)]
 pub struct LeaderElectionArgs {
@@ -65,6 +71,14 @@ impl ElectionType {
         match self {
             Self::Preferred => "PREFERRED",
             Self::Unclean => "UNCLEAN",
+        }
+    }
+
+    /// The client's election type.
+    const fn client(self) -> krabka_client_admin::ElectionType {
+        match self {
+            Self::Preferred => krabka_client_admin::ElectionType::Preferred,
+            Self::Unclean => krabka_client_admin::ElectionType::Unclean,
         }
     }
 
@@ -149,8 +163,10 @@ impl LeaderElectionArgs {
             self.connection.command_config = Some(config);
         }
         let mut client = self.connection.connect("leader-election").await?;
-        let results = elect_leaders(&mut client, election_type, &selection)?;
-        let report = election_report(election_type, &results);
+        let report = match elect_leaders(&mut client, election_type, &selection).await {
+            Ok(results) => election_report(election_type, &results),
+            Err(error) => call_failure(error)?,
+        };
         Ok(CommandResult {
             human: notices.into_iter().chain(report.human).collect(),
             ..report
@@ -264,27 +280,55 @@ type ElectionResults = BTreeMap<TopicPartition, Option<KafkaError>>;
 /// Sends `ElectLeaders` for `selection`.
 ///
 /// # Errors
-/// Always, in this build: the pinned `krabka-client-admin` has no
-/// `elect_leaders`.
-fn elect_leaders(
-    _client: &mut AdminClient,
-    _election_type: ElectionType,
+/// Returns the error of the `ElectLeaders` call.
+async fn elect_leaders(
+    client: &mut AdminClient,
+    election_type: ElectionType,
     selection: &Selection,
-) -> Result<ElectionResults, CommandError> {
-    let _partitions = selection.request_partitions();
-    Err(unsupported("leader-election", "AdminClient::elect_leaders"))
+) -> Result<ElectionResults, AdminError> {
+    let partitions = selection.request_partitions();
+    Ok(client
+        .elect_leaders(election_type.client(), partitions.as_deref())
+        .await?
+        .into_iter()
+        .map(|((topic, partition), result)| (TopicPartition::new(topic, partition), result.err()))
+        .collect())
+}
+
+/// What `kafka-leader-election` does when the whole call fails: it prints a
+/// line for a timeout or a refused authorization and fails with the same
+/// message, and fails with the error otherwise.
+fn call_failure(error: AdminError) -> Result<CommandResult, CommandError> {
+    let message = match &error {
+        AdminError::Broker {
+            code: REQUEST_TIMED_OUT,
+            ..
+        } => "Timeout waiting for election results",
+        AdminError::Broker {
+            code: CLUSTER_AUTHORIZATION_FAILED,
+            ..
+        } => "Not authorized to perform leader election",
+        _ => return Err(error.into()),
+    };
+    Ok(
+        CommandResult::rows(vec![message.to_owned()], json!({"error": message}), true)
+            .with_notices(vec![message.to_owned()]),
+    )
 }
 
 /// What `kafka-leader-election` prints for the results: the elected
 /// partitions, the partitions that needed no election, then one line per
-/// failed partition. `ELECTION_NOT_NEEDED` is not a failure.
+/// failed partition, each group in the order of Kafka's `HashSet` or
+/// `HashMap`. `ELECTION_NOT_NEEDED` is not a failure. A failure ends with
+/// `<n> replica(s) could not be elected` on stderr.
 fn election_report(election_type: ElectionType, results: &ElectionResults) -> CommandResult {
     let name = election_type.name();
     let succeeded = results
         .iter()
         .filter(|(_, error)| error.is_none())
-        .map(|(partition, _)| partition)
+        .map(|(partition, _)| partition.clone())
         .collect::<Vec<_>>();
+    let succeeded = hash_set_order(succeeded, TopicPartition::java_hash);
     let noop = results
         .iter()
         .filter(|(_, error)| {
@@ -292,39 +336,38 @@ fn election_report(election_type: ElectionType, results: &ElectionResults) -> Co
                 .as_ref()
                 .is_some_and(|e| e.code == ELECTION_NOT_NEEDED)
         })
-        .map(|(partition, _)| partition)
+        .map(|(partition, _)| partition.clone())
         .collect::<Vec<_>>();
+    let noop = hash_set_order(noop, TopicPartition::java_hash);
     let failed = results
         .iter()
         .filter_map(|(partition, error)| {
             error
                 .as_ref()
                 .filter(|e| e.code != ELECTION_NOT_NEEDED)
-                .map(|error| (partition, error))
+                .map(|error| (partition.clone(), error))
         })
         .collect::<Vec<_>>();
+    let failed = crate::jvm::hash_order(failed, crate::jvm::Table::Default, |(partition, _)| {
+        partition.java_hash()
+    });
     let mut human = Vec::new();
     if !succeeded.is_empty() {
         human.push(format!(
             "Successfully completed leader election ({name}) for partitions {}",
-            join(succeeded.iter().copied(), ", ")
+            join(&succeeded, ", ")
         ));
     }
     if !noop.is_empty() {
         human.push(format!(
             "Valid replica already elected for partitions {}",
-            join(noop.iter().copied(), ", ")
+            join(&noop, ", ")
         ));
     }
     for (partition, error) in &failed {
-        let message = error
-            .message
-            .as_deref()
-            .filter(|message| !message.is_empty())
-            .map_or_else(String::new, |message| format!(": {message}"));
         human.push(format!(
-            "Error completing leader election ({name}) for partition: {partition}: {} ({}){message}",
-            error.name, error.code
+            "Error completing leader election ({name}) for partition: {partition}: {}",
+            java_exception(error)
         ));
     }
     let data = results
@@ -338,7 +381,12 @@ fn election_report(election_type: ElectionType, results: &ElectionResults) -> Co
             })
         })
         .collect::<Vec<_>>();
-    CommandResult::rows(human, data, !failed.is_empty())
+    let notices = if failed.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!("{} replica(s) could not be elected", failed.len())]
+    };
+    CommandResult::rows(human, data, !failed.is_empty()).with_notices(notices)
 }
 
 #[cfg(test)]
