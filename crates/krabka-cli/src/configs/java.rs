@@ -93,14 +93,78 @@ pub fn trim(value: &str) -> &str {
     value.trim_matches(|c: char| c <= ' ')
 }
 
-/// The `toString` of a Scala immutable `Set`, `HashSet` above four elements.
+/// The `toString` of a Scala immutable `Set` built from the distinct
+/// `items` in this order: a `Set` in insertion order up to four elements,
+/// and a `HashSet` in its own order above that.
 pub fn scala_set<S: AsRef<str>>(items: &[S]) -> String {
-    let name = if items.len() > SCALA_SMALL_COLLECTION {
+    let ordered = scala_set_order(items.iter().map(AsRef::as_ref).collect());
+    let name = if ordered.len() > SCALA_SMALL_COLLECTION {
         "HashSet"
     } else {
         "Set"
     };
-    format!("{name}({})", join(items))
+    format!("{name}({})", join(&ordered))
+}
+
+/// The iteration order of a Scala immutable `Set` that was given `items`
+/// in this order: each once, in insertion order up to four elements, and in
+/// the order of a `HashSet` above that.
+pub fn scala_set_order<T: AsRef<str> + PartialEq>(items: Vec<T>) -> Vec<T> {
+    let mut unique = Vec::<T>::new();
+    for item in items {
+        if !unique.contains(&item) {
+            unique.push(item);
+        }
+    }
+    if unique.len() <= SCALA_SMALL_COLLECTION {
+        return unique;
+    }
+    let hashed = unique
+        .into_iter()
+        .map(|item| (improve(string_hash(item.as_ref())).cast_unsigned(), item))
+        .collect();
+    champ_order(hashed, 0)
+}
+
+/// `scala.collection.Hashing.improve`, the hash that a Scala `HashSet`
+/// places an element by.
+const fn improve(hash: i32) -> i32 {
+    let hash = hash.cast_unsigned();
+    let mut h = hash.wrapping_add(!(hash << 9));
+    h ^= h >> 14;
+    h = h.wrapping_add(h << 4);
+    (h ^ (h >> 10)).cast_signed()
+}
+
+/// The number of hash bits that one level of a Scala `HashSet` uses.
+const CHAMP_BITS: u32 = 5;
+
+/// The order in which a Scala `HashSet` (a CHAMP trie) iterates the
+/// elements of one node at `shift`: the elements alone in their slot, by
+/// slot, then each sub-node by slot, depth first. Elements whose whole hash
+/// collides keep insertion order.
+fn champ_order<T>(items: Vec<(u32, T)>, shift: u32) -> Vec<T> {
+    if shift >= u32::BITS {
+        return items.into_iter().map(|(_, item)| item).collect();
+    }
+    let mut slots: Vec<Vec<(u32, T)>> = (0..1 << CHAMP_BITS).map(|_| Vec::new()).collect();
+    for (hash, item) in items {
+        slots[usize::try_from((hash >> shift) & 31).expect("a slot fits in usize")]
+            .push((hash, item));
+    }
+    let mut payload = Vec::new();
+    let mut nodes = Vec::new();
+    for slot in slots {
+        if slot.len() == 1 {
+            payload.extend(slot.into_iter().map(|(_, item)| item));
+        } else if !slot.is_empty() {
+            nodes.push(slot);
+        }
+    }
+    for node in nodes {
+        payload.extend(champ_order(node, shift + CHAMP_BITS));
+    }
+    payload
 }
 
 /// The `toString` of a Scala `ArrayBuffer`.
@@ -201,9 +265,46 @@ mod tests {
     }
 
     #[test]
+    fn scala_sets_iterate_in_the_order_of_scala_2_13() {
+        // The orders that scala-library 2.13.18, the one of the
+        // apache/kafka:4.3.1 image, prints.
+        let letters = [
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q",
+            "r", "s", "t", "u", "v", "w", "x", "y", "z", "aa", "ab", "ac", "ad", "ae", "af", "ag",
+            "ah",
+        ];
+        let cases: [(Vec<&str>, Vec<&str>); 4] = [
+            (vec!["b", "a", "b"], vec!["b", "a"]),
+            (
+                vec!["g1", "g2", "g3", "g4", "g5"],
+                vec!["g2", "g1", "g5", "g3", "g4"],
+            ),
+            (
+                vec![
+                    "orders", "payments", "audit", "billing", "shipping", "alpha",
+                ],
+                vec![
+                    "alpha", "payments", "orders", "audit", "billing", "shipping",
+                ],
+            ),
+            (
+                letters.to_vec(),
+                vec![
+                    "e", "n", "t", "a", "ab", "m", "af", "i", "ah", "v", "ag", "p", "ad", "w", "k",
+                    "s", "ae", "x", "j", "y", "u", "f", "q", "ac", "b", "g", "l", "c", "h", "aa",
+                    "r", "o", "z", "d",
+                ],
+            ),
+        ];
+        for (items, expected) in cases {
+            check!(scala_set_order(items.clone()) == expected, "{items:?}");
+        }
+    }
+
+    #[test]
     fn scala_collections_render_as_their_to_string() {
         check!(scala_set(&["bar", "foo"]) == "Set(bar, foo)");
-        check!(scala_set(&["a", "b", "c", "d", "e"]) == "HashSet(a, b, c, d, e)");
+        check!(scala_set(&["g1", "g2", "g3", "g4", "g5"]) == "HashSet(g2, g1, g5, g3, g4)");
         check!(scala_buffer(&["foo", "bar"]) == "ArrayBuffer(foo, bar)");
     }
 }

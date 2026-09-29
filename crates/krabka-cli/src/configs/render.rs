@@ -2,18 +2,17 @@
 
 use std::collections::BTreeMap;
 
-use krabka_client_admin::{UserQuotaConfig, UserScramCredentials};
+use krabka_client_admin::{
+    ClientQuotaEntity, ConfigEntry, ENTITY_CLIENT_ID, ENTITY_IP, ENTITY_USER, UserScramCredentials,
+};
 use serde_json::{Map, Value, json};
 
 use super::java;
-use crate::output::kafka_error;
+use crate::{compat::KafkaException, output::kafka_error};
 
 /// `RESOURCE_NOT_FOUND`: the broker's answer for a user with no SCRAM
 /// credential, which `DescribeUserScramCredentialsResult.users` leaves out.
 const RESOURCE_NOT_FOUND: i16 = 91;
-
-/// `ConfigSource.DYNAMIC_TOPIC_CONFIG` on the wire.
-pub const DYNAMIC_TOPIC_CONFIG: i8 = 1;
 
 /// One synonym of a described config entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,27 +108,23 @@ pub const fn config_source_name(id: i8) -> &'static str {
     }
 }
 
-/// The entries of a topic, sorted by name, from the dynamic overrides that
-/// the pinned `AdminClient::describe_configs` returns.
-///
-/// That call asks for no synonyms and keeps only the entries whose source is
-/// `DYNAMIC_TOPIC_CONFIG` and that carry a value. Each entry is therefore
-/// not sensitive, and its first synonym, the only one known here, is itself.
-/// Kafka also lists the broker-level synonyms below it.
-pub fn from_overrides(overrides: &BTreeMap<String, String>) -> Vec<DescribedConfig> {
-    overrides
-        .iter()
-        .map(|(name, value)| DescribedConfig {
-            name: name.clone(),
-            value: Some(value.clone()),
-            sensitive: false,
-            synonyms: vec![Synonym {
-                source: DYNAMIC_TOPIC_CONFIG,
-                name: name.clone(),
-                value: Some(value.clone()),
-            }],
-        })
-        .collect()
+impl From<&ConfigEntry> for DescribedConfig {
+    fn from(entry: &ConfigEntry) -> Self {
+        Self {
+            name: entry.name.clone(),
+            value: entry.value.clone(),
+            sensitive: entry.is_sensitive,
+            synonyms: entry
+                .synonyms
+                .iter()
+                .map(|synonym| Synonym {
+                    source: synonym.source.id(),
+                    name: synonym.name.clone(),
+                    value: synonym.value.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// The header of one described entity. `entity_type` is plural, as on the
@@ -160,47 +155,80 @@ pub fn singular(entity_type: &str) -> &str {
     chars.as_str()
 }
 
-/// The quota line of a user, or `None` when it has no quota, as
-/// `ConfigCommand.describeQuotaConfigs` prints it. The keys are in the order
-/// of the `HashMap` that `DescribeClientQuotasResponse.complete` fills.
-pub fn quota_line(user: &str, quotas: &UserQuotaConfig) -> Option<String> {
-    if quotas.is_empty() {
-        return None;
-    }
-    let entries = java::hash_map_order(quotas.keys().map(String::as_str), Some(quotas.len()))
+/// The quota line of one entity, as `ConfigCommand.describeQuotaConfigs`
+/// prints it: the user, the client and the ip of the entity, then its
+/// values in the order of the `HashMap` that
+/// `DescribeClientQuotasResponse.complete` fills.
+pub fn quota_line(entity: &ClientQuotaEntity, values: &BTreeMap<String, f64>) -> String {
+    let names = [
+        (ENTITY_USER, "user-principal"),
+        (ENTITY_CLIENT_ID, "client-id"),
+        (ENTITY_IP, "ip"),
+    ]
+    .into_iter()
+    .filter_map(|(entity_type, label)| {
+        entity.get(entity_type).map(|name| match name {
+            Some(name) => format!("{label} '{name}'"),
+            None => format!("the default {label}"),
+        })
+    })
+    .collect::<Vec<_>>()
+    .join(", ");
+    let entries = java::hash_map_order(values.keys().map(String::as_str), Some(values.len()))
         .into_iter()
-        .map(|key| format!("{key}={}", java::double_to_string(quotas[key])))
+        .map(|key| format!("{key}={}", java::double_to_string(values[key])))
         .collect::<Vec<_>>()
         .join(", ");
-    Some(format!(
-        "Quota configs for user-principal '{user}' are {entries}"
-    ))
+    format!("Quota configs for {names} are {entries}")
 }
 
-pub fn quota_json(quotas: &UserQuotaConfig) -> Value {
-    Value::Object(
-        quotas
-            .iter()
-            .map(|(key, value)| (key.clone(), json!(value)))
-            .collect::<Map<_, _>>(),
-    )
+pub fn quota_json(entity: &ClientQuotaEntity, values: &BTreeMap<String, f64>) -> Value {
+    json!({
+        "entity": entity,
+        "values": Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), json!(value)))
+                .collect::<Map<_, _>>(),
+        ),
+    })
 }
 
-/// The SCRAM line of a described user, or `None` for a user that the broker
-/// does not know, as `describeClientQuotaAndUserScramCredentialConfigs`
-/// prints it.
-pub fn scram_line(user: &UserScramCredentials) -> Option<String> {
+/// The users that `DescribeUserScramCredentialsResult.users` lists, each
+/// with the first result of its name, which `description` reads: every
+/// result but those of `RESOURCE_NOT_FOUND`, in the order of the answer.
+pub fn scram_users(described: &[UserScramCredentials]) -> Vec<&UserScramCredentials> {
+    described
+        .iter()
+        .filter(|user| {
+            user.error
+                .as_ref()
+                .is_none_or(|error| error.code != RESOURCE_NOT_FOUND)
+        })
+        .map(|user| {
+            described
+                .iter()
+                .find(|first| first.username == user.username)
+                .expect("the user is in the answer")
+        })
+        .collect()
+}
+
+/// The SCRAM line of a described user, as
+/// `describeClientQuotaAndUserScramCredentialConfigs` prints it. A failed
+/// user prints the `ExecutionException` that `get` throws.
+pub fn scram_line(user: &UserScramCredentials) -> String {
     match &user.error {
-        Some(error) if error.code == RESOURCE_NOT_FOUND => None,
         Some(error) => {
-            let (class, default_message) = exception(error.code, error.name);
-            Some(format!(
-                "Error retrieving SCRAM credential configs for user-principal '{}': {class}: {}",
+            let exception = KafkaException::for_code(error.code);
+            format!(
+                "Error retrieving SCRAM credential configs for user-principal '{}': ExecutionException: {}: {}",
                 user.username,
-                error.message.as_deref().unwrap_or(default_message)
-            ))
+                exception.class(),
+                error.message.as_deref().unwrap_or(exception.message())
+            )
         }
-        None => Some(format!(
+        None => format!(
             "SCRAM credential configs for user-principal '{}' are {}",
             user.username,
             user.credentials
@@ -211,12 +239,13 @@ pub fn scram_line(user: &UserScramCredentials) -> Option<String> {
                 ))
                 .collect::<Vec<_>>()
                 .join(", ")
-        )),
+        ),
     }
 }
 
 pub fn scram_json(user: &UserScramCredentials) -> Value {
     json!({
+        "user": user.username,
         "credentials": user
             .credentials
             .iter()
@@ -227,31 +256,6 @@ pub fn scram_json(user: &UserScramCredentials) -> Value {
             .collect::<Vec<_>>(),
         "error": kafka_error(user.error.as_ref()),
     })
-}
-
-/// The simple class name and the default message of the exception that
-/// `Errors.forCode(code).exception(null)` builds, for the errors a SCRAM
-/// describe can carry. Any other code is shown by its Kafka error name.
-const fn exception(code: i16, name: &'static str) -> (&'static str, &'static str) {
-    match code {
-        -1 => (
-            "UnknownServerException",
-            "The server experienced an unexpected error when processing the request.",
-        ),
-        31 => (
-            "ClusterAuthorizationException",
-            "Cluster authorization failed.",
-        ),
-        35 => (
-            "UnsupportedVersionException",
-            "The version of API is not supported.",
-        ),
-        41 => (
-            "NotControllerException",
-            "This is not the correct controller for this cluster.",
-        ),
-        _ => (name, ""),
-    }
 }
 
 #[cfg(test)]
@@ -341,27 +345,40 @@ mod tests {
     }
 
     #[test]
-    fn overrides_become_sorted_dynamic_entries() {
-        let overrides = BTreeMap::from([
-            ("retention.ms".into(), "1000".into()),
-            ("cleanup.policy".into(), "compact".into()),
-        ]);
+    fn a_config_entry_keeps_its_value_sensitivity_and_synonyms() {
+        use krabka_client_admin::{ConfigSource, ConfigSynonym, ConfigType};
+        let entry = ConfigEntry {
+            name: "retention.ms".into(),
+            value: Some("1000".into()),
+            source: ConfigSource::DynamicTopicConfig,
+            is_sensitive: false,
+            is_read_only: false,
+            synonyms: vec![
+                ConfigSynonym {
+                    name: "retention.ms".into(),
+                    value: Some("1000".into()),
+                    source: ConfigSource::DynamicTopicConfig,
+                },
+                ConfigSynonym {
+                    name: "log.retention.ms".into(),
+                    value: None,
+                    source: ConfigSource::DefaultConfig,
+                },
+            ],
+            config_type: ConfigType::Unknown,
+            documentation: None,
+        };
         check!(
-            from_overrides(&overrides)
-                == vec![
-                    DescribedConfig {
-                        name: "cleanup.policy".into(),
-                        value: Some("compact".into()),
-                        sensitive: false,
-                        synonyms: vec![synonym(1, "cleanup.policy", Some("compact"))],
-                    },
-                    DescribedConfig {
-                        name: "retention.ms".into(),
-                        value: Some("1000".into()),
-                        sensitive: false,
-                        synonyms: vec![synonym(1, "retention.ms", Some("1000"))],
-                    },
-                ]
+            DescribedConfig::from(&entry)
+                == DescribedConfig {
+                    name: "retention.ms".into(),
+                    value: Some("1000".into()),
+                    sensitive: false,
+                    synonyms: vec![
+                        synonym(1, "retention.ms", Some("1000")),
+                        synonym(5, "log.retention.ms", None),
+                    ],
+                }
         );
     }
 
@@ -393,34 +410,55 @@ mod tests {
         );
     }
 
+    fn entity(entries: &[(&str, Option<&str>)]) -> ClientQuotaEntity {
+        entries
+            .iter()
+            .map(|(entity_type, name)| ((*entity_type).to_owned(), name.map(str::to_owned)))
+            .collect()
+    }
+
     #[test]
     fn quota_lines_print_as_kafka_prints_them() {
-        let quotas = |entries: &[(&str, f64)]| {
+        let values = |entries: &[(&str, f64)]| {
             entries
                 .iter()
                 .map(|(key, value)| ((*key).to_owned(), *value))
-                .collect::<UserQuotaConfig>()
+                .collect::<BTreeMap<_, _>>()
         };
         let cases = [
-            (quotas(&[]), None),
             (
-                quotas(&[
+                entity(&[("user", Some("alice"))]),
+                values(&[
                     ("consumer_byte_rate", 1024.0),
                     ("producer_byte_rate", 2.0e7),
                     ("request_percentage", 12.5),
                     ("controller_mutation_rate", 3.0),
                 ]),
-                Some(
-                    "Quota configs for user-principal 'alice' are producer_byte_rate=2.0E7, consumer_byte_rate=1024.0, controller_mutation_rate=3.0, request_percentage=12.5",
-                ),
+                "Quota configs for user-principal 'alice' are producer_byte_rate=2.0E7, consumer_byte_rate=1024.0, controller_mutation_rate=3.0, request_percentage=12.5",
             ),
             (
-                quotas(&[("consumer_byte_rate", 1024.0)]),
-                Some("Quota configs for user-principal 'alice' are consumer_byte_rate=1024.0"),
+                entity(&[("client-id", Some("c1")), ("user", None)]),
+                values(&[("consumer_byte_rate", 1024.0)]),
+                "Quota configs for the default user-principal, client-id 'c1' are consumer_byte_rate=1024.0",
+            ),
+            (
+                entity(&[("client-id", None)]),
+                values(&[("request_percentage", 50.0)]),
+                "Quota configs for the default client-id are request_percentage=50.0",
+            ),
+            (
+                entity(&[("ip", Some("1.2.3.4"))]),
+                values(&[("connection_creation_rate", 10.0)]),
+                "Quota configs for ip '1.2.3.4' are connection_creation_rate=10.0",
+            ),
+            (
+                entity(&[("user", Some("alice"))]),
+                values(&[]),
+                "Quota configs for user-principal 'alice' are ",
             ),
         ];
-        for (quotas, expected) in cases {
-            check!(quota_line("alice", &quotas) == expected.map(str::to_owned));
+        for (entity, values, expected) in cases {
+            check!(quota_line(&entity, &values) == expected);
         }
     }
 
@@ -448,20 +486,7 @@ mod tests {
                     ],
                     None,
                 ),
-                Some(
-                    "SCRAM credential configs for user-principal 'alice' are SCRAM-SHA-256=iterations=8192, SCRAM-SHA-512=iterations=4096",
-                ),
-            ),
-            (
-                user(
-                    Vec::new(),
-                    Some(KafkaError {
-                        code: 91,
-                        name: "RESOURCE_NOT_FOUND",
-                        message: Some("no such user".into()),
-                    }),
-                ),
-                None,
+                "SCRAM credential configs for user-principal 'alice' are SCRAM-SHA-256=iterations=8192, SCRAM-SHA-512=iterations=4096",
             ),
             (
                 user(
@@ -472,9 +497,7 @@ mod tests {
                         message: None,
                     }),
                 ),
-                Some(
-                    "Error retrieving SCRAM credential configs for user-principal 'alice': ClusterAuthorizationException: Cluster authorization failed.",
-                ),
+                "Error retrieving SCRAM credential configs for user-principal 'alice': ExecutionException: org.apache.kafka.common.errors.ClusterAuthorizationException: Cluster authorization failed.",
             ),
             (
                 user(
@@ -485,13 +508,33 @@ mod tests {
                         message: Some("denied".into()),
                     }),
                 ),
-                Some(
-                    "Error retrieving SCRAM credential configs for user-principal 'alice': SASL_AUTHENTICATION_FAILED: denied",
-                ),
+                "Error retrieving SCRAM credential configs for user-principal 'alice': ExecutionException: org.apache.kafka.common.errors.SaslAuthenticationException: denied",
             ),
         ];
         for (user, expected) in cases {
-            check!(scram_line(&user) == expected.map(str::to_owned));
+            check!(scram_line(&user) == expected);
         }
+    }
+
+    #[test]
+    fn scram_users_skip_unknown_users_and_read_the_first_result() {
+        let result = |name: &str, code: Option<i16>, iterations: i32| UserScramCredentials {
+            username: name.into(),
+            credentials: vec![UserScramCredential {
+                mechanism: "SCRAM-SHA-256".into(),
+                iterations,
+            }],
+            error: code.map(|code| KafkaError {
+                code,
+                name: "",
+                message: None,
+            }),
+        };
+        let described = [
+            result("bob", Some(91), 0),
+            result("alice", None, 4096),
+            result("alice", None, 8192),
+        ];
+        check!(scram_users(&described) == vec![&described[1], &described[1]]);
     }
 }
