@@ -428,11 +428,8 @@ pub const FEATURES: Matrix = Matrix {
         row("unknown-flag", &["describe", "--bogus"], REJECTED),
     ],
     differences: &[
-        ("version-mapping-default", Difference::defect(&[Layer::Stdout], "krabka prints kraft.version=0 where Kafka's release mapping gives kraft.version=1")),
-        ("version-mapping-4.0", Difference::defect(&[Layer::Stdout], "krabka prints kraft.version=0 where Kafka's mapping for 4.0 gives kraft.version=1")),
-        ("version-mapping-unknown", Difference::defect(&[Layer::Stderr], "krabka lists Kafka trunk's 4.4-IV1 and 4.4-IV2 among the supported releases; Kafka 4.3.1 stops at 4.4-IV0")),
-        ("upgrade-release-dry-run", Difference::defect(&[Layer::Stdout], "krabka omits `kraft.version can be upgraded to 1.`, and prefixes the report with krabka's `DRY RUN: no change was made.` line")),
-        ("downgrade-dry-run", Difference::intended(&[Layer::Stdout], "krabka prefixes a dry-run report with `DRY RUN: no change was made.`")),
+        ("upgrade-release-dry-run", Difference::intended(&[Layer::Stderr], "krabka adds `DRY RUN: no change was made.` to stderr after Kafka's report")),
+        ("downgrade-dry-run", Difference::intended(&[Layer::Stderr], "krabka adds `DRY RUN: no change was made.` to stderr after Kafka's report")),
         ("upgrade-unknown-feature", Difference::intended(&[Layer::Stderr], "krabka refuses an unknown feature before it sends UpdateFeatures, with kafka-storage's message; kafka-features sends it and prints the controller's refusal")),
         ("no-subcommand", CLAP_MISSING),
         ("unknown-flag", CLAP_UNKNOWN),
@@ -530,7 +527,6 @@ pub const METADATA_QUORUM: Matrix = Matrix {
         row("unknown-flag", &["describe", "--bogus"], REJECTED),
     ],
     differences: &[
-        ("describe-status", Difference::defect(&[Layer::Stdout], "krabka prints CurrentVoters without the voters' endpoints, `[{\"id\": 1}]`, where Kafka prints `[{\"id\": 1, \"endpoints\": [\"CONTROLLER://localhost:9093\"]}]`; the pinned client does not carry them yet")),
         ("describe-replication-abbreviated", Difference::intended(OUTCOME, "joptsimple accepts an unambiguous prefix of a long option; clap does not")),
         ("no-subcommand", CLAP_MISSING),
         ("unknown-flag", CLAP_UNKNOWN),
@@ -584,9 +580,6 @@ pub const STORAGE: Matrix = Matrix {
         offline(row("no-subcommand", &[], REJECTED)),
     ],
     differences: &[
-        ("version-mapping-default", Difference::defect(&[Layer::Stdout], "krabka prints kraft.version=0 where Kafka's release mapping gives kraft.version=1")),
-        ("version-mapping-4.0", Difference::defect(&[Layer::Stdout], "krabka prints kraft.version=0 where Kafka's mapping for 4.0 gives kraft.version=1")),
-        ("version-mapping-unknown", Difference::defect(&[Layer::Stderr], "krabka lists Kafka trunk's 4.4-IV1 and 4.4-IV2 among the supported releases; Kafka 4.3.1 stops at 4.4-IV0")),
         ("no-subcommand", CLAP_MISSING),
     ],
 };
