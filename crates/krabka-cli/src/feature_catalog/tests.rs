@@ -68,7 +68,7 @@ fn production_features_follow_kafka_order_and_omit_metadata_version() {
 #[test]
 fn version_mapping_prints_each_feature_default_at_the_release() {
     for release in [None, Some("4.0"), Some("3.8.1"), Some("3.5-IV2")] {
-        let version = release.map_or_else(latest_metadata_version, |release| {
+        let version = release.map_or_else(latest_production_metadata_version, |release| {
             resolve_release(release).unwrap()
         });
         let echoed = release.map_or_else(|| version.ivn().to_owned(), str::to_owned);
@@ -243,7 +243,7 @@ fn a_known_feature_level_reports_its_declared_dependencies() {
 
 #[test]
 fn dependencies_render_as_kafka_prints_them() {
-    let latest = latest_metadata_version();
+    let latest = latest_production_metadata_version();
     let cases = [
         (
             FeatureDependencies {
@@ -322,7 +322,7 @@ fn the_whole_graph_has_one_row_per_feature_level() {
 
 #[test]
 fn level_to_string_names_metadata_versions_only() {
-    let latest = latest_metadata_version();
+    let latest = latest_production_metadata_version();
     let cases = [
         (
             METADATA_VERSION_FEATURE,

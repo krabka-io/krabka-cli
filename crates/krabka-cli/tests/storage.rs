@@ -65,7 +65,10 @@ fn mapping_lines(level: i16, release: &str) -> Vec<String> {
 
 #[test]
 fn version_mapping_prints_each_feature_default_at_the_release() {
-    let latest = metadata_version::from_feature_level(METADATA_VERSION_MAX).unwrap();
+    // With no --release-version, kafka-storage maps MetadataVersion.LATEST_PRODUCTION.
+    let latest =
+        metadata_version::from_feature_level(krabka_format::LATEST_PRODUCTION_METADATA_VERSION)
+            .unwrap();
     let cases = [
         (vec!["--release-version", "4.0"], "4.0"),
         (vec!["-r", "3.8.1"], "3.8.1"),
@@ -73,7 +76,7 @@ fn version_mapping_prints_each_feature_default_at_the_release() {
     ];
     for (flags, release) in cases {
         let level = if flags.is_empty() {
-            METADATA_VERSION_MAX
+            krabka_format::LATEST_PRODUCTION_METADATA_VERSION
         } else {
             let key = release.split('.').take(2).collect::<Vec<_>>().join(".");
             metadata_version::from_version_string(&key)

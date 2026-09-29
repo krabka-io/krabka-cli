@@ -122,12 +122,12 @@ fn metadata_versions() -> impl Iterator<Item = MetadataVersion> {
     (METADATA_VERSION_MIN..=METADATA_VERSION_MAX).filter_map(metadata_version::from_feature_level)
 }
 
-/// The highest `metadata.version`, which both tools use when no release is
-/// given.
+/// `MetadataVersion.LATEST_PRODUCTION`, which both tools use when no release
+/// is given. The table also holds newer, not yet production, levels.
 #[must_use]
-pub fn latest_metadata_version() -> MetadataVersion {
-    metadata_version::from_feature_level(METADATA_VERSION_MAX)
-        .expect("the table holds its own maximum level")
+pub fn latest_production_metadata_version() -> MetadataVersion {
+    metadata_version::from_feature_level(krabka_format::LATEST_PRODUCTION_METADATA_VERSION)
+        .expect("the table holds the latest production level")
 }
 
 /// The name of `level` as `FeatureCommand.levelToString` prints it: the
@@ -231,7 +231,8 @@ impl VersionMapping {
     }
 }
 
-/// The mapping of `release`, or of the latest release when it is `None`.
+/// The mapping of `release`, or of the latest production release when it is
+/// `None`.
 ///
 /// # Errors
 /// Returns the message of [`resolve_release`].
@@ -242,7 +243,7 @@ pub fn version_mapping(release: Option<&str>) -> Result<VersionMapping, String> 
             release.to_owned(),
         ));
     }
-    let latest = latest_metadata_version();
+    let latest = latest_production_metadata_version();
     Ok(VersionMapping::at(latest, latest.ivn().to_owned()))
 }
 
