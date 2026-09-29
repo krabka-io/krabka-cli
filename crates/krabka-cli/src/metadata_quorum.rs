@@ -11,6 +11,8 @@ use std::{
 };
 
 use clap::{Args, Subcommand};
+#[cfg(test)]
+use krabka_client_admin::QuorumNode;
 use krabka_client_admin::{MetadataQuorum, QuorumReplica, RaftVoterEndpoint};
 use krabka_ids::KafkaUuid;
 use serde_json::{Value, json};
@@ -121,7 +123,7 @@ async fn describe(
             // from `DescribeCluster` before it reads the quorum.
             let cluster_id = cluster::cluster_id(&client).await?;
             let quorum = client.describe_metadata_quorum().await?;
-            let human = status_lines(&cluster_id, &quorum, &NodeEndpoints::new())?;
+            let human = status_lines(&cluster_id, &quorum)?;
             Ok(CommandResult::success(
                 human,
                 status_json(&cluster_id, &quorum),
@@ -256,16 +258,33 @@ fn pretty_table<const N: usize>(headers: &[&str; N], rows: &[[String; N]]) -> Ve
 /// The advertised listeners of a quorum node, as `QuorumInfo.Node`.
 type NodeEndpoints = BTreeMap<i32, Vec<VoterEndpoint>>;
 
+/// The endpoints of each node in `DescribeQuorum`'s `Nodes`, as Kafka's
+/// `QuorumInfo.nodes()`.
+fn node_endpoints(quorum: &MetadataQuorum) -> NodeEndpoints {
+    quorum
+        .nodes
+        .iter()
+        .map(|node| {
+            let endpoints = node
+                .endpoints
+                .iter()
+                .map(|endpoint| VoterEndpoint {
+                    listener: endpoint.listener().to_owned(),
+                    host: endpoint.host().to_owned(),
+                    port: i32::from(endpoint.port()),
+                })
+                .collect();
+            (node.node_id, endpoints)
+        })
+        .collect()
+}
+
 /// The lines of `describe --status`.
 ///
-/// `nodes` holds the endpoints of each node, which the pinned
-/// `MetadataQuorum` does not carry yet; a node without endpoints prints none,
-/// as Kafka prints a node that `DescribeQuorum` did not describe.
-fn status_lines(
-    cluster_id: &str,
-    quorum: &MetadataQuorum,
-    nodes: &NodeEndpoints,
-) -> Result<Vec<String>, String> {
+/// A replica prints the endpoints of its node in `quorum.nodes`; one without
+/// a node, as from a v0 or v1 `DescribeQuorum`, prints none, as Kafka does.
+fn status_lines(cluster_id: &str, quorum: &MetadataQuorum) -> Result<Vec<String>, String> {
+    let nodes = &node_endpoints(quorum);
     let leader = leader(quorum)?;
     let max_lag_follower = quorum
         .voters

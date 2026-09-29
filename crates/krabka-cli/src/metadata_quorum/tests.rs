@@ -43,6 +43,7 @@ fn quorum() -> MetadataQuorum {
             replica(3, 0, 125, 1_790_000_000_950, 1_790_000_000_950),
         ],
         observers: vec![replica(4, 4, 100, -1, -1)],
+        nodes: Vec::new(),
     }
 }
 
@@ -96,23 +97,18 @@ fn a_quorum_without_its_leader_among_the_voters_fails_as_kafka_does() {
 
 #[test]
 fn describe_status_renders_kafkas_labels() {
-    let nodes = NodeEndpoints::from([(
-        2,
-        vec![
-            VoterEndpoint {
-                listener: "CONTROLLER".into(),
-                host: "controller-2".into(),
-                port: 9093,
-            },
-            VoterEndpoint {
-                listener: "CONTROLLER_V6".into(),
-                host: "::1".into(),
-                port: 9094,
-            },
-        ],
-    )]);
+    let quorum = MetadataQuorum {
+        nodes: vec![QuorumNode {
+            node_id: 2,
+            endpoints: vec![
+                RaftVoterEndpoint::new("CONTROLLER", "controller-2", 9093).unwrap(),
+                RaftVoterEndpoint::new("CONTROLLER_V6", "::1", 9094).unwrap(),
+            ],
+        }],
+        ..quorum()
+    };
     check!(
-        status_lines("5L6g3nShT-eMCtK--X86sw", &quorum(), &nodes)
+        status_lines("5L6g3nShT-eMCtK--X86sw", &quorum)
             == Ok(vec![
                 "ClusterId:              5L6g3nShT-eMCtK--X86sw".to_owned(),
                 "LeaderId:               2".to_owned(),
@@ -138,6 +134,7 @@ fn max_follower_lag_time_follows_kafkas_three_cases() {
         high_watermark: 42,
         voters: vec![replica(1, 0, 45, 5, 5)],
         observers: Vec::new(),
+        nodes: Vec::new(),
     };
     let unknown = MetadataQuorum {
         voters: vec![replica(1, 0, 45, 5, 5), replica(2, 0, 40, -1, -1)],
@@ -156,7 +153,7 @@ fn max_follower_lag_time_follows_kafkas_three_cases() {
         ),
     ];
     for (quorum, lag, lag_time) in cases {
-        let lines = status_lines("id", &quorum, &NodeEndpoints::new()).unwrap();
+        let lines = status_lines("id", &quorum).unwrap();
         check!((lines[4].as_str(), lines[5].as_str()) == (lag, lag_time));
     }
 }
