@@ -7,14 +7,13 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use krabka_client_admin::{AdminClient, AdminError};
+use krabka_client_admin::{AdminClient, AdminError, ClusterNode, DescribeClusterOptions};
 use krabka_client_core::ClientError;
-use serde::Serialize;
 use serde_json::json;
 
 use crate::{
-    common::unsupported,
     connection::ConnectionArgs,
+    jvm::{Table, hash_order},
     output::{CommandError, CommandResult},
     safety::{ConfirmArgs, Impact, confirm},
 };
@@ -120,9 +119,9 @@ impl ClusterArgs {
 
 async fn cluster_id_command(args: ClusterIdArgs) -> Result<CommandResult, CommandError> {
     let (connection, mut human) = args.connection.resolve()?;
-    let mut client = connection.connect("cluster").await?;
-    let cluster_id = cluster_id(&mut client, "krabka cluster cluster-id")?;
-    human.push(cluster_id_line(cluster_id.as_deref()));
+    let client = connection.connect("cluster").await?;
+    let cluster_id = cluster_id(&client).await?;
+    human.push(cluster_id_line(Some(&cluster_id)));
     Ok(CommandResult::success(
         human,
         json!({"cluster_id": cluster_id}),
@@ -208,12 +207,21 @@ async fn list_endpoints_command(args: ListEndpointsArgs) -> Result<CommandResult
                 .into(),
         );
     }
-    let mut client = connection.connect("cluster").await?;
-    let nodes = cluster_nodes(
-        &mut client,
-        args.include_fenced_brokers,
-        "krabka cluster list-endpoints",
-    )?;
+    let client = connection.connect("cluster").await?;
+    let nodes = match cluster_nodes(&client, args.include_fenced_brokers).await {
+        Ok(nodes) => nodes,
+        // `kafka-cluster list-endpoints` prints the message of an
+        // `UnsupportedVersionException` and exits 0.
+        Err(AdminError::Transport(ClientError::IncompatibleVersion { broker_max, .. }))
+            if args.include_fenced_brokers =>
+        {
+            human.push(format!(
+                "Attempted to write a non-default includeFencedBrokers at version {broker_max}"
+            ));
+            return Ok(CommandResult::success(human, Vec::<()>::new()));
+        }
+        Err(error) => return Err(error.into()),
+    };
     human.extend(endpoint_lines(&nodes, controllers));
     let endpoint_type = if controllers { "controller" } else { "broker" };
     let data = nodes
@@ -224,7 +232,7 @@ async fn list_endpoints_command(args: ListEndpointsArgs) -> Result<CommandResult
                 "host": node.host,
                 "port": node.port,
                 "rack": node.rack,
-                "fenced": node.fenced,
+                "fenced": node.is_fenced,
                 "endpoint_type": endpoint_type,
             })
         })
@@ -232,39 +240,46 @@ async fn list_endpoints_command(args: ListEndpointsArgs) -> Result<CommandResult
     Ok(CommandResult::success(human, data))
 }
 
-/// One node that `DescribeCluster` reports, as Kafka's `Node`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Node {
-    pub id: i32,
-    pub host: String,
-    pub port: i32,
-    pub rack: Option<String>,
-    pub fenced: bool,
-}
-
 /// The cluster ID that `DescribeCluster` reports.
 ///
 /// # Errors
-/// Always, in this build: the pinned `krabka-client-admin` has no
-/// `describe_cluster`.
-pub(crate) fn cluster_id(
-    _client: &mut AdminClient,
-    feature: &str,
-) -> Result<Option<String>, CommandError> {
-    Err(unsupported(feature, "AdminClient::describe_cluster"))
+/// Returns the error of the `DescribeCluster` call.
+pub(crate) async fn cluster_id(client: &AdminClient) -> Result<String, AdminError> {
+    Ok(client
+        .describe_cluster(DescribeClusterOptions::default())
+        .await?
+        .cluster_id)
 }
 
-/// The nodes that `DescribeCluster` reports.
+/// The nodes that `DescribeCluster` reports, in the order of Kafka's
+/// `DescribeClusterResponse.nodes()`, a `HashMap` keyed by node ID.
 ///
 /// # Errors
-/// Always, in this build: the pinned `krabka-client-admin` has no
-/// `describe_cluster`.
-pub(crate) fn cluster_nodes(
-    _client: &mut AdminClient,
-    _include_fenced_brokers: bool,
-    feature: &str,
-) -> Result<Vec<Node>, CommandError> {
-    Err(unsupported(feature, "AdminClient::describe_cluster"))
+/// Returns the error of the `DescribeCluster` call.
+pub(crate) async fn cluster_nodes(
+    client: &AdminClient,
+    include_fenced_brokers: bool,
+) -> Result<Vec<ClusterNode>, AdminError> {
+    let nodes = client
+        .describe_cluster(DescribeClusterOptions {
+            include_fenced_brokers,
+            ..DescribeClusterOptions::default()
+        })
+        .await?
+        .nodes;
+    Ok(node_order(nodes))
+}
+
+/// `nodes` in the iteration order of Kafka's `Collectors.toMap` by node ID.
+fn node_order(nodes: Vec<ClusterNode>) -> Vec<ClusterNode> {
+    let mut unique = Vec::<ClusterNode>::new();
+    for node in nodes {
+        match unique.iter_mut().find(|known| known.id == node.id) {
+            Some(known) => *known = node,
+            None => unique.push(node),
+        }
+    }
+    hash_order(unique, Table::Default, |node| node.id)
 }
 
 /// Left-justifies `value` in `width` columns, as Java's `%-<width>s` does.
@@ -277,7 +292,7 @@ fn pad(value: &str, width: usize) -> String {
 /// The host and rack columns are as wide as their longest value, or 100 and
 /// 10 when no node has one. A node without a rack prints `null`, as Java
 /// formats a null string.
-fn endpoint_lines(nodes: &[Node], controllers: bool) -> Vec<String> {
+fn endpoint_lines(nodes: &[ClusterNode], controllers: bool) -> Vec<String> {
     let host_width = nodes
         .iter()
         .map(|node| node.host.chars().count())
@@ -313,7 +328,7 @@ fn endpoint_lines(nodes: &[Node], controllers: bool) -> Vec<String> {
         "ENDPOINT_TYPE",
     )];
     for node in nodes {
-        let state = (!controllers).then_some(if node.fenced { "fenced" } else { "unfenced" });
+        let state = (!controllers).then_some(if node.is_fenced { "fenced" } else { "unfenced" });
         lines.push(row(
             &node.id.to_string(),
             &node.host,
@@ -339,13 +354,30 @@ mod tests {
         command: ClusterCommand,
     }
 
-    fn node(id: i32, host: &str, rack: Option<&str>, fenced: bool) -> Node {
-        Node {
+    fn node(id: i32, host: &str, rack: Option<&str>, is_fenced: bool) -> ClusterNode {
+        ClusterNode {
             id,
             host: host.into(),
             port: 9092,
             rack: rack.map(Into::into),
-            fenced,
+            is_fenced,
+        }
+    }
+
+    #[test]
+    fn nodes_list_in_kafkas_hash_map_order() {
+        let ids = |nodes: Vec<ClusterNode>| nodes.iter().map(|node| node.id).collect::<Vec<_>>();
+        let cases = [
+            (vec![3, 1, 2], vec![1, 2, 3]),
+            (vec![17, 1, 16], vec![16, 17, 1]),
+            (vec![2, 2, 1], vec![1, 2]),
+        ];
+        for (given, expected) in cases {
+            let nodes = given
+                .into_iter()
+                .map(|id| node(id, "h", None, false))
+                .collect();
+            check!(ids(node_order(nodes)) == expected);
         }
     }
 

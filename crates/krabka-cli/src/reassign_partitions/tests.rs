@@ -266,39 +266,24 @@ fn both_bootstrap_flags_are_refused_when_parsed() {
 }
 
 #[test]
-fn sub_features_that_the_pinned_client_lacks_fail_before_any_request() {
-    let execute = |throttle, log_dir_throttle, disallow| Action::Execute {
-        file: "r.json".into(),
-        additional: false,
-        throttle,
-        log_dir_throttle,
-        disallow_replication_factor_change: disallow,
+fn an_unknown_broker_is_the_first_in_kafkas_hash_set_order() {
+    let node = |id| ClusterNode {
+        id,
+        host: "h".into(),
+        port: 9092,
+        rack: None,
+        is_fenced: false,
     };
-    let refused = |action: &Action, dry_run| {
-        refuse_unsupported(action, dry_run)
-            .err()
-            .map(|error| error.to_string())
-    };
-    check!(refused(&execute(-1, -1, false), false) == None);
-    check!(refused(&execute(1000, 1000, false), true) == None);
-    check!(
-        refused(&execute(1000, -1, false), false)
-            == Some(
-                "--throttle is not supported by this build: it needs \
-                 AdminClient::incremental_alter_configs for BROKER resources, which the pinned \
-                 krabka-client-admin does not provide"
-                    .into()
-            )
-    );
-    check!(
-        refused(&execute(-1, 5, false), false)
-            .is_some_and(|message| message.starts_with("--replica-alter-log-dirs-throttle"))
-    );
-    check!(
-        refused(&execute(-1, -1, true), true)
-            .is_some_and(|message| message.starts_with("--disallow-replication-factor-change"))
-    );
-    check!(refused(&Action::List, false) == None);
+    let nodes = [node(1), node(2)];
+    let proposed = |replicas: Vec<i32>| BTreeMap::from([(TopicPartition::new("foo", 0), replicas)]);
+    let cases = [
+        (vec![2, 1], Ok(())),
+        (vec![1, 18, 3], Err("Unknown broker id 18".to_owned())),
+        (vec![17, 5], Err("Unknown broker id 17".to_owned())),
+    ];
+    for (replicas, expected) in cases {
+        check!(unknown_broker(&proposed(replicas), &nodes) == expected);
+    }
 }
 
 #[test]

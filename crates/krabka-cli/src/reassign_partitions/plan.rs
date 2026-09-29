@@ -3,12 +3,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use krabka_client_admin::{PartitionAssignment, PartitionAssignmentOutcome};
+use krabka_client_admin::{ClusterNode, KafkaError, PartitionAssignment, ReplicaLogDirInfo};
 use serde_json::{Value, json};
 
 use super::files::Replica;
 use crate::{
-    cluster::Node,
+    common::java_message,
     replica_placer::UsableBroker,
     topic_partition::{TopicPartition, join},
 };
@@ -311,29 +311,64 @@ impl Throttles {
         throttles
     }
 
-    /// The lines that `--execute` prints about the throttles.
-    pub fn lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        if self.throttle >= 0 || self.log_dir_throttle >= 0 {
-            lines.push(
-                "Warning: You must run --verify periodically, until the reassignment completes, \
-                 to ensure the throttle is removed."
-                    .to_owned(),
-            );
-        }
-        if self.throttle >= 0 {
-            lines.push(format!(
+    /// The warning that `--execute` prints before it writes a throttle.
+    pub fn warning_line(&self) -> Option<String> {
+        (self.throttle >= 0 || self.log_dir_throttle >= 0).then(|| {
+            "Warning: You must run --verify periodically, until the reassignment completes, to \
+             ensure the throttle is removed."
+                .to_owned()
+        })
+    }
+
+    /// The line that `--execute` prints once the inter-broker throttle is
+    /// written.
+    pub fn inter_broker_line(&self) -> Option<String> {
+        (self.throttle >= 0).then(|| {
+            format!(
                 "The inter-broker throttle limit was set to {} B/s",
                 self.throttle
-            ));
-        }
-        if self.log_dir_throttle >= 0 {
-            lines.push(format!(
+            )
+        })
+    }
+
+    /// The line that `--execute` prints once the log dir throttle is
+    /// written.
+    pub fn log_dir_line(&self) -> Option<String> {
+        (self.log_dir_throttle >= 0).then(|| {
+            format!(
                 "The replica-alter-dir throttle limit was set to {} B/s",
                 self.log_dir_throttle
-            ));
-        }
-        lines
+            )
+        })
+    }
+
+    /// The lines that `--execute` prints about the throttles.
+    pub fn lines(&self) -> Vec<String> {
+        [
+            self.warning_line(),
+            self.inter_broker_line(),
+            self.log_dir_line(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// The configs of `keys` of each broker that has any, as Kafka writes
+    /// each group in one `incrementalAlterConfigs` call.
+    pub fn broker_configs(&self, keys: &[&str]) -> BTreeMap<i32, BTreeMap<&'static str, String>> {
+        self.brokers
+            .iter()
+            .map(|(broker, configs)| {
+                let configs = configs
+                    .iter()
+                    .filter(|(name, _)| keys.contains(name))
+                    .map(|(name, value)| (*name, value.clone()))
+                    .collect::<BTreeMap<_, _>>();
+                (*broker, configs)
+            })
+            .filter(|(_, configs)| !configs.is_empty())
+            .collect()
     }
 
     /// The JSON rendering of the configs.
@@ -394,28 +429,96 @@ pub fn cancelled_line(partitions: &BTreeSet<TopicPartition>) -> String {
 }
 
 /// `partition: message` for each partition that the controller refused,
-/// sorted, as Kafka lists the errors of `--execute` and `--cancel`.
-pub fn partition_errors(outcomes: &[PartitionAssignmentOutcome]) -> Vec<String> {
-    let errors = outcomes
-        .iter()
-        .filter_map(|outcome| {
-            outcome.error.as_ref().map(|error| {
-                let message = error
-                    .message
-                    .clone()
-                    .filter(|message| !message.is_empty())
-                    .unwrap_or_else(|| format!("{} ({})", error.name, error.code));
-                (
-                    TopicPartition::new(outcome.topic.clone(), outcome.partition),
-                    message,
-                )
-            })
-        })
-        .collect::<BTreeMap<_, _>>();
+/// sorted, as Kafka lists the errors of `--execute` and `--cancel`. The
+/// message is the exception's: the broker's, or the error's default.
+pub fn partition_errors(errors: &BTreeMap<TopicPartition, KafkaError>) -> Vec<String> {
     errors
-        .into_iter()
-        .map(|(partition, message)| format!("{partition}: {message}"))
+        .iter()
+        .map(|(partition, error)| format!("{partition}: {}", java_message(error)))
         .collect()
+}
+
+/// Where one replica's log dir move stands, as Kafka's `LogDirMoveState`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveState {
+    /// The replica is in no live log dir of its broker.
+    MissingLogDir,
+    /// The replica is being copied to `future`.
+    Active {
+        current: String,
+        target: String,
+        future: String,
+    },
+    /// No move is active and the replica is not in the target log dir.
+    Cancelled { current: String, target: String },
+    /// The replica is in the target log dir.
+    Completed,
+}
+
+impl MoveState {
+    /// `ReassignPartitionsCommand.findLogDirMoveStates` for one replica.
+    pub fn new(info: &ReplicaLogDirInfo, target: &str) -> Self {
+        match (&info.current, &info.future) {
+            (None, _) => Self::MissingLogDir,
+            (Some(current), None) if current.path == target => Self::Completed,
+            (Some(current), None) => Self::Cancelled {
+                current: current.path.clone(),
+                target: target.to_owned(),
+            },
+            (Some(current), Some(future)) => Self::Active {
+                current: current.path.clone(),
+                target: target.to_owned(),
+                future: future.path.clone(),
+            },
+        }
+    }
+
+    /// Whether the move is over, as `LogDirMoveState.done`.
+    pub const fn done(&self) -> bool {
+        matches!(self, Self::Cancelled { .. } | Self::Completed)
+    }
+}
+
+/// `ReassignPartitionsCommand.replicaMoveStatesToString`, one entry per
+/// line, by broker, topic and partition.
+pub fn move_state_lines(states: &BTreeMap<Replica, MoveState>) -> Vec<String> {
+    states
+        .iter()
+        .map(|(replica, state)| {
+            let partition = format!("{}-{}", replica.topic, replica.partition);
+            let broker = replica.broker;
+            match state {
+                MoveState::MissingLogDir => format!(
+                    "Partition {partition} is not found in any live log dir on broker {broker}. \
+                     There is likely an offline log directory on the broker."
+                ),
+                MoveState::Active { target, future, .. } if target == future => {
+                    format!("Reassignment of replica {replica} is still in progress.")
+                }
+                MoveState::Active { target, future, .. } => format!(
+                    "Partition {partition} on broker {broker} is being moved to log dir {future} \
+                     instead of {target}."
+                ),
+                MoveState::Cancelled { current, target } => format!(
+                    "Partition {partition} on broker {broker} is not being moved from log dir \
+                     {current} to {target}."
+                ),
+                MoveState::Completed => {
+                    format!("Reassignment of replica {replica} completed successfully.")
+                }
+            }
+        })
+        .collect()
+}
+
+/// The line that `clearAllThrottles` prints for `names`, each a broker or
+/// a topic.
+pub fn clearing_line(level: &str, noun: &str, names: &[String]) -> String {
+    format!(
+        "Clearing {level}-level throttles on {noun}{} {}",
+        if names.len() == 1 { "" } else { "s" },
+        names.join(",")
+    )
 }
 
 /// `ReassignPartitionsCommand.getBrokerMetadata`: the nodes of `brokers`
@@ -424,7 +527,7 @@ pub fn partition_errors(outcomes: &[PartitionAssignmentOutcome]) -> Vec<String> 
 /// # Errors
 /// Returns Kafka's message when only some of the brokers have a rack.
 pub fn usable_brokers(
-    nodes: &[Node],
+    nodes: &[ClusterNode],
     brokers: &[i32],
     rack_aware: bool,
 ) -> Result<Vec<UsableBroker>, String> {
