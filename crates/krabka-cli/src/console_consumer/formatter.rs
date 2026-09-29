@@ -8,6 +8,8 @@ use std::{
     ops::Bound::{Excluded, Unbounded},
 };
 
+use krabka_client_consumer::TimestampType;
+
 use crate::{
     connection::Properties,
     console::{is_true, raw},
@@ -35,9 +37,9 @@ pub(crate) struct Record {
     pub topic: String,
     pub partition: i32,
     pub offset: i64,
-    /// The record timestamp. The pinned client does not report the timestamp
-    /// type, so it prints as `CreateTime`.
     pub timestamp: i64,
+    /// `CreateTime` or `LogAppendTime`, as the record batch says.
+    pub timestamp_type: TimestampType,
     pub key: Option<Vec<u8>>,
     pub value: Option<Vec<u8>>,
     pub headers: Vec<(String, Option<Vec<u8>>)>,
@@ -143,7 +145,19 @@ fn log_line(record: &Record) -> String {
         || "null".to_owned(),
         |value| String::from_utf8_lossy(value).into_owned(),
     );
-    format!("CreateTime:{}, key:{key}value:{value}", record.timestamp)
+    format!(
+        "{}:{}, key:{key}value:{value}",
+        timestamp_type(record.timestamp_type),
+        record.timestamp
+    )
+}
+
+/// `TimestampType.toString()`.
+const fn timestamp_type(kind: TimestampType) -> &'static str {
+    match kind {
+        TimestampType::CreateTime => "CreateTime",
+        TimestampType::LogAppendTime => "LogAppendTime",
+    }
 }
 
 /// A field that `DefaultMessageFormatter` can print, in the order it prints
@@ -265,7 +279,14 @@ impl DefaultFormatter {
         for &column in &self.columns {
             match column {
                 Column::Timestamp => {
-                    out.extend_from_slice(format!("CreateTime:{}", record.timestamp).as_bytes());
+                    out.extend_from_slice(
+                        format!(
+                            "{}:{}",
+                            timestamp_type(record.timestamp_type),
+                            record.timestamp
+                        )
+                        .as_bytes(),
+                    );
                 }
                 Column::Partition => {
                     out.extend_from_slice(format!("Partition:{}", record.partition).as_bytes());
@@ -506,6 +527,7 @@ mod tests {
             partition: 2,
             offset: 41,
             timestamp: 1_790_600_093_698,
+            timestamp_type: TimestampType::CreateTime,
             key: Some(b"k1".to_vec()),
             value: Some(b"v1".to_vec()),
             headers: vec![("h1".into(), Some(b"x".to_vec())), ("h2".into(), None)],

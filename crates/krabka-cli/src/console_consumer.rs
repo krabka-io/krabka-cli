@@ -6,32 +6,29 @@
 //! `--formatter` class writes them. Everything else goes to stderr, so
 //! `krabka console-consumer ... | wc -l` counts records.
 //!
-//! Two paths consume, chosen by the flags. `--topic` or `--include` alone
-//! joins a consumer group, the one `--group` names or a generated
-//! `console-consumer-<n>`, with `Consumer` from `krabka-client-consumer`.
-//! `--partition` reads one partition without joining a group, with the
-//! single-partition fetch of `krabka-client-core`.
+//! Both paths consume with `Consumer` from `krabka-client-consumer`, as the
+//! JVM tool uses one `KafkaConsumer`. `--topic` subscribes and `--include`
+//! subscribes to a pattern, so a topic created later joins the subscription;
+//! both join the group that `--group` names or a generated
+//! `console-consumer-<n>`. `--partition` assigns the partition and seeks, as
+//! `ConsumerWrapper.seek` does, and joins no group.
 
 mod formatter;
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, VecDeque},
     hash::{BuildHasher as _, Hasher as _},
     io,
-    net::SocketAddr,
     path::PathBuf,
     time::Instant,
 };
 
 use clap::Args;
 use krabka_client_consumer::{
-    Assignor, AutoOffsetReset, Consumer, ConsumerError, IsolationLevel, OffsetAndMetadata,
+    Assignor, AutoOffsetReset, Consumer, ConsumerError, ConsumerRecord, GroupProtocol,
+    IsolationLevel, TopicPattern,
 };
-use krabka_client_core::{
-    Client, ClientError, Connection, ConnectionOptions, FetchMinBytes, IsolatedFetch,
-    fetch_partition_with_isolation_progress,
-};
-use krabka_protocol::primitives::uuid::Uuid;
+use krabka_client_core::ConnectionOptions;
 use krabka_units::{
     ByteSize, Time,
     convert::{ByteSizeExt as _, TimeExt as _},
@@ -51,16 +48,11 @@ use crate::{
 };
 
 const COMMAND: &str = "krabka console-consumer";
-const NOT_SUPPORTED: &str = "not supported by this build";
+/// The line that `maybePrintConsumerProtocolMessage` prints.
+const PROTOCOL_MESSAGE: &str = "The consumer rebalance protocol (KIP-848) is production-ready! Set group.protocol=consumer to try it out. See https://kafka.apache.org/documentation/#consumer_rebalance_protocol";
 /// How long one poll waits before the loop checks `--timeout-ms` and Ctrl-C
 /// again.
 const POLL_SLICE_MS: i64 = 1_000;
-/// `fetch.max.wait.ms`, which bounds one fetch of the `--partition` path.
-const DEFAULT_FETCH_MAX_WAIT_MS: i64 = 500;
-/// How long past its wait the `--partition` path gives a fetch to answer.
-const FETCH_GRACE_MS: u64 = 1_000;
-/// How long the `--partition` path waits before it retries a retriable error.
-const RETRY_BACKOFF_MS: u64 = 100;
 
 /// The flags of `kafka-console-consumer`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
@@ -192,7 +184,7 @@ enum Source {
     Topic(String),
     /// Subscribe to every topic that the Java regular expression matches.
     Include(String),
-    /// Read one partition without joining a group.
+    /// Assign one partition, without joining a group.
     Partition {
         topic: String,
         partition: i32,
@@ -200,22 +192,13 @@ enum Source {
     },
 }
 
-/// `auto.offset.reset`.
+/// How the consumer's metadata requests treat topics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OffsetReset {
-    Earliest,
-    Latest,
-    None,
-}
-
-impl From<OffsetReset> for AutoOffsetReset {
-    fn from(reset: OffsetReset) -> Self {
-        match reset {
-            OffsetReset::Earliest => Self::Earliest,
-            OffsetReset::Latest => Self::Latest,
-            OffsetReset::None => Self::None,
-        }
-    }
+struct TopicSettings {
+    /// `exclude.internal.topics`: a pattern does not match an internal topic.
+    exclude_internal: bool,
+    /// `allow.auto.create.topics`.
+    allow_auto_create: bool,
 }
 
 /// The consumer settings that krabka reads from the merged client
@@ -223,17 +206,24 @@ impl From<OffsetReset> for AutoOffsetReset {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClientSettings {
     group_id: String,
-    auto_offset_reset: OffsetReset,
+    auto_offset_reset: AutoOffsetReset,
     isolation_level: IsolationLevel,
+    group_protocol: GroupProtocol,
+    group_remote_assignor: Option<String>,
     enable_auto_commit: bool,
     auto_commit_interval_ms: i64,
     session_timeout_ms: i64,
     heartbeat_interval_ms: i64,
-    rebalance_timeout_ms: i64,
+    max_poll_interval_ms: i64,
+    max_poll_records: i64,
     fetch_min_bytes: i64,
     fetch_max_bytes: i64,
     max_partition_fetch_bytes: i64,
     fetch_max_wait_ms: i64,
+    metadata_max_age_ms: i64,
+    default_api_timeout_ms: i64,
+    topics: TopicSettings,
+    enable_metrics_push: bool,
     group_instance_id: Option<String>,
     client_rack: Option<String>,
     assignors: Vec<Assignor>,
@@ -496,28 +486,34 @@ impl ConsoleConsumerArgs {
     }
 }
 
+/// The configs that `ConsumerConfig.checkUnsupportedConfigsPostProcess`
+/// refuses under each `group.protocol`, in Kafka's order.
+const CLASSIC_UNSUPPORTED: [&str; 3] = [
+    "group.remote.assignor",
+    "share.acknowledgement.mode",
+    "share.acquire.mode",
+];
+const CONSUMER_UNSUPPORTED: [&str; 5] = [
+    "partition.assignment.strategy",
+    "heartbeat.interval.ms",
+    "session.timeout.ms",
+    "share.acknowledgement.mode",
+    "share.acquire.mode",
+];
+
 impl ClientSettings {
     /// Reads and validates the settings, as `new KafkaConsumer` does.
     fn from_properties(properties: &Properties, group_id: String) -> Result<Self, String> {
-        let auto_offset_reset = match properties.get("auto.offset.reset").unwrap_or("latest") {
-            "earliest" => OffsetReset::Earliest,
-            "latest" => OffsetReset::Latest,
-            "none" => OffsetReset::None,
-            other if other.starts_with("by_duration:") => {
-                return Err(format!(
-                    "auto.offset.reset={other} is {NOT_SUPPORTED}: the by_duration strategy (KIP-1106) needs AutoOffsetReset::ByDuration from a newer krabka-client-consumer"
-                ));
-            }
-            other => {
-                return Err(config_error(
-                    "auto.offset.reset",
-                    other,
-                    &format!(
-                        "Invalid value `{other}` for configuration auto.offset.reset. The value must be either 'earliest', 'latest', 'none' or of the format 'by_duration:<PnDTnHnMn.nS.>'."
-                    ),
-                ));
-            }
-        };
+        let reset = properties.get("auto.offset.reset").unwrap_or("latest");
+        let auto_offset_reset = reset.parse::<AutoOffsetReset>().map_err(|_| {
+            config_error(
+                "auto.offset.reset",
+                reset,
+                &format!(
+                    "Invalid value `{reset}` for configuration auto.offset.reset. The value must be either 'earliest', 'latest', 'none' or of the format 'by_duration:<PnDTnHnMn.nS.>'."
+                ),
+            )
+        })?;
         let isolation_level = match properties
             .get("isolation.level")
             .unwrap_or("read_uncommitted")
@@ -532,45 +528,80 @@ impl ClientSettings {
                 ));
             }
         };
-        if let Some(protocol) = properties.get("group.protocol")
-            && !protocol.eq_ignore_ascii_case("classic")
-        {
-            return Err(if protocol.eq_ignore_ascii_case("consumer") {
-                format!(
-                    "group.protocol=consumer is {NOT_SUPPORTED}: the KIP-848 consumer protocol needs a newer krabka-client-consumer"
-                )
-            } else {
-                config_error(
-                    "group.protocol",
-                    protocol,
-                    "String must be one of (case insensitive): CLASSIC, CONSUMER",
-                )
-            });
-        }
+        let group_protocol = group_protocol(properties)?;
         let int = |name: &str, default: i64| number_property(properties, name, "INT", default);
+        let long = |name: &str, default: i64| number_property(properties, name, "LONG", default);
+        let text = |name: &str| {
+            properties
+                .get(name)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
         Ok(Self {
             group_id,
             auto_offset_reset,
             isolation_level,
+            group_protocol,
+            group_remote_assignor: text("group.remote.assignor"),
             enable_auto_commit: bool_property(properties, "enable.auto.commit", true)?,
             auto_commit_interval_ms: int("auto.commit.interval.ms", 5_000)?,
             session_timeout_ms: int("session.timeout.ms", 45_000)?,
             heartbeat_interval_ms: int("heartbeat.interval.ms", 3_000)?,
-            rebalance_timeout_ms: int("max.poll.interval.ms", 300_000)?,
+            max_poll_interval_ms: int("max.poll.interval.ms", 300_000)?,
+            max_poll_records: int("max.poll.records", 500)?,
             fetch_min_bytes: int("fetch.min.bytes", 1)?,
             fetch_max_bytes: int("fetch.max.bytes", 52_428_800)?,
             max_partition_fetch_bytes: int("max.partition.fetch.bytes", 1_048_576)?,
-            fetch_max_wait_ms: int("fetch.max.wait.ms", DEFAULT_FETCH_MAX_WAIT_MS)?,
-            group_instance_id: properties
-                .get("group.instance.id")
-                .filter(|id| !id.is_empty())
-                .map(str::to_owned),
-            client_rack: properties
-                .get("client.rack")
-                .filter(|rack| !rack.is_empty())
-                .map(str::to_owned),
+            fetch_max_wait_ms: int("fetch.max.wait.ms", 500)?,
+            metadata_max_age_ms: long("metadata.max.age.ms", 300_000)?,
+            default_api_timeout_ms: int("default.api.timeout.ms", 60_000)?,
+            topics: TopicSettings {
+                exclude_internal: bool_property(properties, "exclude.internal.topics", true)?,
+                allow_auto_create: bool_property(properties, "allow.auto.create.topics", true)?,
+            },
+            enable_metrics_push: bool_property(properties, "enable.metrics.push", true)?,
+            group_instance_id: text("group.instance.id"),
+            client_rack: text("client.rack"),
             assignors: assignors(properties.get("partition.assignment.strategy"))?,
         })
+    }
+}
+
+/// `group.protocol`, case insensitive, and the configs that the protocol
+/// does not take.
+fn group_protocol(properties: &Properties) -> Result<GroupProtocol, String> {
+    let protocol = properties.get("group.protocol").unwrap_or("classic");
+    let (protocol, unsupported, name) = if protocol.eq_ignore_ascii_case("classic") {
+        (GroupProtocol::Classic, &CLASSIC_UNSUPPORTED[..], "CLASSIC")
+    } else if protocol.eq_ignore_ascii_case("consumer") {
+        (
+            GroupProtocol::Consumer,
+            &CONSUMER_UNSUPPORTED[..],
+            "CONSUMER",
+        )
+    } else {
+        return Err(config_error(
+            "group.protocol",
+            protocol,
+            "String must be one of (case insensitive): CLASSIC, CONSUMER",
+        ));
+    };
+    let set = unsupported
+        .iter()
+        .copied()
+        .filter(|name| {
+            properties
+                .get(name)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    if set.is_empty() {
+        Ok(protocol)
+    } else {
+        Err(format!(
+            "{} cannot be set when group.protocol={name}",
+            set.join(", ")
+        ))
     }
 }
 
@@ -665,8 +696,9 @@ async fn consume(
             Ok(options) => options,
             Err(error) => return fail(COMMAND, &unknown_error(&error.to_string()), format),
         };
+    maybe_print_protocol_message(&plan.source, settings.group_protocol, format);
     let started = tokio::select! {
-        source = Stream::open(&plan, &settings, options) => source,
+        source = Stream::open(&plan.source, &plan.bootstrap, &settings, options) => source,
         () = cancel.cancelled() => {
             report_count(0, format);
             return Exit::Cancelled;
@@ -688,6 +720,19 @@ async fn consume(
             Exit::Cancelled
         }
         Ended::Failed(message) => fail(COMMAND, &unknown_error(&message), format),
+    }
+}
+
+/// `maybePrintConsumerProtocolMessage`: a subscribed run of the classic
+/// protocol points at KIP-848 on stderr, as the JVM tool does under its
+/// default log level. Under `--output json` stderr is kept for the error
+/// envelope.
+fn maybe_print_protocol_message(source: &Source, protocol: GroupProtocol, format: OutputFormat) {
+    if format == OutputFormat::Human
+        && protocol == GroupProtocol::Classic
+        && !matches!(source, Source::Partition { .. })
+    {
+        eprintln!("{PROTOCOL_MESSAGE}");
     }
 }
 
@@ -746,8 +791,6 @@ async fn process(
             eprintln!("Unable to write to standard out, closing consumer.");
             return (count, Ended::Done);
         }
-        stream.processed(&record);
-        stream.maybe_commit(false).await;
     }
 }
 
@@ -794,43 +837,104 @@ enum Stop {
     Failed(String),
 }
 
-/// A source of records and the records it has buffered.
+/// `ConsumerWrapper`: the consumer and the records that the last poll
+/// returned and the loop has not processed yet.
 struct Stream {
-    reader: Reader,
+    consumer: Consumer,
     buffered: VecDeque<Record>,
 }
 
-enum Reader {
-    Group(Box<GroupReader>),
-    Partition(Box<PartitionReader>),
-}
-
 impl Stream {
+    /// `new KafkaConsumer` and the `ConsumerWrapper` constructor: subscribe
+    /// to the topic or the pattern, or assign the partition and seek.
     async fn open(
-        plan: &Plan,
+        source: &Source,
+        bootstrap: &[String],
         settings: &ClientSettings,
         options: ConnectionOptions,
     ) -> Result<Self, String> {
-        let reader = match &plan.source {
-            Source::Topic(topic) => Reader::Group(Box::new(
-                GroupReader::start(plan, settings, options, vec![topic.clone()]).await?,
-            )),
+        let (subscribe, pattern) = match source {
+            Source::Topic(topic) => (vec![topic.clone()], None),
             Source::Include(pattern) => {
-                let topics = matching_topics(plan, &options, pattern).await?;
-                Reader::Group(Box::new(
-                    GroupReader::start(plan, settings, options, topics).await?,
-                ))
+                let pattern = java_pattern(pattern)?;
+                let matcher = TopicPattern::new(move |topic| pattern.is_match(topic));
+                (Vec::new(), Some(matcher))
             }
-            Source::Partition {
-                topic,
-                partition,
-                offset,
-            } => Reader::Partition(Box::new(
-                PartitionReader::start(plan, settings, options, topic, *partition, *offset).await?,
-            )),
+            Source::Partition { .. } => (Vec::new(), None),
         };
+        // Kafka's consumer finds the group coordinator of a manual assignment
+        // only to commit, so the `--partition` path names its generated group
+        // only when a property turns `enable.auto.commit` on.
+        let group_id = match source {
+            Source::Partition { .. } if !settings.enable_auto_commit => None,
+            _ => Some(settings.group_id.clone()),
+        };
+        let millis = Time::from_millis;
+        let bytes = ByteSize::from_bytes_i64;
+        let consumer = Consumer::builder()
+            .bootstrap(bootstrap.join(","))
+            .client_id(options.client_id.clone())
+            .maybe_group_id(group_id)
+            .subscribe(subscribe)
+            .maybe_subscribe_pattern(pattern)
+            .exclude_internal_topics(settings.topics.exclude_internal)
+            .allow_auto_create_topics(settings.topics.allow_auto_create)
+            .group_protocol(settings.group_protocol)
+            .maybe_group_remote_assignor(settings.group_remote_assignor.clone())
+            .auto_offset_reset(settings.auto_offset_reset)
+            .isolation_level(settings.isolation_level)
+            .assignors(settings.assignors.clone())
+            .session_timeout(millis(settings.session_timeout_ms))
+            .heartbeat_interval(millis(settings.heartbeat_interval_ms))
+            .max_poll_interval(millis(settings.max_poll_interval_ms))
+            .max_poll_records(usize::try_from(settings.max_poll_records).unwrap_or(usize::MAX))
+            .fetch_min(bytes(settings.fetch_min_bytes))
+            .fetch_max(bytes(settings.fetch_max_bytes))
+            .fetch_partition_max(bytes(settings.max_partition_fetch_bytes))
+            .fetch_max_wait(millis(settings.fetch_max_wait_ms))
+            .metadata_max_age(millis(settings.metadata_max_age_ms))
+            // Kafka's consumer sees a topic that starts to match `--include`,
+            // or a partition added to a subscribed topic, at its next metadata
+            // refresh, which `metadata.max.age.ms` schedules.
+            .subscription_metadata_refresh_interval(millis(settings.metadata_max_age_ms.max(1)))
+            .default_api_timeout(millis(settings.default_api_timeout_ms))
+            .request_timeout(options.request_timeout)
+            .socket_connection_setup_timeout(options.socket_connection_setup_timeout)
+            .enable_auto_commit(settings.enable_auto_commit)
+            .auto_commit_interval(millis(settings.auto_commit_interval_ms))
+            .enable_metrics_push(settings.enable_metrics_push)
+            .maybe_group_instance_id(settings.group_instance_id.clone())
+            .maybe_client_rack(settings.client_rack.clone())
+            .maybe_security(options.security.map(|security| *security))
+            .build()
+            .await
+            .map_err(|error| consumer_error(&error))?;
+        if let Source::Partition {
+            topic,
+            partition,
+            offset,
+        } = source
+        {
+            // `ConsumerWrapper.seek`.
+            let assigned = [(topic.clone(), *partition)];
+            let sought = async {
+                consumer.assign(&assigned).await?;
+                match offset {
+                    StartOffset::Earliest => consumer.seek_to_beginning(&assigned).await,
+                    StartOffset::Latest => consumer.seek_to_end(&assigned).await,
+                    StartOffset::At(offset) => {
+                        consumer.seek(topic.clone(), *partition, *offset).await
+                    }
+                }
+            };
+            if let Err(error) = sought.await {
+                let message = consumer_error(&error);
+                let _ = consumer.close().await;
+                return Err(message);
+            }
+        }
         Ok(Self {
-            reader,
+            consumer,
             buffered: VecDeque::new(),
         })
     }
@@ -852,11 +956,12 @@ impl Stream {
                 (timeout - waited).clamp(0, POLL_SLICE_MS)
             });
             let records = tokio::select! {
-                records = self.poll(Time::from_millis(slice)) => records.map_err(Stop::Failed)?,
+                records = self.consumer.poll(Time::from_millis(slice)) => {
+                    records.map_err(|error| Stop::Failed(consumer_error(&error)))?
+                }
                 () = cancel.cancelled() => return Err(Stop::Cancelled),
             };
-            self.buffered.extend(records);
-            self.maybe_commit(false).await;
+            self.buffered.extend(records.into_iter().map(record));
             let waited = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
             if self.buffered.is_empty() && timeout_ms.is_some_and(|timeout| waited > timeout) {
                 return Err(Stop::Timeout);
@@ -864,446 +969,60 @@ impl Stream {
         }
     }
 
-    async fn poll(&mut self, timeout: Time) -> Result<Vec<Record>, String> {
-        match &mut self.reader {
-            Reader::Group(reader) => reader.poll(timeout).await,
-            Reader::Partition(reader) => reader.poll(timeout).await,
+    /// `ConsumerWrapper.cleanup`: seeks each partition back to its first
+    /// record that was polled but not processed, so the commit on close
+    /// commits only what was processed, then closes the consumer.
+    async fn close(self) {
+        for (topic, partition, offset) in unconsumed(&self.buffered) {
+            if let Err(error) = self.consumer.seek(topic, partition, offset).await {
+                tracing::warn!("resetting an unconsumed offset failed: {error}");
+            }
         }
-    }
-
-    fn processed(&mut self, record: &Record) {
-        if let Reader::Group(reader) = &mut self.reader {
-            reader
-                .processed
-                .insert((record.topic.clone(), record.partition), record.offset + 1);
-        }
-    }
-
-    async fn maybe_commit(&mut self, closing: bool) {
-        if let Reader::Group(reader) = &mut self.reader {
-            reader.maybe_commit(closing).await;
-        }
-    }
-
-    /// `ConsumerWrapper.cleanup`: commits what was processed, and never what
-    /// was buffered but not processed, then leaves the group.
-    async fn close(mut self) {
-        self.maybe_commit(true).await;
-        if let Reader::Group(reader) = self.reader
-            && let Err(error) = reader.consumer.close().await
-        {
+        if let Err(error) = self.consumer.close().await {
             tracing::warn!("closing the consumer failed: {error}");
         }
     }
 }
 
-/// The subscribed path.
-struct GroupReader {
-    consumer: Consumer,
-    auto_commit: Option<std::time::Duration>,
-    last_commit: Instant,
-    /// The next offset of each partition, one past the last record written.
-    processed: BTreeMap<(String, i32), i64>,
-    committed: BTreeMap<(String, i32), i64>,
-}
-
-impl GroupReader {
-    async fn start(
-        plan: &Plan,
-        settings: &ClientSettings,
-        options: ConnectionOptions,
-        topics: Vec<String>,
-    ) -> Result<Self, String> {
-        let consumer = Consumer::builder()
-            .bootstrap(plan.bootstrap.join(","))
-            .client_id(options.client_id.clone())
-            .group_id(settings.group_id.clone())
-            .subscribe(topics)
-            .auto_offset_reset(settings.auto_offset_reset.into())
-            .isolation_level(settings.isolation_level)
-            .assignors(settings.assignors.clone())
-            .session_timeout(Time::from_millis(settings.session_timeout_ms))
-            .heartbeat_interval(Time::from_millis(settings.heartbeat_interval_ms))
-            .max_poll_interval(Time::from_millis(settings.rebalance_timeout_ms))
-            .fetch_min(ByteSize::from_bytes_i64(settings.fetch_min_bytes))
-            .fetch_max(ByteSize::from_bytes_i64(settings.fetch_max_bytes))
-            .fetch_partition_max(ByteSize::from_bytes_i64(settings.max_partition_fetch_bytes))
-            .request_timeout(options.request_timeout)
-            .maybe_group_instance_id(settings.group_instance_id.clone())
-            .maybe_client_rack(settings.client_rack.clone())
-            .maybe_security(options.security.map(|security| *security))
-            .build()
-            .await
-            .map_err(|error| consumer_error(&error))?;
-        let interval = u64::try_from(settings.auto_commit_interval_ms).unwrap_or(0);
-        Ok(Self {
-            consumer,
-            auto_commit: settings
-                .enable_auto_commit
-                .then(|| std::time::Duration::from_millis(interval)),
-            last_commit: Instant::now(),
-            processed: BTreeMap::new(),
-            committed: BTreeMap::new(),
-        })
+/// `resetUnconsumedOffsets`: the smallest offset of each partition among the
+/// records that were polled but not processed.
+fn unconsumed(buffered: &VecDeque<Record>) -> Vec<(String, i32, i64)> {
+    let mut smallest = BTreeMap::new();
+    for record in buffered {
+        smallest
+            .entry((record.topic.clone(), record.partition))
+            .or_insert(record.offset);
     }
-
-    async fn poll(&mut self, timeout: Time) -> Result<Vec<Record>, String> {
-        let records = self
-            .consumer
-            .poll(timeout)
-            .await
-            .map_err(|error| consumer_error(&error))?;
-        Ok(records
-            .into_iter()
-            .map(|record| Record {
-                topic: record.topic,
-                partition: record.partition,
-                offset: record.offset,
-                timestamp: record.timestamp,
-                key: record.key.map(|key| key.to_vec()),
-                value: record.value.map(|value| value.to_vec()),
-                headers: record
-                    .headers
-                    .into_iter()
-                    .map(|header| (header.key, header.value.map(|value| value.to_vec())))
-                    .collect(),
-            })
-            .collect())
-    }
-
-    /// Commits the processed offsets of the partitions that this member
-    /// still owns, every `auto.commit.interval.ms` and on close, when
-    /// `enable.auto.commit` is on.
-    async fn maybe_commit(&mut self, closing: bool) {
-        let Some(interval) = self.auto_commit else {
-            return;
-        };
-        if !closing && self.last_commit.elapsed() < interval {
-            return;
-        }
-        self.last_commit = Instant::now();
-        let assigned = self.consumer.assignment().await;
-        let offsets = self
-            .processed
-            .iter()
-            .filter(|(partition, offset)| {
-                assigned.contains(partition) && self.committed.get(*partition) != Some(offset)
-            })
-            .map(|(partition, offset)| (partition.clone(), *offset))
-            .collect::<HashMap<_, _>>();
-        if offsets.is_empty() {
-            return;
-        }
-        let commits = offsets
-            .iter()
-            .map(|(partition, offset)| (partition.clone(), OffsetAndMetadata::new(*offset)))
-            .collect();
-        match self.consumer.commit_offsets_sync(commits).await {
-            Ok(()) => self.committed.extend(offsets),
-            Err(error) => tracing::warn!("offset commit failed: {error}"),
-        }
-    }
-}
-
-/// The topics that `--include` matches now, internal topics excluded as
-/// `exclude.internal.topics` excludes them by default.
-///
-/// The pinned `Consumer` subscribes to a fixed list, so the pattern is
-/// resolved once, when the command starts.
-async fn matching_topics(
-    plan: &Plan,
-    options: &ConnectionOptions,
-    pattern: &str,
-) -> Result<Vec<String>, String> {
-    let pattern = java_pattern(pattern)?;
-    let exclude_internal = bool_property(&plan.properties, "exclude.internal.topics", true)?;
-    let client = metadata_client(plan, options).await?;
-    let metadata = client
-        .refresh_metadata()
-        .await
-        .map_err(|error| client_error(&error))?;
-    client.close();
-    let mut topics = metadata
-        .topics
+    smallest
         .into_iter()
-        .filter(|topic| !(exclude_internal && topic.is_internal))
-        .filter_map(|topic| topic.name)
-        .filter(|name| pattern.is_match(name))
-        .collect::<Vec<_>>();
-    topics.sort();
-    if topics.is_empty() {
-        return Err(format!(
-            "no topic matches --include {pattern}; subscribing to topics created later is {NOT_SUPPORTED}, because pattern subscription needs Consumer::subscribe_regex from a newer krabka-client-consumer",
-            pattern = pattern
-                .as_str()
-                .trim_start_matches("^(?:")
-                .trim_end_matches(")$"),
-        ));
-    }
-    Ok(topics)
+        .map(|((topic, partition), offset)| (topic, partition, offset))
+        .collect()
 }
 
-async fn metadata_client(plan: &Plan, options: &ConnectionOptions) -> Result<Client, String> {
-    Client::builder()
-        .bootstrap(plan.bootstrap.join(","))
-        .client_id(options.client_id.clone())
-        .socket_connection_setup_timeout(options.socket_connection_setup_timeout)
-        .request_timeout(options.request_timeout)
-        .maybe_security(options.security.clone().map(|security| *security))
-        .build()
-        .await
-        .map_err(|error| client_error(&error))
-}
-
-/// The `--partition` path: fetches from the partition leader and never
-/// joins a group.
-struct PartitionReader {
-    client: Client,
-    options: ConnectionOptions,
-    bootstrap: Vec<String>,
-    topic: String,
-    partition: i32,
-    next_offset: i64,
-    started_at_earliest: bool,
-    fetch: FetchBounds,
-    connection: Option<Leader>,
-}
-
-struct Leader {
-    connection: Connection,
-    topic_id: Uuid,
-}
-
-/// The fetch bounds that the consumer properties set.
-#[derive(Debug, Clone, Copy)]
-struct FetchBounds {
-    max_wait_ms: i64,
-    max: ByteSize,
-    partition_max: ByteSize,
-    min: FetchMinBytes,
-    isolation_level: i8,
-}
-
-impl PartitionReader {
-    async fn start(
-        plan: &Plan,
-        settings: &ClientSettings,
-        options: ConnectionOptions,
-        topic: &str,
-        partition: i32,
-        offset: StartOffset,
-    ) -> Result<Self, String> {
-        let next_offset = match offset {
-            // The log start is 0 until retention or DeleteRecords moves it;
-            // a fetch at 0 past that point is refused below.
-            StartOffset::Earliest => 0,
-            StartOffset::At(offset) => offset,
-            StartOffset::Latest => {
-                return Err(format!(
-                    "--offset latest, the default with --partition, is {NOT_SUPPORTED}: the log end offset needs AdminClient::list_offsets from a newer krabka-client-admin; pass --offset earliest or an offset"
-                ));
-            }
-        };
-        let fetch = FetchBounds {
-            max_wait_ms: settings.fetch_max_wait_ms,
-            max: ByteSize::from_bytes_i64(settings.fetch_max_bytes),
-            partition_max: ByteSize::from_bytes_i64(settings.max_partition_fetch_bytes),
-            min: FetchMinBytes::new(i32::try_from(settings.fetch_min_bytes).unwrap_or(i32::MAX))
-                .map_err(|error| {
-                    config_error(
-                        "fetch.min.bytes",
-                        &settings.fetch_min_bytes.to_string(),
-                        &error,
-                    )
-                })?,
-            isolation_level: match settings.isolation_level {
-                IsolationLevel::ReadUncommitted => 0,
-                IsolationLevel::ReadCommitted => 1,
-            },
-        };
-        let client = metadata_client(plan, &options).await?;
-        Ok(Self {
-            client,
-            options,
-            bootstrap: plan.bootstrap.clone(),
-            topic: topic.to_owned(),
-            partition,
-            next_offset,
-            started_at_earliest: offset == StartOffset::Earliest,
-            fetch,
-            connection: None,
-        })
-    }
-
-    /// Connects to the partition leader that the metadata names, or to the
-    /// first bootstrap broker when the leader has no address that can be
-    /// dialled.
-    async fn connect(&mut self) -> Result<(), String> {
-        let metadata = self
-            .client
-            .refresh_metadata()
-            .await
-            .map_err(|error| client_error(&error))?;
-        let Some(topic) = metadata
-            .topics
-            .iter()
-            .find(|topic| topic.name.as_deref() == Some(self.topic.as_str()))
-        else {
-            return Err(format!("Topic {} not present in metadata", self.topic));
-        };
-        if topic.error_code != 0 {
-            return Err(format!(
-                "Metadata for topic {} failed with error code {}",
-                self.topic, topic.error_code
-            ));
-        }
-        let Some(partition) = topic
-            .partitions
-            .iter()
-            .find(|partition| partition.partition_index == self.partition)
-        else {
-            return Err(format!(
-                "Partition {}-{} not present in metadata",
-                self.topic, self.partition
-            ));
-        };
-        let leader = metadata
-            .brokers
-            .iter()
-            .find(|broker| broker.node_id == partition.leader_id && broker.port > 0)
-            .map(|broker| format!("{}:{}", broker.host, broker.port));
-        let address = match leader {
-            Some(address) => address,
-            None => self.bootstrap.first().cloned().unwrap_or_default(),
-        };
-        let address = resolve(&address).await?;
-        let connection = Connection::connect_with_options(address, self.options.clone())
-            .await
-            .map_err(|error| client_error(&error))?;
-        self.connection = Some(Leader {
-            connection,
-            topic_id: topic.topic_id,
-        });
-        Ok(())
-    }
-
-    async fn poll(&mut self, timeout: Time) -> Result<Vec<Record>, String> {
-        if self.connection.is_none() {
-            self.connect().await?;
-        }
-        let Some(leader) = &self.connection else {
-            return Ok(Vec::new());
-        };
-        let max_wait = timeout.millis_i64().min(self.fetch.max_wait_ms).max(0);
-        // A broker that does not answer must not hold the loop past
-        // `--timeout-ms`: the fetch gets its wait and a grace period, and an
-        // unanswered one reconnects.
-        let deadline =
-            std::time::Duration::from_millis(u64::try_from(max_wait).unwrap_or(0) + FETCH_GRACE_MS);
-        let fetch = fetch_partition_with_isolation_progress(
-            &leader.connection,
-            IsolatedFetch {
-                topic: &self.topic,
-                topic_id: leader.topic_id,
-                partition: self.partition,
-                fetch_offset: self.next_offset,
-                max_wait: Time::from_millis(max_wait),
-                max: self.fetch.max,
-                partition_max: self.fetch.partition_max,
-                fetch_min: self.fetch.min,
-                isolation_level: self.fetch.isolation_level,
-            },
-        );
-        let result = match tokio::time::timeout(deadline, fetch).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => return self.recover(&error).await,
-            Err(_) => {
-                self.reconnect_later().await;
-                return Ok(Vec::new());
-            }
-        };
-        if let Some(next) = result.next_offset {
-            self.next_offset = self.next_offset.max(next);
-        }
-        Ok(result
-            .records
+/// The formatter's view of a consumed record.
+fn record(record: ConsumerRecord) -> Record {
+    Record {
+        topic: record.topic,
+        partition: record.partition,
+        offset: record.offset,
+        timestamp: record.timestamp,
+        timestamp_type: record.timestamp_type,
+        key: record.key.map(|key| key.to_vec()),
+        value: record.value.map(|value| value.to_vec()),
+        headers: record
+            .headers
             .into_iter()
-            .map(|record| Record {
-                topic: self.topic.clone(),
-                partition: self.partition,
-                offset: record.offset,
-                timestamp: record.timestamp,
-                key: record.key.map(|key| key.to_vec()),
-                value: record.value.map(|value| value.to_vec()),
-                headers: record
-                    .headers
-                    .into_iter()
-                    .map(|header| (header.key, header.value.map(|value| value.to_vec())))
-                    .collect(),
-            })
-            .collect())
+            .map(|header| (header.key, header.value.map(|value| value.to_vec())))
+            .collect(),
     }
-
-    /// Reconnects after a leader change or a lost connection, and refuses an
-    /// offset that is out of range.
-    async fn recover(&mut self, error: &ClientError) -> Result<Vec<Record>, String> {
-        const OFFSET_OUT_OF_RANGE: i16 = 1;
-        const RETRIABLE: [i16; 5] = [3, 5, 6, 74, 75];
-        match error {
-            ClientError::Server {
-                error_code: OFFSET_OUT_OF_RANGE,
-            } => Err(if self.started_at_earliest && self.next_offset == 0 {
-                format!(
-                    "the log start of {}-{} is past offset 0, and finding it is {NOT_SUPPORTED}: it needs AdminClient::list_offsets from a newer krabka-client-admin; pass --offset with an offset in range",
-                    self.topic, self.partition
-                )
-            } else {
-                format!(
-                    "offset {} is out of range for {}-{}, and resetting it is {NOT_SUPPORTED}: it needs AdminClient::list_offsets from a newer krabka-client-admin",
-                    self.next_offset, self.topic, self.partition
-                )
-            }),
-            ClientError::Server { error_code } if RETRIABLE.contains(error_code) => {
-                self.reconnect_later().await;
-                Ok(Vec::new())
-            }
-            ClientError::Connect { .. }
-            | ClientError::Disconnected
-            | ClientError::Timeout(_)
-            | ClientError::Io(_) => {
-                self.reconnect_later().await;
-                Ok(Vec::new())
-            }
-            other => Err(client_error(other)),
-        }
-    }
-
-    async fn reconnect_later(&mut self) {
-        if let Some(leader) = self.connection.take() {
-            leader.connection.close();
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(RETRY_BACKOFF_MS)).await;
-    }
-}
-
-async fn resolve(address: &str) -> Result<SocketAddr, String> {
-    tokio::net::lookup_host(address)
-        .await
-        .map_err(|error| format!("resolve {address}: {error}"))?
-        .next()
-        .ok_or_else(|| format!("resolve {address}: no address"))
 }
 
 fn consumer_error(error: &ConsumerError) -> String {
     match error {
-        ConsumerError::Client(error) => client_error(error),
+        ConsumerError::Client(error) => error.to_string(),
         ConsumerError::StartupAfterJoin(error) => consumer_error(error),
         other => other.to_string(),
     }
-}
-
-fn client_error(error: &ClientError) -> String {
-    error.to_string()
 }
 
 #[cfg(test)]
