@@ -84,21 +84,21 @@ krabka-units = "0.4.0"
 # crate reached transitively would otherwise come from the registry while
 # its git twin is also in the graph.
 [patch.crates-io]
-krabka-audit = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-authz = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-broker = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-format = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-kraft-core = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-log = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-logfmt = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-object-store = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-raft = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-records-legacy = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-remote-storage = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-remote-storage-topic = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-telemetry = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-throttle = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
-krabka-verified = { git = "https://github.com/krabka-io/krabka-broker", rev = "7d44036deada374d704d5c3ebfccecc7544b3147" }
+krabka-audit = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-authz = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-broker = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-format = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-kraft-core = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-log = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-logfmt = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-object-store = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-raft = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-records-legacy = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-remote-storage = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-remote-storage-topic = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-telemetry = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-throttle = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-verified = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
 # `krabka-broker` depends on `krabka-schema-serde`, so the git dependency
 # above needs it patched here too. Resolved from krabka-schema-registry, the
 # same source the broker itself patches, so the broker gets the copy it was
