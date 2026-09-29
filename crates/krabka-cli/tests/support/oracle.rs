@@ -180,9 +180,7 @@ pub enum Expect {
 /// A declared difference between the two tools on one row, with its reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Difference {
-    /// The exit codes agree and the output differs.
-    Message(&'static str),
-    /// The exit code may differ too.
+    /// The exit code and the output may differ.
     Outcome(&'static str),
     /// The JVM message lists a `Set.of`, whose order changes from one JVM run
     /// to the next. The exit codes and stdout must agree, and the messages
@@ -194,7 +192,7 @@ impl Difference {
     /// Why the tools differ on the row.
     pub const fn reason(self) -> &'static str {
         match self {
-            Self::Message(reason) | Self::Outcome(reason) | Self::Unordered(reason) => reason,
+            Self::Outcome(reason) | Self::Unordered(reason) => reason,
         }
     }
 }
@@ -308,11 +306,8 @@ pub fn judge(expect: Expect, declared: Option<Difference>, jvm: &View, krabka: &
     match declared {
         None if jvm == krabka => Verdict::Agree,
         Some(Difference::Unordered(_)) if unordered_match => Verdict::ExpectedDifference,
-        Some(Difference::Message(_) | Difference::Outcome(_)) if jvm == krabka => {
-            Verdict::Stale { view: jvm.clone() }
-        }
-        Some(Difference::Message(_)) if jvm.exit == krabka.exit => Verdict::ExpectedDifference,
+        Some(Difference::Outcome(_)) if jvm == krabka => Verdict::Stale { view: jvm.clone() },
         Some(Difference::Outcome(_)) => Verdict::ExpectedDifference,
-        None | Some(Difference::Message(_) | Difference::Unordered(_)) => undeclared(),
+        None | Some(Difference::Unordered(_)) => undeclared(),
     }
 }
