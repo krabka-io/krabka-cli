@@ -687,22 +687,28 @@ async fn produce(
                 }
             };
             let described = describe(&record);
-            // `send` waits up to `max.block.ms` for metadata that holds the
+            // `enqueue` waits up to `max.block.ms` for metadata that holds the
             // topic, as `KafkaProducer.waitOnMetadata` does, and fails the
             // record when it times out.
-            let receiver = tokio::select! {
-                receiver = producer.send(record) => receiver,
+            let queued = tokio::select! {
+                queued = producer.enqueue(record) => queued,
                 () = cancel.cancelled() => { cancelled = true; break 'read; }
             };
+            let delivery = async move {
+                match queued {
+                    Ok(delivery) => delivery.await,
+                    Err(error) => Err(error),
+                }
+            };
             if plan.sync {
-                if let Err(message) = delivered(receiver.await, &counts) {
+                if let Err(message) = delivered(delivery.await, &counts) {
                     failure = Some(message);
                     break 'read;
                 }
             } else {
                 let counts = Arc::clone(&counts);
                 pending.spawn(async move {
-                    if let Err(message) = delivered(receiver.await, &counts) {
+                    if let Err(message) = delivered(delivery.await, &counts) {
                         tracing::error!(
                             "Error when sending message to {described} with error: {message}"
                         );
@@ -760,16 +766,12 @@ fn describe(record: &ProducerRecord) -> String {
 
 /// Counts the outcome of one send.
 fn delivered(
-    outcome: Result<
-        Result<krabka_client_producer::RecordMetadata, ProducerError>,
-        tokio::sync::oneshot::error::RecvError,
-    >,
+    outcome: Result<krabka_client_producer::RecordMetadata, ProducerError>,
     counts: &Counts,
 ) -> Result<(), String> {
     let result = match outcome {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(error)) => Err(producer_error(&error)),
-        Err(_) => Err("the producer stopped before the record was acknowledged".to_owned()),
+        Ok(_) => Ok(()),
+        Err(error) => Err(producer_error(&error)),
     };
     match result {
         Ok(()) => counts.sent.fetch_add(1, Ordering::AcqRel),
