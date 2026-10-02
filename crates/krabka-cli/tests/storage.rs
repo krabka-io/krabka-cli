@@ -59,12 +59,14 @@ const KAFKA_LATEST_TESTING: i16 = 31;
 
 /// The levels of `production_features()` that Kafka 4.3.1 maps a release
 /// to: `kraft.version` is 1 from `3.9-IV0`, and every other feature takes
-/// the registry's default.
+/// the registry's default, except `share.version`, which is 1 from `4.2-IV0`.
 fn mapping_lines(level: i16, release: &str) -> Vec<String> {
     std::iter::once(format!("metadata.version={level} ({release})"))
         .chain(production_features().into_iter().map(|name| {
             let default = if name == KRAFT_VERSION_FEATURE {
                 i16::from(level >= 21)
+            } else if name == "share.version" {
+                i16::from(level >= 28)
             } else {
                 krabka_metadata::feature(name).unwrap().default_level(level)
             };
