@@ -138,6 +138,10 @@ pub fn default_level(feature: &dyn Feature, metadata_level: i16) -> i16 {
     if feature.name() == KRAFT_VERSION_FEATURE {
         return i16::from(metadata_level >= KRAFT_VERSION_1_METADATA_VERSION);
     }
+    if feature.name() == metadata_version::SHARE_VERSION_FEATURE {
+        // Kafka 4.3.1 defines only SV_0 and SV_1, even at its testing 4.4-IV0.
+        return feature.default_level(metadata_level).min(1);
+    }
     feature.default_level(metadata_level)
 }
 
