@@ -119,6 +119,17 @@ fn version_mapping_prints_what_kafka_4_3_1_prints() {
 }
 
 #[test]
+fn share_defaults_preserve_the_kafka_4_3_1_enablement_boundary() {
+    let share = feature("share.version").expect("share.version is registered");
+    for (metadata_level, expected) in [(27, 0), (28, 1), (30, 1), (31, 1)] {
+        check!(
+            default_level(share, metadata_level) == expected,
+            "metadata.version={metadata_level}"
+        );
+    }
+}
+
+#[test]
 fn version_mapping_json_carries_the_same_values() {
     let mapping = version_mapping(Some("4.0")).unwrap();
     check!(
