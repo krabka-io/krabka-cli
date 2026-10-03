@@ -7,7 +7,7 @@ so there is no second dependency set to keep in sync.
 
 module(
     name = "krabka_cli",
-    version = "0.4.2",
+    version = "0.4.3",
 )
 
 bazel_dep(name = "rules_rs", version = "0.0.110")
@@ -207,29 +207,6 @@ crate.from_cargo(
 # crate's directory by matching the crate name against the members list, and it
 # skips glob entries, so each member's path is named here instead.
 SIBLING_MEMBERS = {
-    "crabka-client-admin": "crates/client-admin",
-    "crabka-client-consumer": "crates/client-consumer",
-    "crabka-client-core": "crates/client-core",
-    "crabka-client-producer": "crates/client-producer",
-    "crabka-compression": "crates/compression",
-    "crabka-gres-balancer": "crates/gres-balancer",
-    "crabka-gres-control": "crates/gres-control",
-    "crabka-gres-ranges": "crates/gres-ranges",
-    "crabka-gres-substrate": "crates/gres-substrate",
-    "crabka-ids": "crates/ids",
-    "crabka-metadata": "crates/metadata",
-    "crabka-object-store": "crates/object-store",
-    "crabka-pgcatalog": "crates/pgcatalog",
-    "crabka-pgexec": "crates/pgexec",
-    "crabka-pgkv": "crates/pgkv",
-    "crabka-pgmvcc": "crates/pgmvcc",
-    "crabka-pgparser": "crates/pgparser",
-    "crabka-pgtypes": "crates/pgtypes",
-    "crabka-pgwire": "crates/pgwire",
-    "crabka-security": "crates/security",
-    "crabka-trace-context": "crates/trace-context",
-    "crabka-units": "crates/units",
-    "crabka-voters": "crates/voters",
     "krabka-audit": "crates/audit",
     "krabka-authz": "crates/authz",
     "krabka-broker": "crates/broker",
@@ -239,6 +216,10 @@ SIBLING_MEMBERS = {
     "krabka-client-producer": "crates/client-producer",
     "krabka-compression": "crates/compression",
     "krabka-format": "crates/format",
+    "krabka-gres-balancer": "crates/gres-balancer",
+    "krabka-gres-control": "crates/gres-control",
+    "krabka-gres-ranges": "crates/gres-ranges",
+    "krabka-gres-substrate": "crates/gres-substrate",
     "krabka-ids": "crates/ids",
     "krabka-kafka-tap": "crates/kafka-tap",
     "krabka-kraft-core": "crates/kraft-core",
@@ -246,6 +227,13 @@ SIBLING_MEMBERS = {
     "krabka-logfmt": "crates/logfmt",
     "krabka-metadata": "crates/metadata",
     "krabka-object-store": "crates/object-store",
+    "krabka-pgcatalog": "crates/pgcatalog",
+    "krabka-pgexec": "crates/pgexec",
+    "krabka-pgkv": "crates/pgkv",
+    "krabka-pgmvcc": "crates/pgmvcc",
+    "krabka-pgparser": "crates/pgparser",
+    "krabka-pgtypes": "crates/pgtypes",
+    "krabka-pgwire": "crates/pgwire",
     "krabka-raft": "crates/raft",
     "krabka-records-legacy": "crates/records-legacy",
     "krabka-remote-storage": "crates/remote-storage",
@@ -283,12 +271,6 @@ crate.annotation(
     workspace_cargo_toml = "Cargo.toml",
 )
 crate.annotation(
-    crate = "crabka-protocol",
-    gen_build_script = "off",
-    strip_prefix = "crates/protocol",
-    workspace_cargo_toml = "Cargo.toml",
-)
-crate.annotation(
     crate = "cargo-mutants",
     gen_binaries = ["cargo-mutants"],
     repositories = ["mutants"],
@@ -319,3 +301,50 @@ crate.annotation(
 use_repo(crate, "crates", "mutants")
 
 inject_repo(crate, "aws-lc")
+
+# Member directories for coordinated Git source dependencies.
+[
+    crate.annotation(
+        crate = name,
+        strip_prefix = directory,
+        workspace_cargo_toml = "Cargo.toml",
+    )
+    for name, directory in {
+        "krabka-app-sdk": "crates/app-sdk",
+        "krabka-backup": "crates/backup-cli",
+        "krabka-barrier": "crates/barrier-cli",
+        "krabka-bench-driver": "crates/bench-driver",
+        "krabka-blockstore": "crates/blockstore",
+        "krabka-client-coordination": "crates/client-coordination",
+        "krabka-client-streams": "crates/client-streams",
+        "krabka-connect": "crates/connect",
+        "krabka-connect-derive": "crates/connect-derive",
+        "krabka-connect-postgres": "crates/connect-postgres",
+        "krabka-connect-worker": "crates/connect-worker",
+        "krabka-docgen": "crates/docgen",
+        "krabka-gateway": "crates/gateway",
+        "krabka-guard": "crates/guard-cli",
+        "krabka-hlc": "crates/hlc",
+        "krabka-integration": "crates/integration",
+        "krabka-log-iobench": "crates/log-iobench",
+        "krabka-logql": "crates/logql",
+        "krabka-metrics": "crates/metrics",
+        "krabka-metrics-service": "crates/metrics-service",
+        "krabka-o11y-verified": "crates/verified",
+        "krabka-observability": "crates/observability",
+        "krabka-operator": "crates/krabka-operator",
+        "krabka-parse-benches": "crates/parse-benches",
+        "krabka-pprof": "crates/pprof",
+        "krabka-profiles": "crates/profiles",
+        "krabka-promql": "crates/promql",
+        "krabka-protocol-codegen": "crates/protocol-codegen",
+        "krabka-query-frontend": "crates/query-frontend",
+        "krabka-rebalancer": "crates/rebalancer",
+        "krabka-replicator": "crates/replicator",
+        "krabka-restore": "crates/restore",
+        "krabka-schema-registry": "crates/schema-registry",
+        "krabka-sdk-conformance": "crates/sdk-conformance",
+        "krabka-traceql": "crates/traceql",
+        "krabka-traces": "crates/traces",
+    }.items()
+]

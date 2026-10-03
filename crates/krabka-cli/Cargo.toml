@@ -27,26 +27,26 @@ workspace = true
 
 [dependencies]
 clap = { workspace = true, features = ["env"] }
-crabka-client-admin = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
-crabka-client-core = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
-crabka-gres-balancer = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
-crabka-gres-control = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
-crabka-security = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
-crabka-units = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
-krabka-client-admin = { version = "0.4.0" }
-krabka-client-consumer = { version = "0.4.0" }
-krabka-client-core = { version = "0.4.0" }
-krabka-client-producer = { version = "0.4.0" }
-krabka-format = { version = "0.6.1" }
+gres-client-admin = { package = "krabka-client-admin", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
+gres-client-core = { package = "krabka-client-core", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
+gres-balancer = { package = "krabka-gres-balancer", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
+gres-control = { package = "krabka-gres-control", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
+gres-security = { package = "krabka-security", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
+gres-units = { package = "krabka-units", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
+krabka-client-admin = { version = "0.5.0" }
+krabka-client-consumer = { version = "0.5.0" }
+krabka-client-core = { version = "0.5.0" }
+krabka-client-producer = { version = "0.5.0" }
+krabka-format = { version = "0.7.0" }
 # `KafkaUuid`, Kafka's base64url form of a cluster, topic or directory id.
-krabka-ids = { version = "0.4.0" }
+krabka-ids = { version = "0.5.0" }
 # The KIP-584 feature registry and the `metadata.version` table that
 # `krabka features` and `krabka storage` read.
-krabka-metadata = { version = "0.4.0" }
+krabka-metadata = { version = "0.5.0" }
 # `Record`, the envelope `krabka_metadata::from_kafka_record` decodes a
 # bootstrap record from, for `krabka storage info`, and the topic id of the
 # fetch that `console-consumer --partition` sends.
-krabka-protocol = { version = "0.4.0" }
+krabka-protocol = { version = "0.5.0" }
 krabka-security = { workspace = true }
 krabka-units = { workspace = true }
 # `console-consumer --include`, the `headers.separator` of `console-producer`,
@@ -72,11 +72,11 @@ rustix = { workspace = true, features = ["process"] }
 [dev-dependencies]
 assert2 = { workspace = true }
 # `mock` builds `MockBroker`, which tests/support/mod.rs wraps.
-krabka-client-core = { version = "0.4.0", features = ["mock"] }
+krabka-client-core = { version = "0.5.0", features = ["mock"] }
 # The canned responses that the mock broker sends, and the errors that the
 # tests match.
-krabka-client-admin = { version = "0.4.0" }
-krabka-protocol = { version = "0.4.0" }
+krabka-client-admin = { version = "0.5.0" }
+krabka-protocol = { version = "0.5.0" }
 krabka-units = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
