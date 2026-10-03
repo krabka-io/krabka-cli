@@ -207,29 +207,6 @@ crate.from_cargo(
 # crate's directory by matching the crate name against the members list, and it
 # skips glob entries, so each member's path is named here instead.
 SIBLING_MEMBERS = {
-    "krabka-client-admin": "crates/client-admin",
-    "krabka-client-consumer": "crates/client-consumer",
-    "krabka-client-core": "crates/client-core",
-    "krabka-client-producer": "crates/client-producer",
-    "krabka-compression": "crates/compression",
-    "krabka-gres-balancer": "crates/gres-balancer",
-    "krabka-gres-control": "crates/gres-control",
-    "krabka-gres-ranges": "crates/gres-ranges",
-    "krabka-gres-substrate": "crates/gres-substrate",
-    "krabka-ids": "crates/ids",
-    "krabka-metadata": "crates/metadata",
-    "krabka-object-store": "crates/object-store",
-    "krabka-pgcatalog": "crates/pgcatalog",
-    "krabka-pgexec": "crates/pgexec",
-    "krabka-pgkv": "crates/pgkv",
-    "krabka-pgmvcc": "crates/pgmvcc",
-    "krabka-pgparser": "crates/pgparser",
-    "krabka-pgtypes": "crates/pgtypes",
-    "krabka-pgwire": "crates/pgwire",
-    "krabka-security": "crates/security",
-    "krabka-trace-context": "crates/trace-context",
-    "krabka-units": "crates/units",
-    "krabka-voters": "crates/voters",
     "krabka-audit": "crates/audit",
     "krabka-authz": "crates/authz",
     "krabka-broker": "crates/broker",
@@ -239,6 +216,10 @@ SIBLING_MEMBERS = {
     "krabka-client-producer": "crates/client-producer",
     "krabka-compression": "crates/compression",
     "krabka-format": "crates/format",
+    "krabka-gres-balancer": "crates/gres-balancer",
+    "krabka-gres-control": "crates/gres-control",
+    "krabka-gres-ranges": "crates/gres-ranges",
+    "krabka-gres-substrate": "crates/gres-substrate",
     "krabka-ids": "crates/ids",
     "krabka-kafka-tap": "crates/kafka-tap",
     "krabka-kraft-core": "crates/kraft-core",
@@ -246,6 +227,13 @@ SIBLING_MEMBERS = {
     "krabka-logfmt": "crates/logfmt",
     "krabka-metadata": "crates/metadata",
     "krabka-object-store": "crates/object-store",
+    "krabka-pgcatalog": "crates/pgcatalog",
+    "krabka-pgexec": "crates/pgexec",
+    "krabka-pgkv": "crates/pgkv",
+    "krabka-pgmvcc": "crates/pgmvcc",
+    "krabka-pgparser": "crates/pgparser",
+    "krabka-pgtypes": "crates/pgtypes",
+    "krabka-pgwire": "crates/pgwire",
     "krabka-raft": "crates/raft",
     "krabka-records-legacy": "crates/records-legacy",
     "krabka-remote-storage": "crates/remote-storage",
@@ -276,12 +264,6 @@ SIBLING_MEMBERS = {
 # rejects because it bakes an absolute build path into the binary. Nothing here
 # needs the check -- the generated sources are consumed directly -- and the
 # Cargo build in krabka-protocol still runs it.
-crate.annotation(
-    crate = "krabka-protocol",
-    gen_build_script = "off",
-    strip_prefix = "crates/protocol",
-    workspace_cargo_toml = "Cargo.toml",
-)
 crate.annotation(
     crate = "krabka-protocol",
     gen_build_script = "off",
