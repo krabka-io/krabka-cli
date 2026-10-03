@@ -8,6 +8,10 @@ use std::{
 };
 
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
+use gres_balancer::{
+    BalanceOperation, BalancerConfig, ExecutionPolicy, ExecutionReport, Planner, TenantMetrics,
+    UnsupportedExecutor, execute_plan,
+};
 use gres_client_admin::{
     AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType,
     ScramIterations, ScramUpsertion,
@@ -15,10 +19,6 @@ use gres_client_admin::{
 use gres_client_core::{
     ClientFrameMax, ConnectionDispatchQueueCapacity, FetchMinBytes,
     security::{ClientSecurity, SaslCredentials},
-};
-use gres_balancer::{
-    BalanceOperation, BalancerConfig, ExecutionPolicy, ExecutionReport, Planner, TenantMetrics,
-    UnsupportedExecutor, execute_plan,
 };
 use gres_control::{
     HashPlacement, PgdogConnectAttempts, PgdogGeneral, PgdogPoolerMode, PgdogRenderInput,
@@ -154,14 +154,12 @@ fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
 }
 
 fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
-    let value =
-        gres_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    let value = gres_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
     ClientFrameMax::try_from(value).map(ClientFrameMax::size)
 }
 
 fn parse_fetch_min(value: &str) -> Result<ByteSize, String> {
-    let value =
-        gres_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    let value = gres_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
     FetchMinBytes::try_from(value).map(FetchMinBytes::size)
 }
 
@@ -1485,7 +1483,7 @@ mod tests {
 
     #[test]
     fn create_tenant_policy_reads_environment_and_prefers_cli() {
-        const CHILD: &str = "CRABKA_TEST_CLI_CREATE_TENANT_POLICY_CHILD";
+        const CHILD: &str = "KRABKA_TEST_CLI_CREATE_TENANT_POLICY_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
                 .args([
@@ -1537,7 +1535,7 @@ mod tests {
 
     #[test]
     fn registry_policy_options_read_environment_and_prefer_cli() {
-        const CHILD: &str = "CRABKA_TEST_CLI_REGISTRY_ENV_CHILD";
+        const CHILD: &str = "KRABKA_TEST_CLI_REGISTRY_ENV_CHILD";
         let vars = [
             ("KRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
             ("KRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", "15001ms"),
@@ -1715,7 +1713,7 @@ mod tests {
 
     #[test]
     fn render_pgdog_options_read_environment_and_prefer_cli() {
-        const CHILD: &str = "CRABKA_TEST_CLI_PGDOG_ENV_CHILD";
+        const CHILD: &str = "KRABKA_TEST_CLI_PGDOG_ENV_CHILD";
         let vars = [
             ("KRABKA_GRES_PGDOG_BOOTSTRAP", "env:9092"),
             ("KRABKA_GRES_PGDOG_OUT_DIR", "/tmp/env-pgdog"),
