@@ -33,8 +33,8 @@ axum = { workspace = true, features = ["json", "query"] }
 clap = { workspace = true, features = ["env"] }
 dioxus = { workspace = true }
 dioxus-ssr = { workspace = true }
-krabka-client-admin = { version = "0.4.0" }
-krabka-client-core = { version = "0.4.0" }
+krabka-client-admin = { version = "0.5.0" }
+krabka-client-core = { version = "0.5.0" }
 krabka-security = { workspace = true }
 krabka-units = { workspace = true }
 parking_lot = { workspace = true }
