@@ -8,27 +8,27 @@ use std::{
 };
 
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
-use crabka_client_admin::{
+use gres_client_admin::{
     AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType,
     ScramIterations, ScramUpsertion,
 };
-use crabka_client_core::{
+use gres_client_core::{
     ClientFrameMax, ConnectionDispatchQueueCapacity, FetchMinBytes,
     security::{ClientSecurity, SaslCredentials},
 };
-use crabka_gres_balancer::{
+use gres_balancer::{
     BalanceOperation, BalancerConfig, ExecutionPolicy, ExecutionReport, Planner, TenantMetrics,
     UnsupportedExecutor, execute_plan,
 };
-use crabka_gres_control::{
+use gres_control::{
     HashPlacement, PgdogConnectAttempts, PgdogGeneral, PgdogPoolerMode, PgdogRenderInput,
     PgdogUser, RangeBoundary, RangeLayoutEntry, RangeLayoutSplit, RangeLifecycle, Registry,
     RegistryPolicy, RegistryReplicationFactor, SplitOperationPlan, SplitOperationRecord, SqlUser,
     TenantEndpoint, TenantId, TenantName, TenantRecord, TenantState, render_pgdog_toml,
     render_users_toml, tenant_config_topic,
 };
-use crabka_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
-use crabka_units::{ByteSize, Time};
+use gres_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
+use gres_units::{ByteSize, Time};
 use serde::Serialize;
 use serde_json::json;
 
@@ -49,7 +49,7 @@ struct RegistryOptions {
     #[arg(
         long = "client-dispatch-queue-capacity",
         env = "KRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY",
-        default_value_t = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        default_value_t = gres_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
         value_parser = parse_client_dispatch_queue_capacity
     )]
     client_dispatch_queue_capacity: usize,
@@ -77,40 +77,40 @@ struct RegistryOptions {
         long = "registry-topic-create-timeout",
         env = "KRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT",
         default_value = "15s",
-        value_parser = crabka_units::parse::positive_time
+        value_parser = gres_units::parse::positive_time
     )]
     topic_create_timeout: Time,
     #[arg(
         long = "registry-reader-retry-backoff",
         env = "KRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF",
         default_value = "250ms",
-        value_parser = crabka_units::parse::positive_time
+        value_parser = gres_units::parse::positive_time
     )]
     reader_retry_backoff: Time,
     #[arg(
         long = "registry-fetch-max-wait",
         env = "KRABKA_GRES_REGISTRY_FETCH_MAX_WAIT",
         default_value = "500ms",
-        value_parser = crabka_units::parse::positive_time
+        value_parser = gres_units::parse::positive_time
     )]
     fetch_max_wait: Time,
     #[arg(
         long = "registry-fetch-partition-max",
         env = "KRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX",
         default_value = "1MiB",
-        value_parser = crabka_units::parse::positive_byte_size
+        value_parser = gres_units::parse::positive_byte_size
     )]
     fetch_partition_max: ByteSize,
     #[arg(
         long = "registry-producer-dns-timeout",
         env = "KRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT",
-        value_parser = crabka_units::parse::positive_time
+        value_parser = gres_units::parse::positive_time
     )]
     producer_dns_timeout: Option<Time>,
     #[arg(
         long = "registry-reader-admin-dns-timeout",
         env = "KRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT",
-        value_parser = crabka_units::parse::positive_time
+        value_parser = gres_units::parse::positive_time
     )]
     reader_admin_dns_timeout: Option<Time>,
 }
@@ -155,13 +155,13 @@ fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
 
 fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
     let value =
-        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+        gres_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
     ClientFrameMax::try_from(value).map(ClientFrameMax::size)
 }
 
 fn parse_fetch_min(value: &str) -> Result<ByteSize, String> {
     let value =
-        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+        gres_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
     FetchMinBytes::try_from(value).map(FetchMinBytes::size)
 }
 
@@ -241,7 +241,7 @@ struct CreateTenantArgs {
     #[arg(long)]
     checkpoint_frames: Option<u64>,
     /// Optional size threshold for checkpointing.
-    #[arg(long, value_parser = crabka_units::parse::positive_byte_size)]
+    #[arg(long, value_parser = gres_units::parse::positive_byte_size)]
     checkpoint_size: Option<ByteSize>,
     /// Idle seconds before automatic suspension. Zero means never.
     #[arg(long)]
@@ -326,7 +326,7 @@ struct RenderPgdogArgs {
         long,
         env = "KRABKA_GRES_PGDOG_COLD_START_CEILING",
         default_value = "30s",
-        value_parser = crabka_units::parse::positive_time
+        value_parser = gres_units::parse::positive_time
     )]
     cold_start_ceiling: Time,
     /// Normal pooled-server idle timeout.
@@ -334,7 +334,7 @@ struct RenderPgdogArgs {
         long,
         env = "KRABKA_GRES_PGDOG_IDLE_TIMEOUT",
         default_value = "60s",
-        value_parser = crabka_units::parse::positive_time
+        value_parser = gres_units::parse::positive_time
     )]
     idle_timeout: Time,
     /// Pooled-server idle timeout when at least one tenant may suspend.
@@ -342,7 +342,7 @@ struct RenderPgdogArgs {
         long,
         env = "KRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT",
         default_value = "1s",
-        value_parser = crabka_units::parse::positive_time
+        value_parser = gres_units::parse::positive_time
     )]
     suspension_idle_timeout: Time,
     /// Maximum pooled backend connection lifetime.
@@ -350,7 +350,7 @@ struct RenderPgdogArgs {
         long,
         env = "KRABKA_GRES_PGDOG_SERVER_LIFETIME",
         default_value = "5m",
-        value_parser = crabka_units::parse::positive_time
+        value_parser = gres_units::parse::positive_time
     )]
     server_lifetime: Time,
 }
@@ -487,7 +487,7 @@ struct RedactedTenantRecord {
     wal_replication: i32,
     bucket_prefix: Option<String>,
     checkpoint_frames: Option<u64>,
-    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[serde(with = "gres_units::serde_units::human::option_byte_size")]
     checkpoint_size: Option<ByteSize>,
     idle_seconds: Option<u64>,
     hash_placements: Vec<HashPlacement>,
@@ -625,7 +625,7 @@ fn plan_balance_apply(
     let output = planner.plan(&input.tenants, &input.config.context);
     let report = match mode {
         BalanceExecuteMode::DryRun => {
-            crabka_gres_balancer::DryRunExecutor::default().execute(&output.plan)
+            gres_balancer::DryRunExecutor::default().execute(&output.plan)
         }
         BalanceExecuteMode::Validate => {
             let mut executor = UnsupportedExecutor;
@@ -928,10 +928,10 @@ async fn provision_tenant_kafka_access(
     let username = tenant_kafka_username(tenant);
     let mut admin = AdminClient::connect_with_options(
         &bootstrap_addrs,
-        crabka_client_core::ConnectionOptions {
+        gres_client_core::ConnectionOptions {
             dispatch_queue_capacity: policy.dispatch_queue_capacity(),
             frame_max: policy.frame_max(),
-            ..crabka_client_core::ConnectionOptions::default()
+            ..gres_client_core::ConnectionOptions::default()
         },
     )
     .await
@@ -1428,7 +1428,7 @@ fn parse_pgdog_pooler_mode(value: &str) -> Result<PgdogPoolerMode, String> {
 mod tests {
     use assert2::{assert, check};
     use clap::Parser as _;
-    use crabka_units::convert::TimeExt as _;
+    use gres_units::convert::TimeExt as _;
 
     use super::*;
 
@@ -1514,7 +1514,7 @@ mod tests {
     fn registry_policy_options_use_exact_defaults_and_validation() {
         let defaults =
             TestCli::try_parse_from(["test", "list", "--bootstrap=broker:9092"]).expect("defaults");
-        assert!(defaults.gres.registry.policy() == crabka_gres_control::RegistryPolicy::default());
+        assert!(defaults.gres.registry.policy() == gres_control::RegistryPolicy::default());
         for option in [
             "--registry-replication-factor=0",
             "--registry-replication-factor=32768",
@@ -1567,20 +1567,20 @@ mod tests {
             TestCli::try_parse_from(["test", "list", "--bootstrap=broker:9092"]).expect("env");
         let environment_policy = RegistryPolicy::new(
             2,
-            crabka_units::millis(15_001),
-            crabka_units::millis(251),
-            crabka_units::millis(501),
-            crabka_units::bytes(1_048_577),
+            gres_units::millis(15_001),
+            gres_units::millis(251),
+            gres_units::millis(501),
+            gres_units::bytes(1_048_577),
         )
         .expect("policy")
-        .with_producer_dns_timeout(crabka_units::millis(37))
+        .with_producer_dns_timeout(gres_units::millis(37))
         .expect("environment DNS timeout")
-        .with_reader_admin_dns_timeout(crabka_units::millis(37))
+        .with_reader_admin_dns_timeout(gres_units::millis(37))
         .expect("environment reader/admin DNS timeout")
         .with_client_resource_policy(
             ConnectionDispatchQueueCapacity::new(7).unwrap(),
-            ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap(),
-            FetchMinBytes::try_from(crabka_units::bytes(3)).unwrap(),
+            ClientFrameMax::try_from(gres_units::kibibytes(32)).unwrap(),
+            FetchMinBytes::try_from(gres_units::bytes(3)).unwrap(),
         );
         assert!(environment.gres.registry.policy() == environment_policy);
         let cli = TestCli::try_parse_from([
@@ -1601,20 +1601,20 @@ mod tests {
         .expect("CLI over environment");
         let cli_policy = RegistryPolicy::new(
             3,
-            crabka_units::millis(15_002),
-            crabka_units::millis(252),
-            crabka_units::millis(502),
-            crabka_units::bytes(1_048_578),
+            gres_units::millis(15_002),
+            gres_units::millis(252),
+            gres_units::millis(502),
+            gres_units::bytes(1_048_578),
         )
         .expect("policy")
-        .with_producer_dns_timeout(crabka_units::millis(47))
+        .with_producer_dns_timeout(gres_units::millis(47))
         .expect("CLI DNS timeout")
-        .with_reader_admin_dns_timeout(crabka_units::millis(47))
+        .with_reader_admin_dns_timeout(gres_units::millis(47))
         .expect("CLI reader/admin DNS timeout")
         .with_client_resource_policy(
             ConnectionDispatchQueueCapacity::new(9).unwrap(),
-            ClientFrameMax::try_from(crabka_units::kibibytes(64)).unwrap(),
-            FetchMinBytes::try_from(crabka_units::bytes(5)).unwrap(),
+            ClientFrameMax::try_from(gres_units::kibibytes(64)).unwrap(),
+            FetchMinBytes::try_from(gres_units::bytes(5)).unwrap(),
         );
         assert!(cli.gres.registry.policy() == cli_policy);
     }
@@ -1889,10 +1889,10 @@ mod tests {
             password_file: None,
             password_stdin: true,
             wal_replication: RegistryReplicationFactor::new(3).unwrap(),
-            scram_iterations: crabka_client_admin::ScramIterations::new(12_288).unwrap(),
+            scram_iterations: gres_client_admin::ScramIterations::new(12_288).unwrap(),
             bucket_prefix: Some("prefix".to_string()),
             checkpoint_frames: Some(10),
-            checkpoint_size: Some(crabka_units::bytes(20)),
+            checkpoint_size: Some(gres_units::bytes(20)),
             idle_seconds: Some(30),
             ranges: Some("0,100,200".to_string()),
             hash_placements: Vec::new(),
@@ -2052,7 +2052,7 @@ mod tests {
     #[test]
     fn split_boundary_requires_exact_hash_bucket_contract() {
         let mut record = test_record("tenant-a", TenantState::Active);
-        record.hash_placements = vec![crabka_gres_control::HashPlacement {
+        record.hash_placements = vec![gres_control::HashPlacement {
             table_id: 7,
             hash_columns: vec!["id".into()],
             bucket_count: 8,
@@ -2330,7 +2330,7 @@ mod tests {
                 .report
                 .operation_results
                 .iter()
-                .all(|result| result.status == crabka_gres_balancer::OperationStatus::Planned)
+                .all(|result| result.status == gres_balancer::OperationStatus::Planned)
         );
     }
 

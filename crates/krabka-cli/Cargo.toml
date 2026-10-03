@@ -27,12 +27,12 @@ workspace = true
 
 [dependencies]
 clap = { workspace = true, features = ["env"] }
-crabka-client-admin = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
-crabka-client-core = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
-crabka-gres-balancer = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
-crabka-gres-control = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
-crabka-security = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
-crabka-units = { git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
+gres-client-admin = { package = "krabka-client-admin", git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
+gres-client-core = { package = "krabka-client-core", git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
+gres-balancer = { package = "krabka-gres-balancer", git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
+gres-control = { package = "krabka-gres-control", git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
+gres-security = { package = "krabka-security", git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
+gres-units = { package = "krabka-units", git = "https://github.com/krabka-io/gres", rev = "b664acf3b9a4895bc8df154581adf9c56d7df119" }
 krabka-client-admin = { version = "0.5.0" }
 krabka-client-consumer = { version = "0.5.0" }
 krabka-client-core = { version = "0.5.0" }
