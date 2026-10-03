@@ -1786,6 +1786,28 @@ mod tests {
         format!("fixture-password-{}", std::process::id())
     }
 
+    #[tokio::test]
+    async fn tenant_kafka_provisioning_rejects_invalid_bootstrap_without_leaking_credentials() {
+        let tenant = TenantName::try_from("tenant-a").expect("tenant name");
+        let password = fixture_password();
+        for (bootstrap, expected_prefix) in [
+            (" , ", "bootstrap address list must not be empty"),
+            ("127.0.0.1:not-a-port", "tenant Kafka admin connect:"),
+        ] {
+            let error = provision_tenant_kafka_access(
+                bootstrap,
+                &tenant,
+                &password,
+                ScramIterations::new(4096).expect("SCRAM iterations"),
+                &RegistryPolicy::default(),
+            )
+            .await
+            .expect_err("invalid bootstrap must fail before provisioning");
+            assert!(error.starts_with(expected_prefix));
+            assert!(!error.contains(&password));
+        }
+    }
+
     const BALANCE_SNAPSHOT_ENABLED: &str = r#"{
         "config": {
             "goals": { "disabledGoals": [] },
