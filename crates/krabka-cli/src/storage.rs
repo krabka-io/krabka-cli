@@ -14,14 +14,12 @@
 //!
 //! # Divergences
 //!
-//! - `info` reads `meta.properties.json`, the JSON file that `krabka format`
-//!   writes, and not Kafka's Java `meta.properties`. It prints Kafka's report
-//!   layout with Kafka's key names, and it adds one `Found features:` line
-//!   with the feature levels that the bootstrap records finalize. The file has
-//!   no `node.id`, so `Found metadata:` has none either. A file whose format
-//!   stamp is not [`META_PROPERTIES_VERSION`], or whose ids are not Kafka
-//!   `Uuid`s, is a problem, because the broker and `krabka format` refuse it.
-//!   The broker takes its configuration from flags and the environment, so
+//! - `info` reads Kafka's `meta.properties`, which `krabka format` writes,
+//!   and prints Kafka's report layout. It adds one `Found features:` line with
+//!   the feature levels that the bootstrap records of the metadata log
+//!   directory finalize. A file that is
+//!   not version 1, or whose ids are not Kafka `Uuid`s, is a problem, because
+//!   the broker and `krabka format` refuse it. The broker takes its configuration from flags and the environment, so
 //!   `info` takes `--log-dir` as well as Kafka's `--config`, and it reads
 //!   `log.dirs`, `log.dir` and `metadata.log.dir` from a `--config` file as
 //!   `kafka-storage` does.
@@ -35,7 +33,9 @@ use std::{
 };
 
 use clap::{ArgGroup, Args, Subcommand};
-use krabka_format::META_PROPERTIES_VERSION;
+use krabka_format::{
+    ClusterId, DirectoryId, META_PROPERTIES, META_PROPERTIES_VERSION, MetaProperties,
+};
 use krabka_ids::KafkaUuid;
 use krabka_metadata::{
     MetadataRecord, feature_registry, from_kafka_record, metadata_version::KRAFT_VERSION_FEATURE,
@@ -49,9 +49,6 @@ use crate::{
     output::{CommandError, CommandResult},
 };
 
-/// The file that `krabka format` writes last, so its presence marks a
-/// completed format.
-const META_PROPERTIES: &str = "meta.properties.json";
 /// The bootstrap records, as `u32` little-endian length-prefixed payloads.
 const BOOTSTRAP_RECORDS: &str = "bootstrap.records.bin";
 /// Kafka's `log.dir` default, which applies when a `--config` file sets
@@ -69,7 +66,7 @@ enum StorageCommand {
     /// Get information about the log directories on this node.
     Info(InfoArgs),
     /// Format the log directories on this node.
-    Format(krabka_format::FormatArgs),
+    Format(Box<krabka_format::FormatArgs>),
     /// Look up the corresponding features for a given metadata version. With
     /// no --release-version, print the mapping of the latest metadata version.
     VersionMapping(VersionMappingArgs),
@@ -100,7 +97,7 @@ impl StorageArgs {
     /// Returns `self` when the subcommand is not `format`.
     pub fn into_format(self) -> Result<krabka_format::FormatArgs, Box<Self>> {
         match self.command {
-            StorageCommand::Format(args) => Ok(args),
+            StorageCommand::Format(args) => Ok(*args),
             command => Err(Box::new(Self { command })),
         }
     }
@@ -179,13 +176,17 @@ fn random_uuid(id: KafkaUuid) -> CommandResult {
 /// The identity and the bootstrap feature levels of a formatted directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Formatted {
-    cluster_id: KafkaUuid,
-    directory_id: KafkaUuid,
-    version: u64,
+    cluster_id: ClusterId,
+    node_id: i32,
+    /// Absent from a file that Kafka wrote before KIP-858, which Kafka still
+    /// reads.
+    directory_id: Option<DirectoryId>,
     /// Every registered feature except `kraft.version`, at the level that the
     /// bootstrap records finalize. A feature that has no record is at level
-    /// 0, as Kafka treats an absent feature.
-    features: BTreeMap<String, i16>,
+    /// 0, as Kafka treats an absent feature. `None` for a directory without
+    /// bootstrap records: `krabka format` writes them only into the metadata
+    /// log directory.
+    features: Option<BTreeMap<String, i16>>,
 }
 
 fn inspect(path: &Path) -> LogDir {
@@ -204,46 +205,26 @@ fn inspect(path: &Path) -> LogDir {
 }
 
 fn read_formatted(path: &Path) -> Result<LogDir, String> {
-    let meta = path.join(META_PROPERTIES);
     let loading = |file: &Path, error: &dyn std::fmt::Display| {
         format!("Error loading {}: {error}", file.display())
     };
-    let bytes = std::fs::read(&meta).map_err(|error| loading(&meta, &error))?;
-    let properties: Value =
-        serde_json::from_slice(&bytes).map_err(|error| loading(&meta, &error))?;
-    let version = properties
-        .get("version")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| loading(&meta, &"version is not set"))?;
-    if version != META_PROPERTIES_VERSION {
-        return Err(loading(
-            &meta,
-            &format!(
-                "unsupported meta.properties version {version}; this build writes version \
-                 {META_PROPERTIES_VERSION}"
-            ),
-        ));
-    }
-    let id = |key: &str| {
-        let value = properties
-            .get(key)
-            .and_then(Value::as_str)
-            .ok_or_else(|| loading(&meta, &format!("{key} is not set")))?;
-        value
-            .parse::<KafkaUuid>()
-            .map_err(|error| loading(&meta, &error))
-    };
+    let meta = path.join(META_PROPERTIES);
+    let properties = MetaProperties::read(path)
+        .map_err(|error| loading(&meta, &error))?
+        .ok_or_else(|| loading(&meta, &"file not found"))?;
     let records_path = path.join(BOOTSTRAP_RECORDS);
-    let records = match std::fs::read(&records_path) {
-        Ok(bytes) => decode_records(&bytes).map_err(|error| loading(&records_path, &error))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+    let features = match std::fs::read(&records_path) {
+        Ok(bytes) => Some(feature_levels(
+            &decode_records(&bytes).map_err(|error| loading(&records_path, &error))?,
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(loading(&records_path, &error)),
     };
     Ok(LogDir::Formatted(Formatted {
-        cluster_id: id("cluster_id")?,
-        directory_id: id("directory_id")?,
-        version,
-        features: feature_levels(&records),
+        cluster_id: properties.cluster_id,
+        node_id: properties.node_id,
+        directory_id: properties.directory_id,
+        features,
     }))
 }
 
@@ -341,26 +322,35 @@ fn info(directories: &[PathBuf]) -> CommandResult {
         human.push(String::new());
     }
     if let Some(first) = first {
+        // Kafka prints `MetaProperties.toProperties` through a `TreeMap`,
+        // so the keys are in their natural order.
         human.push(format!(
             "Found metadata: {}",
             braces(
                 [
-                    format!("cluster.id={}", first.cluster_id),
-                    format!("directory.id={}", first.directory_id),
-                    format!("version={}", first.version),
+                    Some(format!("cluster.id={}", first.cluster_id)),
+                    first.directory_id.map(|id| format!("directory.id={id}")),
+                    Some(format!("node.id={}", first.node_id)),
+                    Some(format!("version={META_PROPERTIES_VERSION}")),
                 ]
                 .into_iter()
+                .flatten()
             )
         ));
-        human.push(format!(
-            "Found features: {}",
-            braces(
-                first
-                    .features
-                    .iter()
-                    .map(|(name, level)| format!("{name}={level}"))
-            )
-        ));
+        let features = inspected.iter().find_map(|(_, directory)| match directory {
+            LogDir::Formatted(formatted) => formatted.features.as_ref(),
+            _ => None,
+        });
+        if let Some(features) = features {
+            human.push(format!(
+                "Found features: {}",
+                braces(
+                    features
+                        .iter()
+                        .map(|(name, level)| format!("{name}={level}"))
+                )
+            ));
+        }
         human.push(String::new());
     }
     if !problems.is_empty() {
@@ -390,9 +380,10 @@ fn directory_json(path: &Path, directory: &LogDir) -> Value {
         LogDir::Formatted(formatted) => json!({
             "path": path,
             "status": "formatted",
-            "cluster_id": formatted.cluster_id,
-            "directory_id": formatted.directory_id,
-            "version": formatted.version,
+            "cluster_id": formatted.cluster_id.to_string(),
+            "node_id": formatted.node_id,
+            "directory_id": formatted.directory_id.map(|id| id.to_string()),
+            "version": META_PROPERTIES_VERSION,
             "features": formatted.features,
         }),
     }

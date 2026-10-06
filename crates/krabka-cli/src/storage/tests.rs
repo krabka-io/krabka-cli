@@ -82,21 +82,27 @@ const DIR_A: &str = "xK42y6AyRZqoNte2CoM0Jw";
 const DIR_B: &str = "A5GA8TV7RYGs6-glHuyBWw";
 const DIR_C: &str = "AQIDBAUGBwgJCgsMDQ4PEA";
 
-fn write_meta(dir: &Path, meta: &Value) {
+fn write_meta(dir: &Path, meta: &str) {
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join(META_PROPERTIES), serde_json::to_vec(meta).unwrap()).unwrap();
+    std::fs::write(dir.join(META_PROPERTIES), meta).unwrap();
 }
 
 fn formatted(dir: &Path, cluster_id: &str, directory_id: &str, records: &[MetadataRecord]) {
     write_meta(
         dir,
-        &json!({
-            "cluster_id": cluster_id,
-            "directory_id": directory_id,
-            "version": META_PROPERTIES_VERSION,
-        }),
+        &format!(
+            "#\n#Thu Feb 29 12:34:56 UTC 2024\ncluster.id={cluster_id}\n\
+             directory.id={directory_id}\nnode.id=1\nversion=1\n"
+        ),
     );
     std::fs::write(dir.join(BOOTSTRAP_RECORDS), encode(records)).unwrap();
+}
+
+/// A data directory: `krabka format` writes the bootstrap records only into
+/// the metadata log directory.
+fn data_dir(dir: &Path, cluster_id: &str, directory_id: &str) {
+    formatted(dir, cluster_id, directory_id, &[]);
+    std::fs::remove_file(dir.join(BOOTSTRAP_RECORDS)).unwrap();
 }
 
 fn features_line(records: &[MetadataRecord]) -> String {
@@ -122,12 +128,15 @@ fn info_reports_each_directory_as_kafka_storage_does() {
     formatted(&a, CLUSTER_1, DIR_A, &records);
     formatted(&b, CLUSTER_1, DIR_B, &records);
     formatted(&c, CLUSTER_2, DIR_C, &records);
+    let data = root.path().join("data");
+    data_dir(&data, CLUSTER_1, DIR_B);
     std::fs::write(&file, b"x").unwrap();
     let unformatted = root.path().join("unformatted");
     std::fs::create_dir(&unformatted).unwrap();
     let show = |path: &Path| path.display().to_string();
-    let metadata_line =
-        format!("Found metadata: {{cluster.id={CLUSTER_1}, directory.id={DIR_A}, version=3}}");
+    let metadata_line = format!(
+        "Found metadata: {{cluster.id={CLUSTER_1}, directory.id={DIR_A}, node.id=1, version=1}}"
+    );
 
     let cases: Vec<(Vec<PathBuf>, Vec<String>, bool)> = vec![
         (
@@ -150,6 +159,36 @@ fn info_reports_each_directory_as_kafka_storage_does() {
                 format!("  {}", show(&b)),
                 String::new(),
                 metadata_line.clone(),
+                features_line(&records),
+                String::new(),
+            ],
+            false,
+        ),
+        (
+            vec![data.clone()],
+            vec![
+                "Found log directory:".into(),
+                format!("  {}", show(&data)),
+                String::new(),
+                format!(
+                    "Found metadata: {{cluster.id={CLUSTER_1}, directory.id={DIR_B}, node.id=1, \
+                     version=1}}"
+                ),
+                String::new(),
+            ],
+            false,
+        ),
+        (
+            vec![data.clone(), a.clone()],
+            vec![
+                "Found log directories:".into(),
+                format!("  {}", show(&data)),
+                format!("  {}", show(&a)),
+                String::new(),
+                format!(
+                    "Found metadata: {{cluster.id={CLUSTER_1}, directory.id={DIR_B}, node.id=1, \
+                     version=1}}"
+                ),
                 features_line(&records),
                 String::new(),
             ],
@@ -206,10 +245,12 @@ fn info_json_reports_each_directory_status() {
     formatted(&a, CLUSTER_1, DIR_A, &records);
     std::fs::create_dir(&unformatted).unwrap();
     std::fs::create_dir(&broken).unwrap();
-    std::fs::write(broken.join(META_PROPERTIES), b"{").unwrap();
+    std::fs::write(broken.join(META_PROPERTIES), b"version=x\n").unwrap();
     let broken_meta = broken.join(META_PROPERTIES);
-    let parse_error = serde_json::from_slice::<Value>(b"{").unwrap_err();
-    let broken_message = format!("Error loading {}: {parse_error}", broken_meta.display());
+    let broken_message = format!(
+        "Error loading {}: Invalid meta.properties version string 'x'",
+        broken_meta.display()
+    );
 
     let result = info(&[a.clone(), broken.clone(), unformatted.clone()]);
     assert!(
@@ -220,6 +261,7 @@ fn info_json_reports_each_directory_status() {
                         "path": a.display().to_string(),
                         "status": "formatted",
                         "cluster_id": CLUSTER_1,
+                        "node_id": 1,
                         "directory_id": DIR_A,
                         "version": META_PROPERTIES_VERSION,
                         "features": feature_levels(&records),
@@ -240,30 +282,27 @@ fn a_meta_properties_file_that_krabka_refuses_is_a_problem() {
     let root = tempfile::tempdir().unwrap();
     let cases = [
         (
-            json!({"cluster_id": CLUSTER_1, "directory_id": DIR_A, "version": 2}),
+            format!("cluster.id={CLUSTER_1}\nnode.id=1\nversion=2\n"),
+            "Unknown meta.properties version number 2".to_owned(),
+        ),
+        (
+            format!("cluster.id={CLUSTER_1}\nnode.id=1\n"),
+            "Unsupported meta.properties version 0: krabka reads version 1, which a KRaft node \
+             writes"
+                .to_owned(),
+        ),
+        (
+            "node.id=1\nversion=1\n".to_owned(),
+            "cluster.id was not found.".to_owned(),
+        ),
+        (
+            "cluster.id=5f3a1e3c-0d7b-4b53-9a4e-3a2d9a6f7b10\nnode.id=1\nversion=1\n".to_owned(),
             format!(
-                "unsupported meta.properties version 2; this build writes version \
-                 {META_PROPERTIES_VERSION}"
+                "Unable to read cluster.id as a Uuid: {}",
+                "5f3a1e3c-0d7b-4b53-9a4e-3a2d9a6f7b10"
+                    .parse::<ClusterId>()
+                    .unwrap_err()
             ),
-        ),
-        (
-            json!({"cluster_id": CLUSTER_1, "directory_id": DIR_A}),
-            "version is not set".to_owned(),
-        ),
-        (
-            json!({"directory_id": DIR_A, "version": META_PROPERTIES_VERSION}),
-            "cluster_id is not set".to_owned(),
-        ),
-        (
-            json!({
-                "cluster_id": "5f3a1e3c-0d7b-4b53-9a4e-3a2d9a6f7b10",
-                "directory_id": DIR_A,
-                "version": META_PROPERTIES_VERSION,
-            }),
-            "5f3a1e3c-0d7b-4b53-9a4e-3a2d9a6f7b10"
-                .parse::<KafkaUuid>()
-                .unwrap_err()
-                .to_string(),
         ),
     ];
     for (index, (meta, reason)) in cases.into_iter().enumerate() {
@@ -273,7 +312,7 @@ fn a_meta_properties_file_that_krabka_refuses_is_a_problem() {
             "Error loading {}: {reason}",
             dir.join(META_PROPERTIES).display()
         );
-        check!(inspect(&dir) == LogDir::Unreadable(message), "{meta}");
+        check!(inspect(&dir) == LogDir::Unreadable(message), "{meta:?}");
     }
 }
 

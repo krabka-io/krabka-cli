@@ -213,13 +213,19 @@ fn a_plugin_on_path_does_not_shadow_a_built_in() {
     );
     let out = krabka(
         dir.path(),
-        &["format", "--log-dir", log_dir.path().to_str().unwrap()],
+        &[
+            "format",
+            "--log-dir",
+            log_dir.path().to_str().unwrap(),
+            "--node-id",
+            "1",
+        ],
     )
     .output()
     .unwrap();
     check!(out.status.code() == Some(0));
     check!(!String::from_utf8_lossy(&out.stdout).contains("shadowed"));
-    check!(log_dir.path().join("meta.properties.json").is_file());
+    check!(log_dir.path().join("meta.properties").is_file());
 }
 
 #[test]

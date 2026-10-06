@@ -14,12 +14,16 @@
 //! `krabka-format` defect, which then fails as stale once it is fixed.
 //!
 //! The resolved state of a row is what the directories hold afterwards: the
-//! cluster id and every finalized feature level above zero, per directory.
-//! The harness reads it from the files itself. For `kafka-storage format` it
-//! reads `meta.properties`, and the bootstrap checkpoint through
-//! `kafka-dump-log`; for `krabka format` it reads `meta.properties.json` and
-//! decodes `bootstrap.records.bin`. Neither side is read from the output of
-//! the command under test.
+//! cluster id of every directory, and every finalized feature level above
+//! zero in the metadata log directory, the only one whose bootstrap records a
+//! node reads. The harness reads it from the files itself. Both tools write
+//! `meta.properties`. For `kafka-storage format` it reads the bootstrap
+//! checkpoint through `kafka-dump-log`; for `krabka format` it decodes
+//! `bootstrap.records.bin`. Neither side is read from the output of the
+//! command under test.
+//!
+//! `krabka format` takes the node id as `--node-id`, and the harness passes
+//! the `node.id` of the `server.properties` it writes for `kafka-storage`.
 
 use std::{collections::BTreeMap, fmt::Write as _, path::Path};
 
@@ -45,16 +49,19 @@ pub const DIVERGENCES: &[(&str, Difference)] = &[
     ("Reserved cluster ids", Difference::intended(&[], "Matches")),
     ("`--cluster-id` required", Difference::intended(OUTCOME_AND_STATE, "a single-node format is one command; without --cluster-id krabka keeps the id of a formatted directory or generates one")),
     ("Directory ids", Difference::intended(&[], "Matches")),
+    ("Node id", Difference::intended(&[], "Matches the range and the file; the flag follows from --config")),
     ("`--directory-id`", Difference::intended(OUTCOME_AND_STATE, "sets the metadata log directory's id, which an orchestrator has to know before the format runs; kafka-storage has no such flag")),
     ("`--config`", Difference::intended(OUTCOME, "krabka's broker does not read server.properties, so the formatter takes no --config")),
     ("`unstable.feature.versions.enable`", Difference::intended(OUTCOME, "follows from --config: krabka takes it as --unstable-feature-versions-enable")),
     ("Log directories", Difference::intended(OUTCOME, "follows from --config: krabka takes the directories as --log-dir")),
+    ("Metadata log directory with an unreadable `meta.properties`", Difference::intended(OUTCOME_AND_STATE, "a node without a readable metadata log directory cannot start, so krabka refuses before it writes the other directories")),
     ("Directory with foreign files and no `meta.properties`", Difference::intended(OUTCOME_AND_STATE, "krabka refuses with exit 3, so that a mistyped path does not seed a directory full of another program's data")),
     ("Already formatted, no `--ignore-formatted`", Difference::intended(&[Layer::Exit], "Matches, except for the exit code")),
     ("`--ignore-formatted` over a mixed set", Difference::intended(&[Layer::Stdout], "Matches, and krabka prints a line on stdout for each skipped directory")),
     ("Cluster id disagrees with a formatted directory", Difference::intended(&[Layer::Exit], "Matches the message; Kafka prints a stack trace because it does not catch the exception")),
-    ("`meta.properties` file", Difference::intended(&[Layer::Stderr], "krabka writes JSON meta.properties.json, so a message that names the file names that one")),
-    ("Bootstrap metadata", Difference::intended(&[], "different files for the same records; the resolved state reads the records from each")),
+    ("Node id disagrees with a formatted directory", Difference::intended(&[Layer::Exit], "Matches the message")),
+    ("`meta.properties` file", Difference::intended(&[], "Matches the bytes, except for the time zone of the date")),
+    ("Bootstrap metadata", Difference::intended(&[], "different files for the same records, in the metadata log directory as in Kafka trunk; the resolved state reads the records of that directory from each")),
     ("Dynamic quorum snapshot", Difference::intended(&[], "krabka's metadata log directory layout; the snapshot holds the same records")),
     ("Write order", Difference::intended(&[], "Matches the marker-last order")),
     ("Progress output", Difference::intended(&[Layer::Stdout], "the directory lines match; Kafka's Bootstrap metadata line prints Java toString output, and krabka adds a summary line")),
@@ -237,15 +244,27 @@ fn record_levels(mut bytes: &[u8]) -> Vec<(String, i16)> {
     found
 }
 
-/// What one directory holds, as `kafka-storage format` left it.
-fn read_jvm_dir(oracle: &Oracle, dir: &Path) -> String {
-    let Ok(meta) = std::fs::read_to_string(dir.join("meta.properties")) else {
+/// The `cluster.id` of the `meta.properties` in `dir`, which both tools
+/// write, or `None` for an unformatted directory.
+fn cluster_id(dir: &Path) -> Option<String> {
+    let meta = std::fs::read_to_string(dir.join("meta.properties")).ok()?;
+    Some(
+        meta.lines()
+            .find_map(|line| line.strip_prefix("cluster.id="))
+            .unwrap_or_default()
+            .to_owned(),
+    )
+}
+
+/// What one directory holds, as `kafka-storage format` left it. Only the
+/// metadata log directory's bootstrap records are read.
+fn read_jvm_dir(oracle: &Oracle, dir: &Path, metadata: bool) -> String {
+    let Some(cluster) = cluster_id(dir) else {
         return "unformatted\n".to_owned();
     };
-    let cluster = meta
-        .lines()
-        .find_map(|line| line.strip_prefix("cluster.id="))
-        .unwrap_or_default();
+    if !metadata {
+        return format!("cluster.id={cluster}\n");
+    }
     let checkpoint = dir.join("bootstrap.checkpoint").display().to_string();
     let dump = oracle.jvm(
         "kafka-dump-log.sh",
@@ -264,16 +283,15 @@ fn read_jvm_dir(oracle: &Oracle, dir: &Path) -> String {
     )
 }
 
-/// What one directory holds, as `krabka format` left it.
-fn read_krabka_dir(dir: &Path) -> String {
-    let Ok(meta) = std::fs::read(dir.join("meta.properties.json")) else {
+/// What one directory holds, as `krabka format` left it. Only the metadata
+/// log directory's bootstrap records are read.
+fn read_krabka_dir(dir: &Path, metadata: bool) -> String {
+    let Some(cluster) = cluster_id(dir) else {
         return "unformatted\n".to_owned();
     };
-    let meta: serde_json::Value = serde_json::from_slice(&meta).expect("meta.properties.json");
-    let cluster = meta
-        .get("cluster_id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
+    if !metadata {
+        return format!("cluster.id={cluster}\n");
+    }
     let records = std::fs::read(dir.join("bootstrap.records.bin")).unwrap_or_default();
     format!("cluster.id={cluster}\n{}", levels(record_levels(&records)))
 }
@@ -344,7 +362,12 @@ fn run_row(
                 oracle.jvm("kafka-storage.sh", &argv, false, "")
             }
             Tool::Krabka => {
-                let mut argv = vec!["--log-dir".to_owned(), node.joined()];
+                let mut argv = vec![
+                    "--log-dir".to_owned(),
+                    node.joined(),
+                    "--node-id".to_owned(),
+                    "1".to_owned(),
+                ];
                 argv.extend(to_strings(args));
                 oracle.krabka(subcommand, &argv, false, &[], "")
             }
@@ -375,8 +398,8 @@ fn run_row(
             .enumerate()
             .fold(String::new(), |mut text, (at, dir)| {
                 let state = match tool {
-                    Tool::Jvm => read_jvm_dir(oracle, dir),
-                    Tool::Krabka => read_krabka_dir(dir),
+                    Tool::Jvm => read_jvm_dir(oracle, dir, at == 0),
+                    Tool::Krabka => read_krabka_dir(dir, at == 0),
                 };
                 let _ = write!(text, "[d{at}]\n{state}");
                 text
@@ -458,11 +481,18 @@ fn every_row_cites_the_divergence_table() {
             );
         }
     }
+    // Every row passes `--node-id`, so every row exercises `Node id`. The
+    // harness pins one node id and one readable metadata directory, so the
+    // two rows about a disagreeing node id and an unreadable
+    // `meta.properties` are left to krabka-broker's own format suite.
     let exercised = [
         "`--config`",
         "Write order",
         "Dynamic quorum snapshot",
         "`meta.properties` file",
+        "Node id",
+        "Metadata log directory with an unreadable `meta.properties`",
+        "Node id disagrees with a formatted directory",
     ];
     for (topic, _) in DIVERGENCES {
         check!(

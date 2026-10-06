@@ -8,9 +8,16 @@ use std::process::Command;
 
 use assert2::{assert, check};
 
+/// Runs `krabka format` on `dir`, as node 1 unless `args` names a node.
 fn run_format(dir: &tempfile::TempDir, args: &[&str]) -> std::process::Output {
+    let node = if args.contains(&"--node-id") {
+        &[][..]
+    } else {
+        &["--node-id", "1"][..]
+    };
     Command::new(env!("CARGO_BIN_EXE_krabka"))
         .args(["format", "--log-dir", dir.path().to_str().unwrap()])
+        .args(node)
         .args(args)
         .output()
         .expect("run krabka format")
@@ -22,7 +29,7 @@ fn format_writes_a_bootstrap_manifest_into_an_empty_directory() {
     let out = run_format(&dir, &[]);
     assert!(out.status.code() == Some(0));
     check!(dir.path().join("bootstrap.json").is_file());
-    check!(dir.path().join("meta.properties.json").is_file());
+    check!(dir.path().join("meta.properties").is_file());
 }
 
 #[test]

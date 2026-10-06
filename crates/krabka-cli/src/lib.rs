@@ -575,8 +575,16 @@ mod tests {
 
     #[test]
     fn storage_format_takes_the_formatter_flags() {
-        let cli = Cli::try_parse_from(["krabka", "storage", "format", "--log-dir", "/tmp/x"])
-            .expect("storage format parses");
+        let cli = Cli::try_parse_from([
+            "krabka",
+            "storage",
+            "format",
+            "--log-dir",
+            "/tmp/x",
+            "--node-id",
+            "1",
+        ])
+        .expect("storage format parses");
         let Command::Storage(args) = cli.command else {
             panic!("expected the storage arm");
         };
