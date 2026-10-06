@@ -27,12 +27,12 @@ workspace = true
 
 [dependencies]
 clap = { workspace = true, features = ["env"] }
-gres-client-admin = { package = "krabka-client-admin", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
-gres-client-core = { package = "krabka-client-core", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
-gres-balancer = { package = "krabka-gres-balancer", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
-gres-control = { package = "krabka-gres-control", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
-gres-security = { package = "krabka-security", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
-gres-units = { package = "krabka-units", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "5c0e1ab04f67de1d4d9d993d935e4eaa054284ed" }
+gres-client-admin = { package = "krabka-client-admin", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "d9827c521665d746e39fdf3334ae214502f24f71" }
+gres-client-core = { package = "krabka-client-core", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "d9827c521665d746e39fdf3334ae214502f24f71" }
+gres-balancer = { package = "krabka-gres-balancer", git = "https://github.com/krabka-io/gres", rev = "d9827c521665d746e39fdf3334ae214502f24f71" }
+gres-control = { package = "krabka-gres-control", git = "https://github.com/krabka-io/gres", rev = "d9827c521665d746e39fdf3334ae214502f24f71" }
+gres-security = { package = "krabka-security", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "d9827c521665d746e39fdf3334ae214502f24f71" }
+gres-units = { package = "krabka-units", version = "0.4.2", git = "https://github.com/krabka-io/gres", rev = "d9827c521665d746e39fdf3334ae214502f24f71" }
 krabka-client-admin = { version = "0.5.0" }
 krabka-client-consumer = { version = "0.5.0" }
 krabka-client-core = { version = "0.5.0" }

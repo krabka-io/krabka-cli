@@ -319,22 +319,13 @@ const CONTROLLER: &str = "node.id=3\nprocess.roles=controller\nmetadata.log.dir=
     controller.listener.names=CONTROLLER\nlisteners=CONTROLLER://:9093\n\
     advertised.listeners=CONTROLLER://controller-3:9093\n";
 
-fn meta(name: &'static str, text: &'static str) -> impl Fn(&Path) -> Option<(String, String)> {
-    move |directory| {
-        (directory == Path::new("/data/meta")).then(|| (name.to_owned(), text.to_owned()))
-    }
+fn meta(text: &'static str) -> impl Fn(&Path) -> Option<String> {
+    move |directory| (directory == Path::new("/data/meta")).then(|| text.to_owned())
 }
 
 #[test]
 fn add_controller_reads_the_controllers_identity_as_kafka_does() {
-    let kafka_meta = meta(
-        "meta.properties",
-        "version=1\nnode.id=3\ndirectory.id=AAAAAAAAAAAAAAAAAAAAAQ\n",
-    );
-    let krabka_meta = meta(
-        "meta.properties.json",
-        r#"{"cluster_id": "e4bea0dd-7b3a-4fe3-8c0a-d2be3ff5f3ab", "directory_id": "00000000-0000-0000-0000-000000000001", "version": 1}"#,
-    );
+    let kafka_meta = meta("version=1\nnode.id=3\ndirectory.id=AAAAAAAAAAAAAAAAAAAAAQ\n");
     let expected = NewController {
         id: 3,
         directory_id: KafkaUuid::ONE,
@@ -345,7 +336,6 @@ fn add_controller_reads_the_controllers_identity_as_kafka_does() {
         }],
     };
     check!(new_controller(&properties(CONTROLLER), &kafka_meta) == Ok(expected.clone()));
-    check!(new_controller(&properties(CONTROLLER), &krabka_meta) == Ok(expected.clone()));
     check!(
         added_line(&expected, true)
             == "DRY RUN of adding controller 3 with directory id AAAAAAAAAAAAAAAAAAAAAQ and \
@@ -355,7 +345,7 @@ fn add_controller_reads_the_controllers_identity_as_kafka_does() {
 
 #[test]
 fn add_controller_refuses_an_invalid_configuration_with_kafkas_messages() {
-    let good_meta = meta("meta.properties", "directory.id=AAAAAAAAAAAAAAAAAAAAAQ\n");
+    let good_meta = meta("directory.id=AAAAAAAAAAAAAAAAAAAAAQ\n");
     let cases = [
         (
             CONTROLLER.replace("node.id=3\n", ""),
@@ -407,7 +397,7 @@ fn add_controller_refuses_an_invalid_configuration_with_kafkas_messages() {
             "{config}"
         );
     }
-    let no_id = meta("meta.properties", "version=1\n");
+    let no_id = meta("version=1\n");
     check!(
         new_controller(&properties(CONTROLLER), &no_id)
             == Err("No directory id found in /data/meta".into())

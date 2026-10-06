@@ -3,6 +3,7 @@
 use std::{path::Path, process::Command};
 
 use assert2::{assert, check};
+use krabka_format::{META_PROPERTIES_VERSION, MetaProperties};
 use krabka_metadata::{
     feature_registry,
     metadata_version::{
@@ -239,17 +240,19 @@ fn random_uuid_prints_a_kafka_uuid_that_format_accepts_as_the_cluster_id() {
     let format = krabka(&[
         "storage",
         "format",
+        "--node-id",
+        "1",
         "--log-dir",
         dir.to_str().unwrap(),
         "--cluster-id",
         id,
     ]);
     assert!(format.code == Some(0), "{}", format.stderr);
-    check!(meta_properties(&dir)["cluster_id"] == json!(id));
+    check!(meta_properties(&dir).cluster_id.to_string() == id);
 }
 
-fn meta_properties(dir: &Path) -> Value {
-    serde_json::from_slice(&std::fs::read(dir.join("meta.properties.json")).unwrap()).unwrap()
+fn meta_properties(dir: &Path) -> MetaProperties {
+    MetaProperties::read(dir).unwrap().unwrap()
 }
 
 #[test]
@@ -263,6 +266,8 @@ fn info_reads_back_a_directory_that_storage_format_wrote() {
     let format = krabka(&[
         "storage",
         "format",
+        "--node-id",
+        "1",
         "--log-dir",
         formatted.to_str().unwrap(),
         "--cluster-id",
@@ -305,8 +310,9 @@ fn info_reads_back_a_directory_that_storage_format_wrote() {
                         "path": formatted.display().to_string(),
                         "status": "formatted",
                         "cluster_id": cluster_id,
-                        "directory_id": meta["directory_id"],
-                        "version": meta["version"],
+                        "node_id": meta.node_id,
+                        "directory_id": meta.directory_id.unwrap().to_string(),
+                        "version": META_PROPERTIES_VERSION,
                         "features": features,
                     },
                     {"path": unformatted.display().to_string(), "status": "unformatted"},
@@ -320,7 +326,14 @@ fn info_reads_back_a_directory_that_storage_format_wrote() {
 fn info_reads_the_directories_of_a_kafka_config_file() {
     let root = tempfile::tempdir().unwrap();
     let a = root.path().join("a");
-    let format = krabka(&["storage", "format", "--log-dir", a.to_str().unwrap()]);
+    let format = krabka(&[
+        "storage",
+        "format",
+        "--node-id",
+        "1",
+        "--log-dir",
+        a.to_str().unwrap(),
+    ]);
     assert!(format.code == Some(0), "{}", format.stderr);
     let config = root.path().join("server.properties");
     std::fs::write(&config, format!("log.dirs={}\n", a.display())).unwrap();
@@ -333,10 +346,11 @@ fn info_reads_the_directories_of_a_kafka_config_file() {
     check!(
         lines[3]
             == format!(
-                "Found metadata: {{cluster.id={}, directory.id={}, version={}}}",
-                meta["cluster_id"].as_str().unwrap(),
-                meta["directory_id"].as_str().unwrap(),
-                meta["version"]
+                "Found metadata: {{cluster.id={}, directory.id={}, node.id={}, version={}}}",
+                meta.cluster_id,
+                meta.directory_id.unwrap(),
+                meta.node_id,
+                META_PROPERTIES_VERSION,
             )
     );
     check!(lines[4].starts_with("Found features: {"));
@@ -349,6 +363,8 @@ fn storage_format_exit_codes_reach_the_process_unchanged() {
     let run = krabka(&[
         "storage",
         "format",
+        "--node-id",
+        "1",
         "--log-dir",
         dir.path().to_str().unwrap(),
     ]);
@@ -398,6 +414,8 @@ fn info_prints_kafka_storage_s_report_for_every_directory_that_one_format_wrote(
     let format = krabka(&[
         "storage",
         "format",
+        "--node-id",
+        "1",
         "--log-dir",
         a.to_str().unwrap(),
         "--log-dir",
@@ -409,9 +427,13 @@ fn info_prints_kafka_storage_s_report_for_every_directory_that_one_format_wrote(
     ]);
     assert!(format.code == Some(0), "{}", format.stderr);
     let (meta_a, meta_b) = (meta_properties(&a), meta_properties(&b));
-    check!(meta_a["cluster_id"] == meta_b["cluster_id"]);
-    check!(meta_a["directory_id"] != meta_b["directory_id"]);
-    check!(meta_a["version"] == json!(krabka_format::META_PROPERTIES_VERSION));
+    check!(meta_a.cluster_id == meta_b.cluster_id);
+    check!(meta_a.node_id == meta_b.node_id);
+    check!(meta_a.directory_id != meta_b.directory_id);
+    // Only the metadata log directory, the first `--log-dir`, holds the
+    // bootstrap records.
+    check!(a.join("bootstrap.records.bin").is_file());
+    check!(!b.join("bootstrap.records.bin").exists());
 
     // A repeated `--log-dir` and a comma-separated one name the same set.
     let repeated = krabka(&[
@@ -446,12 +468,13 @@ fn info_prints_kafka_storage_s_report_for_every_directory_that_one_format_wrote(
         .join(", ");
     let expected = format!(
         "Found log directories:\n  {}\n  {}\n\n\
-         Found metadata: {{cluster.id={cluster_id}, directory.id={}, version={}}}\n\
+         Found metadata: {{cluster.id={cluster_id}, directory.id={}, node.id={}, version={}}}\n\
          Found features: {{{features}}}\n\n",
         a.display(),
         b.display(),
-        meta_a["directory_id"].as_str().unwrap(),
-        krabka_format::META_PROPERTIES_VERSION,
+        meta_a.directory_id.unwrap(),
+        meta_a.node_id,
+        META_PROPERTIES_VERSION,
     );
     for run in [repeated, listed] {
         check!((run.code, run.stdout, run.stderr) == (Some(0), expected.clone(), String::new()));

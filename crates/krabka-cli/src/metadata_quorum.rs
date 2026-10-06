@@ -492,20 +492,12 @@ fn added_line(controller: &NewController, dry_run: bool) -> String {
     )
 }
 
-/// The contents of the metadata directory's identity file, by file name.
-type MetaReader<'a> = dyn Fn(&Path) -> Option<(String, String)> + 'a;
+/// The contents of the metadata directory's `meta.properties`.
+type MetaReader<'a> = dyn Fn(&Path) -> Option<String> + 'a;
 
-/// Reads `meta.properties`, which Kafka writes, or else
-/// `meta.properties.json`, which `krabka format` writes. Returns the file
-/// name and its contents.
-fn read_meta_properties(directory: &Path) -> Option<(String, String)> {
-    ["meta.properties", "meta.properties.json"]
-        .into_iter()
-        .find_map(|name| {
-            std::fs::read_to_string(directory.join(name))
-                .ok()
-                .map(|text| (name.to_owned(), text))
-        })
+/// Reads `meta.properties`, which Kafka and `krabka format` both write.
+fn read_meta_properties(directory: &Path) -> Option<String> {
+    std::fs::read_to_string(directory.join("meta.properties")).ok()
 }
 
 /// `MetadataQuorumCommand.handleAddController` up to the request: the node ID,
@@ -570,25 +562,13 @@ fn metadata_directory(properties: &Properties) -> Result<String, String> {
 }
 
 fn metadata_directory_id(directory: &str, read_meta: &MetaReader<'_>) -> Result<KafkaUuid, String> {
-    let Some((name, text)) = read_meta(Path::new(directory)) else {
+    let Some(text) = read_meta(Path::new(directory)) else {
         return Err(format!("Unable to read meta.properties from {directory}"));
     };
-    let missing = || format!("No directory id found in {directory}");
-    if Path::new(&name)
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
-    {
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| format!("Unable to read meta.properties from {directory}"))?;
-        let id = value
-            .get("directory_id")
-            .and_then(Value::as_str)
-            .ok_or_else(missing)?;
-        return KafkaUuid::parse_kafka_or_hyphenated(id)
-            .map_err(|error| format!("Unable to read directory_id as a Uuid: {error}"));
-    }
     let properties = Properties::parse(text.as_bytes()).map_err(|error| error.to_string())?;
-    let id = properties.get("directory.id").ok_or_else(missing)?;
+    let id = properties
+        .get("directory.id")
+        .ok_or_else(|| format!("No directory id found in {directory}"))?;
     id.parse::<KafkaUuid>()
         .map_err(|error| format!("Unable to read directory.id as a Uuid: {error}"))
 }
