@@ -133,6 +133,14 @@ fn info_reports_each_directory_as_kafka_storage_does() {
     std::fs::write(&file, b"x").unwrap();
     let unformatted = root.path().join("unformatted");
     std::fs::create_dir(&unformatted).unwrap();
+    let other_node = root.path().join("other-node");
+    write_meta(
+        &other_node,
+        &format!(
+            "#\n#Thu Feb 29 12:34:56 UTC 2024\ncluster.id={CLUSTER_1}\n\
+             directory.id={DIR_C}\nnode.id=2\nversion=1\n"
+        ),
+    );
     let show = |path: &Path| path.display().to_string();
     let metadata_line = format!(
         "Found metadata: {{cluster.id={CLUSTER_1}, directory.id={DIR_A}, node.id=1, version=1}}"
@@ -220,6 +228,22 @@ fn info_reports_each_directory_as_kafka_storage_does() {
                 "  Mismatched cluster IDs between storage directories.".into(),
                 format!("  {} is not a directory", show(&file)),
                 format!("  {} does not exist", show(&missing)),
+                String::new(),
+            ],
+            true,
+        ),
+        (
+            vec![a.clone(), other_node.clone()],
+            vec![
+                "Found log directories:".into(),
+                format!("  {}", show(&a)),
+                format!("  {}", show(&other_node)),
+                String::new(),
+                metadata_line.clone(),
+                features_line(&records),
+                String::new(),
+                "Found problem:".into(),
+                "  Mismatched node IDs between storage directories.".into(),
                 String::new(),
             ],
             true,
