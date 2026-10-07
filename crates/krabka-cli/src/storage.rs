@@ -301,6 +301,9 @@ fn info(directories: &[PathBuf]) -> CommandResult {
                 Some(first) if first.cluster_id != formatted.cluster_id => {
                     problems.push("Mismatched cluster IDs between storage directories.".to_owned());
                 }
+                Some(first) if first.node_id != formatted.node_id => {
+                    problems.push("Mismatched node IDs between storage directories.".to_owned());
+                }
                 Some(_) => {}
             },
         }
