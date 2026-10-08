@@ -31,27 +31,17 @@ fn krabka(args: &[&str]) -> Run {
     }
 }
 
+/// The features that Kafka 4.3.1 knows, in its order. krabka-only features
+/// such as `krabka.version` are not printed.
 fn production_features() -> Vec<&'static str> {
-    let order = [
+    vec![
         "kraft.version",
         "transaction.version",
         "group.version",
         "eligible.leader.replicas.version",
         "share.version",
         "streams.version",
-    ];
-    let mut names = feature_registry()
-        .iter()
-        .map(|feature| feature.name())
-        .filter(|name| *name != METADATA_VERSION_FEATURE)
-        .collect::<Vec<_>>();
-    names.sort_by_key(|name| {
-        order
-            .iter()
-            .position(|known| known == name)
-            .unwrap_or(usize::MAX)
-    });
-    names
+    ]
 }
 
 /// Kafka 4.3.1's `MetadataVersion.latestTesting()`, `4.4-IV0`: the last
