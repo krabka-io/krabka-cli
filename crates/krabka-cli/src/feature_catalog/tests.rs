@@ -54,24 +54,13 @@ fn an_unknown_release_lists_every_version_kafka_4_3_1_knows() {
 }
 
 #[test]
-fn production_features_follow_kafka_order_and_omit_metadata_version() {
+fn production_features_are_kafkas_in_kafka_order() {
     let names = production_features()
         .iter()
         .map(|feature| feature.name())
         .collect::<Vec<_>>();
-    let mut registered = feature_registry()
-        .iter()
-        .map(|feature| feature.name())
-        .filter(|name| *name != METADATA_VERSION_FEATURE)
-        .collect::<Vec<_>>();
-    registered.sort_by_key(|name| kafka_rank(name));
-    assert!(names == registered);
-    check!(
-        names
-            .windows(2)
-            .all(|pair| kafka_rank(pair[0]) <= kafka_rank(pair[1]))
-    );
-    check!(names.first() == Some(&"kraft.version"));
+    assert!(names == KAFKA_FEATURE_ORDER);
+    check!(feature("krabka.version").is_some());
 }
 
 /// The stdout of `kafka-features version-mapping` in the apache/kafka:4.3.1
