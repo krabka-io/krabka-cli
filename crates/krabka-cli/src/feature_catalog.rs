@@ -110,13 +110,15 @@ impl FeatureDependenciesArgs {
     }
 }
 
-/// Every registered feature except `metadata.version`, in Kafka's order.
+/// Every registered feature that Kafka 4.3.1 knows, except
+/// `metadata.version`, in Kafka's order. krabka-only features such as
+/// `krabka.version` are left out.
 #[must_use]
 pub fn production_features() -> Vec<&'static dyn Feature> {
     let mut features = feature_registry()
         .iter()
         .copied()
-        .filter(|feature| feature.name() != METADATA_VERSION_FEATURE)
+        .filter(|feature| KAFKA_FEATURE_ORDER.contains(&feature.name()))
         .collect::<Vec<_>>();
     features.sort_by_key(|feature| kafka_rank(feature.name()));
     features
