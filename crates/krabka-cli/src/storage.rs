@@ -49,7 +49,7 @@ use crate::{
     output::{CommandError, CommandResult},
 };
 
-/// The bootstrap records, as `u32` little-endian length-prefixed payloads.
+/// Versioned bootstrap records, followed by `u32` little-endian length-prefixed payloads.
 const BOOTSTRAP_RECORDS: &str = "bootstrap.records.bin";
 /// Kafka's `log.dir` default, which applies when a `--config` file sets
 /// neither `log.dirs` nor `log.dir`.
@@ -229,7 +229,14 @@ fn read_formatted(path: &Path) -> Result<LogDir, String> {
 }
 
 /// Splits `bootstrap.records.bin` into its records.
-fn decode_records(mut bytes: &[u8]) -> Result<Vec<MetadataRecord>, String> {
+fn decode_records(bytes: &[u8]) -> Result<Vec<MetadataRecord>, String> {
+    let (version, mut bytes) = bytes
+        .split_first_chunk::<2>()
+        .ok_or("missing bootstrap records version")?;
+    let version = i16::from_be_bytes(*version);
+    if version != 0 {
+        return Err(format!("unsupported bootstrap records version {version}"));
+    }
     let mut records = Vec::new();
     while !bytes.is_empty() {
         let (prefix, rest) = bytes

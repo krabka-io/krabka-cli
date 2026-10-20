@@ -226,9 +226,10 @@ fn dumped_levels(dump: &str) -> Vec<(String, i16)> {
         .collect()
 }
 
-/// The feature levels of `bootstrap.records.bin`: `u32` little-endian
-/// length-prefixed record values.
-fn record_levels(mut bytes: &[u8]) -> Vec<(String, i16)> {
+/// The feature levels of the 1.x versioned, length-prefixed bootstrap stream.
+fn record_levels(bytes: &[u8]) -> Vec<(String, i16)> {
+    let (version, mut bytes) = bytes.split_first_chunk::<2>().expect("bootstrap version");
+    assert_eq!(i16::from_be_bytes(*version), 0, "1.x bootstrap framing");
     let mut found = Vec::new();
     while let Some((prefix, rest)) = bytes.split_first_chunk::<4>() {
         let length = usize::try_from(u32::from_le_bytes(*prefix)).expect("a record length");
@@ -570,6 +571,7 @@ fn both_readers_resolve_the_same_levels() {
         })
         .collect::<Vec<_>>()
         .concat();
+    let records = [&[0, 0][..], &records].concat();
     let want = "metadata.version=25\ntransaction.version=2\n";
     assert!(levels(dumped_levels(dump)) == want);
     assert!(levels(record_levels(&records)) == want);

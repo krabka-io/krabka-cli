@@ -28,7 +28,12 @@ fn format_writes_a_bootstrap_manifest_into_an_empty_directory() {
     let dir = tempfile::tempdir().unwrap();
     let out = run_format(&dir, &[]);
     assert!(out.status.code() == Some(0));
-    check!(dir.path().join("bootstrap.json").is_file());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("bootstrap.json")).unwrap()).unwrap();
+    check!(manifest["version"] == 1);
+    let records = std::fs::read(dir.path().join("bootstrap.records.bin")).unwrap();
+    // The 1.x broker refuses a missing or unknown big-endian version header.
+    check!(records.starts_with(&[0, 0]));
     check!(dir.path().join("meta.properties").is_file());
 }
 

@@ -37,7 +37,7 @@ krabka-client-admin = { version = "0.6.0" }
 krabka-client-consumer = { version = "0.6.0" }
 krabka-client-core = { version = "0.6.0" }
 krabka-client-producer = { version = "0.6.0" }
-krabka-format = { version = "0.7.0" }
+krabka-format = { version = "1.0.5" }
 # `KafkaUuid`, Kafka's base64url form of a cluster, topic or directory id.
 krabka-ids = { version = "0.6.0" }
 # The KIP-584 feature registry and the `metadata.version` table that
