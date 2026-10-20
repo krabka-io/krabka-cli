@@ -29,13 +29,13 @@ fn config_directories_follow_kafka_precedence() {
 }
 
 fn encode(records: &[MetadataRecord]) -> Vec<u8> {
-    records
-        .iter()
-        .flat_map(|record| {
+    [0, 0]
+        .into_iter()
+        .chain(records.iter().flat_map(|record| {
             let payload = to_kafka_record(record).unwrap().value.unwrap();
             let length = u32::try_from(payload.len()).unwrap().to_le_bytes();
             length.into_iter().chain(payload.to_vec())
-        })
+        }))
         .collect()
 }
 
@@ -51,9 +51,17 @@ fn bootstrap_records_decode_and_reject_truncation() {
     let records = vec![level("metadata.version", 21), level("group.version", 1)];
     let bytes = encode(&records);
     check!(decode_records(&bytes) == Ok(records));
-    check!(decode_records(&[]) == Ok(Vec::new()));
-    check!(decode_records(&bytes[..2]) == Err("truncated length prefix".to_owned()));
-    check!(decode_records(&bytes[..6]) == Err("truncated record body".to_owned()));
+    check!(decode_records(&[0, 0]) == Ok(Vec::new()));
+    for bytes in [&[][..], &[0][..]] {
+        check!(decode_records(bytes) == Err("missing bootstrap records version".to_owned()));
+    }
+    check!(decode_records(&[0, 1]) == Err("unsupported bootstrap records version 1".to_owned()));
+    check!(
+        decode_records(&bytes[2..]).is_err(),
+        "pre-1.0 framing must be refused"
+    );
+    check!(decode_records(&bytes[..4]) == Err("truncated length prefix".to_owned()));
+    check!(decode_records(&bytes[..8]) == Err("truncated record body".to_owned()));
 }
 
 #[test]
