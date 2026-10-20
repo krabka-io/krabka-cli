@@ -44,7 +44,11 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
       - name: build delivery image
+        if: github.event_name != 'workflow_dispatch'
         run: bazel build -c opt //packaging/apko:image_manifest_blob
+      - name: build multi-platform release image
+        if: github.event_name == 'workflow_dispatch'
+        run: bazel build -c opt //packaging/apko:image_multiarch_index_blob
 
   publish:
     if: github.event_name == 'push'
