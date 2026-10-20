@@ -571,6 +571,7 @@ fn both_readers_resolve_the_same_levels() {
         })
         .collect::<Vec<_>>()
         .concat();
+    let records = [&[0, 0][..], &records].concat();
     let want = "metadata.version=25\ntransaction.version=2\n";
     assert!(levels(dumped_levels(dump)) == want);
     assert!(levels(record_levels(&records)) == want);
