@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["tools/mutants"]
 
 [workspace.package]
-version = "0.4.5"
+version = "0.4.6"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["The Krabka Authors"]
@@ -51,7 +51,7 @@ mutants = "0.0.4"
 parking_lot = "0.12"
 # Drives a real browser for the admin UI's `e2e` suite. Optional, behind that
 # feature: the tests need installed Playwright browsers and a running UI.
-playwright-rs = "0.19.0"
+playwright-rs = "0.20.1"
 # Sends a signal to a child process without `unsafe`.
 rustix = { version = "1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
@@ -155,3 +155,8 @@ krabka-traces = { git = "https://github.com/krabka-io/krabka-o11y", rev = "c6643
 krabka-units = { git = "https://github.com/krabka-io/krabka-protocol", rev = "574e0e385f5d5187979049aa0578f1abf3fa123b" }
 krabka-verified = { git = "https://github.com/krabka-io/krabka-broker", rev = "ac9deff316d38418622b16c237c671df88f57c7a" }
 krabka-voters = { git = "https://github.com/krabka-io/krabka-protocol", rev = "574e0e385f5d5187979049aa0578f1abf3fa123b" }
+
+
+# Cargo Git patches require a different repository URL; both forks contain this fixed commit.
+[patch."https://github.com/robot-head/sspi-rs"]
+sspi = { git = "https://github.com/krabka-io/sspi-rs", rev = "73ad2bcfff41c44b22c7e2400d528faedbf38967" }
