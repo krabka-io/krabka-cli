@@ -114,11 +114,13 @@ sh_test(
     args = select({
         ":linux_arm64": [
             "arm64",
+            module_version(),
             "$(rootpath :image_manifest_blob)",
             "$(rootpath :application_layer)",
         ],
         "//conditions:default": [
             "amd64",
+            module_version(),
             "$(rootpath :image_manifest_blob)",
             "$(rootpath :application_layer)",
         ],
