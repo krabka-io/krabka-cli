@@ -1,5 +1,6 @@
 //! `--config` and `--replica-assignment`, parsed and checked as
-//! `kafka-topics` does before it sends a request.
+//! `kafka-topics` does before it sends a request, with the broker's topic
+//! extensions checked by the same value types.
 
 use std::{collections::BTreeMap, sync::LazyLock};
 
@@ -33,7 +34,8 @@ impl Type {
 
 /// Every topic config that Kafka 4.3.1's `LogConfig` defines, internal ones
 /// included, in definition order. `ConfigDef.parse` checks values in this
-/// order, so the first bad value in it is the one Kafka reports.
+/// order, so the first bad value in it is the one Kafka reports. Krabka's
+/// topic extensions follow the Kafka entries.
 const TOPIC_CONFIGS: &[(&str, Type)] = &[
     ("segment.bytes", Type::Int),
     ("segment.ms", Type::Long),
@@ -69,6 +71,13 @@ const TOPIC_CONFIGS: &[(&str, Type)] = &[
     ("remote.log.copy.disable", Type::Boolean),
     ("remote.log.delete.on.disable", Type::Boolean),
     ("internal.segment.bytes", Type::Int),
+    ("krabka.diskless", Type::Boolean),
+    ("delivery.mode", Type::String),
+    ("delivery.max.delay.ms", Type::Long),
+    ("delivery.schedule.monotonic", Type::Boolean),
+    ("schema.validation.key", Type::Boolean),
+    ("schema.validation.value", Type::Boolean),
+    ("schema.validation.mode", Type::String),
 ];
 
 static CONFIG_SEPARATOR: LazyLock<Regex> =
@@ -232,6 +241,44 @@ mod tests {
                 Ok(&[("min.cleanable.dirty.ratio", "0.5d")]),
             ),
             (&["preallocate=TRUE"], Ok(&[("preallocate", "TRUE")])),
+            (
+                &[
+                    "krabka.diskless=false",
+                    "delivery.mode=scheduled",
+                    "delivery.max.delay.ms=1000",
+                    "delivery.schedule.monotonic=true",
+                    "schema.validation.key=true",
+                    "schema.validation.value=false",
+                    "schema.validation.mode=full",
+                ],
+                Ok(&[
+                    ("krabka.diskless", "false"),
+                    ("delivery.mode", "scheduled"),
+                    ("delivery.max.delay.ms", "1000"),
+                    ("delivery.schedule.monotonic", "true"),
+                    ("schema.validation.key", "true"),
+                    ("schema.validation.value", "false"),
+                    ("schema.validation.mode", "full"),
+                ]),
+            ),
+            (
+                &["krabka.diskless=yes"],
+                Err(
+                    "Invalid value yes for configuration krabka.diskless: Expected value to be either true or false",
+                ),
+            ),
+            (
+                &["delivery.max.delay.ms=soon"],
+                Err(
+                    "Invalid value soon for configuration delivery.max.delay.ms: Not a number of type LONG",
+                ),
+            ),
+            (
+                &["schema.validation.key=1"],
+                Err(
+                    "Invalid value 1 for configuration schema.validation.key: Expected value to be either true or false",
+                ),
+            ),
             (&["retention.ms"], Err(format)),
             (&["a=b=c"], Err(format)),
             (&["="], Err(format)),
