@@ -53,6 +53,7 @@ pub const DIVERGENCES: &[(&str, Difference)] = &[
     ("`--directory-id`", Difference::intended(OUTCOME_AND_STATE, "sets the metadata log directory's id, which an orchestrator has to know before the format runs; kafka-storage has no such flag")),
     ("`--config`", Difference::intended(OUTCOME, "krabka's broker does not read server.properties, so the formatter takes no --config")),
     ("`unstable.feature.versions.enable`", Difference::intended(OUTCOME, "follows from --config: krabka takes it as --unstable-feature-versions-enable")),
+    ("`--release-version` and `--feature` validation", Difference::intended(&[Layer::Stderr], "the supported-feature diagnostic also lists krabka.version, the broker's private persisted-format feature")),
     ("Log directories", Difference::intended(OUTCOME, "follows from --config: krabka takes the directories as --log-dir")),
     ("Metadata log directory with an unreadable `meta.properties`", Difference::intended(OUTCOME_AND_STATE, "a node without a readable metadata log directory cannot start, so krabka refuses before it writes the other directories")),
     ("Directory with foreign files and no `meta.properties`", Difference::intended(OUTCOME_AND_STATE, "krabka refuses with exit 3, so that a mistyped path does not seed a directory full of another program's data")),
@@ -146,7 +147,7 @@ pub const MATRIX: &[FormatRow] = &[
     format_row("unstable-release", &["-t", ID, "--release-version", "4.4"], &["--cluster-id", ID, "--release-version", "4.4"], Expect::Rejected, &["Exit codes", "`unstable.feature.versions.enable`"]),
     format_row("unstable-metadata-version", &["-t", ID, "--feature", "metadata.version=31"], &["--cluster-id", ID, "--feature", "metadata.version=31"], Expect::Rejected, &["Exit codes", "`unstable.feature.versions.enable`"]),
     format_row("release-and-metadata-version", &["-t", ID, "--release-version", "4.0", "--feature", "metadata.version=25"], &["--cluster-id", ID, "--release-version", "4.0", "--feature", "metadata.version=25"], Expect::Rejected, REFUSED),
-    format_row("unknown-feature", &["-t", ID, "--feature", "bogus.version=1"], &["--cluster-id", ID, "--feature", "bogus.version=1"], Expect::Rejected, REFUSED),
+    format_row("unknown-feature", &["-t", ID, "--feature", "bogus.version=1"], &["--cluster-id", ID, "--feature", "bogus.version=1"], Expect::Rejected, &["Exit codes", "`--release-version` and `--feature` validation"]),
     format_row("feature-level-out-of-range", &["-t", ID, "--feature", "transaction.version=9"], &["--cluster-id", ID, "--feature", "transaction.version=9"], Expect::Rejected, REFUSED),
     // Cluster ids.
     format_row("reserved-cluster-id", &["-t", "AAAAAAAAAAAAAAAAAAAAAA"], &["--cluster-id", "AAAAAAAAAAAAAAAAAAAAAA"], Expect::Accepted, &["Reserved cluster ids", "Progress output"]),
@@ -413,6 +414,16 @@ fn run_row(
         // with `krabka format: `.
         view(row.expect, &capture, tool, "format", &clean, &resolved)
     });
+    if row.name == "unknown-feature" {
+        assert!(
+            krabka.stderr
+                == jvm.stderr.replace(
+                    "group.version, kraft.version",
+                    "group.version, krabka.version, kraft.version"
+                ),
+            "only the private feature may differ in the supported-feature diagnostic"
+        );
+    }
     Outcome {
         name: row.name,
         expect: row.expect,
