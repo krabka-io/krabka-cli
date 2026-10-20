@@ -198,7 +198,14 @@ fn qualify_topic_and_config(matrix: &mut Matrix<'_>) {
         assert!(started.elapsed() < Duration::from_secs(30));
         thread::sleep(Duration::from_millis(250));
     };
-    assert!(data(&created_state)[0]["partitions"] == 3);
+    assert!(data(&created_state)[0]["partition_count"] == 3);
+    assert!(
+        data(&created_state)[0]["partitions"]
+            .as_array()
+            .expect("partition details")
+            .len()
+            == 3
+    );
     assert!(data(&created_state)[0]["replication_factor"] == 1);
 
     matrix.record(
