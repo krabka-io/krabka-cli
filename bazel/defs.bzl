@@ -120,6 +120,7 @@ def crate_library(
         edition = edition(),
         rustc_flags = WORKSPACE_RUSTC_FLAGS,
         visibility = ["//visibility:public"],
+        version = native.module_version(),
         deps = deps,
         **kwargs
     )
@@ -167,6 +168,7 @@ def crate_binary(name, crate_root, lib = None, srcs = None, tests = True, **kwar
         edition = edition(),
         rustc_flags = WORKSPACE_RUSTC_FLAGS,
         visibility = ["//visibility:public"],
+        version = native.module_version(),
         deps = all_crate_deps(normal = True) + ([lib] if lib else []),
         **kwargs
     )

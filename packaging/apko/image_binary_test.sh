@@ -2,8 +2,9 @@
 set -euo pipefail
 
 arch="$1"
-manifest="$2"
-layer="$3"
+expected_version="$2"
+manifest="$3"
+layer="$4"
 
 fail() {
     echo "image_binary_test: $*" >&2
@@ -42,5 +43,7 @@ esac
 
 if [[ "$(uname -s)" == "Linux" && "${native}" == true ]]; then
     "${binary}" gres --help >/dev/null
+    version="$("${binary}" --version)"
+    [[ "${version}" == "krabka ${expected_version}" ]] || fail "version [${version}], expected ${expected_version}"
 fi
 echo "image_binary_test: krabka is a ${arch} ELF with the gres subcommand"
