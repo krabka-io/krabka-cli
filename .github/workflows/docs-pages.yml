@@ -1,5 +1,6 @@
 name: docs-pages
 on:
+  pull_request:
   push:
     branches: [main]
   workflow_dispatch:
@@ -17,7 +18,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
   # Both the Pages deployment and setup-aspect's log uploads need the OIDC
   # token, as in `ci.yml`.
   id-token: write
@@ -25,13 +25,13 @@ permissions:
 # One deployment at a time. A push that lands while one is in flight waits
 # rather than cancelling it, so the site never ends between two versions.
 concurrency:
-  group: pages
+  group: pages-${{ github.event_name == 'pull_request' && github.ref || 'production' }}
   cancel-in-progress: false
 
 jobs:
   build:
-    # workflow_dispatch can run from any ref; only main may publish to production Pages.
-    if: github.ref == 'refs/heads/main'
+    # Validate PR archives without publishing; dispatch still builds only main.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     name: render rustdoc
     runs-on: ubuntu-26.04
     timeout-minutes: 45
@@ -58,16 +58,37 @@ jobs:
       - name: assemble the site
         run: aspect rustdoc-site --output site --repo krabka-cli
 
-      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - if: github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
-      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      - name: Install archive-rendering browser
+        run: |
+          python3 -m pip install playwright==1.64.1
+          python3 -m playwright install --with-deps chromium
+
+      - name: Upload and validate API documentation
+        id: pages
+        uses: krabka-io/tooling/actions/upload-rustdoc-pages@3195ea1de8e2ca542e41a9aaf5b632d7a9720711 # PR #14
         with:
           path: site
+          site-url: https://krabka.io/krabka-cli/
+          render-pages: .github/docs-render-pages.json
+
+      - name: Save archive link report
+        if: always() && steps.pages.outputs.link-report != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-link-report
+          path: ${{ steps.pages.outputs.link-report }}
+          if-no-files-found: warn
 
   deploy:
     # workflow_dispatch can run from any ref; only main may publish to production Pages.
     if: github.ref == 'refs/heads/main'
     name: deploy to GitHub Pages
+    permissions:
+      pages: write
+      id-token: write
     needs: build
     runs-on: ubuntu-26.04
     timeout-minutes: 15
