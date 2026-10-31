@@ -270,43 +270,43 @@ crate.annotation(
     strip_prefix = "crates/protocol",
     workspace_cargo_toml = "Cargo.toml",
 )
+
 # Stable rustdoc needs dependency HTML roots to resolve inherited trait links.
 # The patches add documentation metadata only. Versions match Cargo.lock.
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
 http_archive(
     name = "krabka_doc_roots",
-    sha256 = "b634a4d5ec6577297f3418b5329bf480434e530c6f51e86b19861b95386a283a",
-    urls = ["https://github.com/krabka-io/tooling/archive/2d2db15b48c940ab5ebb08bdd93d31bb637524fa.tar.gz"],
-    strip_prefix = "tooling-2d2db15b48c940ab5ebb08bdd93d31bb637524fa",
     build_file_content = 'exports_files(glob(["patches/rustdoc/*.patch"]))',
+    sha256 = "17a6ba990d324d4b1294587b4039ead8aab8b44aaf4173f950480724f96dbe7b",
+    strip_prefix = "tooling-de8015a2ae144099980c6a508ef57b6809f40dfb",
+    urls = ["https://github.com/krabka-io/tooling/archive/de8015a2ae144099980c6a508ef57b6809f40dfb.tar.gz"],
 )
 
 crate.annotation(
     crate = "yansi",
-    version = "1.0.1",
-    patches = ["@krabka_doc_roots//:patches/rustdoc/yansi-1.0.1.patch"],
     patch_args = ["-p1"],
+    patches = ["@krabka_doc_roots//:patches/rustdoc/yansi-1.0.1.patch"],
+    version = "1.0.1",
 )
 crate.annotation(
     crate = "tracing",
-    version = "0.1.44",
-    patches = ["@krabka_doc_roots//:patches/rustdoc/tracing-0.1.44.patch"],
     patch_args = ["-p1"],
+    patches = ["@krabka_doc_roots//:patches/rustdoc/tracing-0.1.44.patch"],
+    version = "0.1.44",
 )
 crate.annotation(
     crate = "opentelemetry",
-    version = "0.32.0",
-    patches = ["@krabka_doc_roots//:patches/rustdoc/opentelemetry-0.32.0.patch"],
     patch_args = ["-p1"],
+    patches = ["@krabka_doc_roots//:patches/rustdoc/opentelemetry-0.32.0.patch"],
+    version = "0.32.0",
 )
-
 crate.annotation(
     crate = "tracing-core",
-    version = "0.1.36",
-    patches = ["@krabka_doc_roots//:patches/rustdoc/tracing-core-0.1.36.patch"],
     patch_args = ["-p1"],
+    patches = ["@krabka_doc_roots//:patches/rustdoc/tracing-core-0.1.36.patch"],
+    version = "0.1.36",
 )
-
 crate.annotation(
     crate = "cargo-mutants",
     gen_binaries = ["cargo-mutants"],
