@@ -66,7 +66,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: krabka-io/krabka-io.github.io
-          ref: 38e80ab31b025645537a65a9d661634b90e37512
+          ref: d17658a34e6a6c3b8c95c539e9259650f52733bf
           path: .site-composition
 
       - name: Require a complete pinned site baseline
@@ -85,7 +85,7 @@ jobs:
         id: pages
         env:
           GH_TOKEN: ${{ github.token }}
-        uses: krabka-io/tooling/actions/upload-rustdoc-pages@2d2db15b48c940ab5ebb08bdd93d31bb637524fa # tooling PR #15
+        uses: krabka-io/tooling/actions/upload-rustdoc-pages@de8015a2ae144099980c6a508ef57b6809f40dfb # tooling PR #15
         with:
           path: site
           site-url: https://krabka.io/krabka-cli/
