@@ -3,6 +3,20 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/docs-pages.yml
+      - .aspect/**
+      - bazel/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - MODULE.bazel
+      - MODULE.bazel.lock
+      - MODULE.aspect
+      - .bazelrc
+      - .bazelversion
+      - rust-toolchain.toml
 
 # Publish the rustdoc set to GitHub Pages.
 #
@@ -24,13 +38,13 @@ permissions:
 # One deployment at a time. A push that lands while one is in flight waits
 # rather than cancelling it, so the site never ends between two versions.
 concurrency:
-  group: pages
+  group: pages-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
-    # Bootstrap the retained baseline on main before enabling composition validation.
-    if: github.ref == 'refs/heads/main'
+    # Pull requests verify the archive without deploying it.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     name: render rustdoc
     runs-on: ubuntu-26.04
     timeout-minutes: 45
@@ -60,16 +74,16 @@ jobs:
       - if: github.ref == 'refs/heads/main'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
-      # Packaging only: full-site link validation is a separate rollout once all
-      # main-branch baseline archives exist. The standalone upload-rustdoc-pages
-      # action also checks cross-site links, so it cannot bootstrap this baseline.
+      # Use staging and same-component archive checks without requiring other
+      # components' retained archives. Full-site composition remains separate.
       - name: Checkout pinned packaging tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: krabka-io/tooling
-          ref: de8015a2ae144099980c6a508ef57b6809f40dfb
+          ref: fd30652ceeae95fa7ee8288aa105bce6f109904f
           path: .docs-packaging
           sparse-checkout: actions/upload-rustdoc-pages
+          persist-credentials: false
 
       - name: Stage public docs and linked hidden source pages
         run: |
@@ -88,6 +102,12 @@ jobs:
 
       - name: Verify packaged files and Source links
         run: python3 .docs-packaging/actions/upload-rustdoc-pages/pages_site.py verify "${DOCS_STAGED_PATH}" "${RUNNER_TEMP}/artifact.tar"
+
+      # The default synthetic URL checks this component only. External links,
+      # including krabka.io/api, need the separate composition rollout.
+      - name: Verify final archive links and assets
+        timeout-minutes: 5
+        run: python3 .docs-packaging/actions/upload-rustdoc-pages/archive_links.py "${RUNNER_TEMP}/artifact.tar"
 
   deploy:
     # workflow_dispatch can run from any ref; only main may publish to production Pages.
