@@ -1,33 +1,11 @@
 name: docs-pages
 on:
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - .github/workflows/docs-pages.yml
-      - .aspect/**
-      - bazel/**
-      - crates/**
-      - Cargo.toml
-      - Cargo.lock
-      - MODULE.bazel
-      - MODULE.bazel.lock
-      - MODULE.aspect
-      - .bazelrc
-      - .bazelversion
-      - rust-toolchain.toml
 
-# Publish the rustdoc set to GitHub Pages.
-#
-# The `docs` job in `ci.yml` renders the same set on every run and uploads it
-# as an artifact nobody browses. This renders it once more from `main`, adds a
-# landing page that lists every crate, and deploys it. The repository's Pages
-# source must be set to "GitHub Actions" for the deployment to succeed.
-#
-# It is its own workflow rather than a job in `ci.yml` because a deployment
-# needs `pages: write` and its own concurrency group, and because a failed
-# deploy should not turn the merge gate red.
+# CI calls this workflow for pull requests, merge groups and main pushes so
+# archive validation feeds its required gate. Only main may publish Pages.
+# Manual dispatch also supports validating another ref without publishing it.
 
 permissions:
   contents: read
@@ -43,8 +21,7 @@ concurrency:
 
 jobs:
   build:
-    # Pull requests verify the archive without deploying it.
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    # Pull requests and merge groups verify the archive without deploying it.
     name: render rustdoc
     runs-on: ubuntu-26.04
     timeout-minutes: 45
@@ -58,8 +35,7 @@ jobs:
           disk-cache: ${{ github.workflow }}
           repository-cache: true
 
-      # The same query `ci.yml`'s docgen step runs, so the two never disagree
-      # about which crates have documentation.
+      # Render every crate once for the raw artifact and the validated site.
       - name: docgen
         run: |
           set -euo pipefail
@@ -67,6 +43,12 @@ jobs:
           bazel query 'kind("rust_doc rule", //crates/...)' > "${targets}"
           test -s "${targets}"
           bazel build --target_pattern_file="${targets}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdoc
+          path: bazel-bin/crates/**/*.rustdoc
+          if-no-files-found: error
 
       - name: assemble the site
         run: aspect rustdoc-site --output site --repo krabka-cli
