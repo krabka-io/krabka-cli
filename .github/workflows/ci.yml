@@ -88,29 +88,12 @@ jobs:
   docs:
     name: docgen
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 45
-    steps:
-      - name: Keep temporary files off the size-limited /tmp tmpfs
-        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
-      - uses: actions/checkout@v7
-      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
-        with:
-          bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}-docs
-          repository-cache: true
-      - name: build rustdoc
-        run: |
-          set -euo pipefail
-          targets="${RUNNER_TEMP}/rustdoc-targets.txt"
-          bazel query 'kind("rust_doc rule", //crates/...)' > "${targets}"
-          test -s "${targets}"
-          bazel build --target_pattern_file="${targets}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: rustdoc
-          path: bazel-bin/crates/**/*.rustdoc
-          if-no-files-found: error
+    permissions:
+      contents: read
+      id-token: write
+      pages: write
+    uses: ./.github/workflows/docs-pages.yml
+
   # The container-driven suites: `conformance` compares every krabka command with
   # the `kafka-*` tool it copies, against a digest-pinned Kafka oracle. Nightly
   # only, beside the mutation sweep: it starts one Kafka container per command,
