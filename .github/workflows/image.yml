@@ -1,22 +1,9 @@
 name: image
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/image.yml
-      - .github/actions/free-disk-space/**
-      - BUILD.bazel
-      - MODULE.bazel
-      - MODULE.bazel.lock
-      - Cargo.lock
-      - Cargo.toml
-      - bazel/**
-      - crates/**
-      - packaging/apko/**
   push:
     branches: [main]
     tags: ['v*']
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,29 +16,6 @@ env:
   IMAGE: ghcr.io/krabka-io/krabka-cli
 
 jobs:
-  validate:
-    if: github.event_name != 'push'
-    name: build
-    runs-on: ubuntu-26.04
-    timeout-minutes: 90
-    steps:
-      - name: Keep temporary files off the size-limited /tmp tmpfs
-        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/free-disk-space
-      - uses: aspect-build/setup-aspect@1ccd1e095c68556648eb5482231283e445e3dc5e # 2026.34
-        with:
-          bazelisk-cache: true
-          repository-cache: true
-      - name: build delivery image
-        if: github.event_name != 'workflow_dispatch'
-        run: bazel build -c opt //packaging/apko:image_manifest_blob
-      - name: build multi-platform release image
-        if: github.event_name == 'workflow_dispatch'
-        run: bazel build -c opt //packaging/apko:image_multiarch_index_blob
-
   publish:
     if: github.event_name == 'push'
     name: build · publish
